@@ -47,7 +47,7 @@ _PHASES = {
     "exported": "检查 FBX 输出",
 }
 
-_WORKER = (f"TEXTURE_SLOTS = {_TEXTURE_SLOTS!r}\n"
+_IMPORTER = (f"TEXTURE_SLOTS = {_TEXTURE_SLOTS!r}\n"
            f"TEXTURE_TYPES = {tuple(sorted(_TEXTURE_TYPES))!r}\n"
            f"TEXTURE_MANIFEST_FILE = {_TEXTURE_MANIFEST_FILE!r}\n"
            f"TEXTURE_MANIFEST_BYTES = {_TEXTURE_MANIFEST_BYTES}\n"
@@ -64,10 +64,12 @@ from pathlib import Path, PureWindowsPath
 import bpy
 
 
-phase_file = Path(os.environ["NEXUS_MAX_DECODE_STATUS"])
+phase_file = None
 
 
 def mark_phase(phase):
+    if phase_file is None:
+        return
     temporary = phase_file.with_suffix(".tmp")
     temporary.write_text(phase, encoding="ascii")
     os.replace(temporary, phase_file)
@@ -310,25 +312,20 @@ def preserve_legacy_corona_images(reader, material, references):
             continue
 
 
-if bpy.app.version < (4, 2, 0):
-    raise RuntimeError("NEXUS_MAX_DECODE_BLENDER_VERSION")
-
-bpy.ops.wm.read_factory_settings(use_empty=True)
-extension = Path(os.environ["NEXUS_MAX_DECODE_EXTENSION"])
-spec = importlib.util.spec_from_file_location(
-    "_nexus_pinned_io_scene_max", extension / "__init__.py",
-    submodule_search_locations=[str(extension)],
-)
-decoder = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = decoder
-spec.loader.exec_module(decoder)
-decoder.register()
-reader = importlib.import_module(spec.name + ".import_max")
-make_scene = reader.make_scene
-set_metadata = reader.ByteArrayChunk.set_meta_data
-get_metadata = reader.get_metadata
-get_bitmap = reader.get_bitmap
-build_corona = reader.get_corona_material
+def configure_reader(module):
+    global reader, make_scene, set_metadata, get_metadata, get_bitmap, build_corona
+    reader = module
+    make_scene = reader.make_scene
+    set_metadata = reader.ByteArrayChunk.set_meta_data
+    get_metadata = reader.get_metadata
+    get_bitmap = reader.get_bitmap
+    build_corona = reader.get_corona_material
+    reader.make_scene = build_scene
+    reader.ByteArrayChunk.set_meta_data = set_asset_metadata
+    reader.get_metadata = find_asset_path
+    reader.get_bitmap = find_bitmap_path
+    reader.get_corona_material = build_corona_material
+    reader.nexus_source_materials = {}
 
 
 def set_asset_metadata(chunk, data):
@@ -587,7 +584,7 @@ scene_object_counts = [0, 0, 0, 0]
 max_light_settings = {}
 
 
-def build_render_objects(context, collection, scene, mscale):
+def build_render_objects(context, collection, scene, mscale, previous_objects):
     matrices = {}
     for node in scene.children:
         if reader.get_guid(node) != 1 or reader.get_super_id(node) != 1:
@@ -617,7 +614,9 @@ def build_render_objects(context, collection, scene, mscale):
             collection.objects.link(obj)
             source_parent = reader.get_node_parent(node)
             if source_parent is not None:
-                obj.parent = bpy.data.objects.get(reader.get_node_name(source_parent))
+                parent = collection.objects.get(reader.get_node_name(source_parent))
+                if parent is not None and parent.as_pointer() not in previous_objects:
+                    obj.parent = parent
             obj.matrix_world = world
             if metadata is not None:
                 if metadata["source"] == "corona_light":
@@ -711,31 +710,59 @@ def save_render_settings(output, meters_per_unit):
 
 def build_scene(context, settings, mscale, transform, parent):
     mark_phase("building")
-    make_scene(context, settings, mscale, transform, parent)
     collection = context.view_layer.active_layer_collection.collection
-    build_render_objects(context, collection, parent, mscale)
+    previous_objects = {obj.as_pointer() for obj in collection.objects}
+    make_scene(context, settings, mscale, transform, parent)
+    build_render_objects(context, collection, parent, mscale, previous_objects)
 
 
-reader.make_scene = build_scene
-reader.ByteArrayChunk.set_meta_data = set_asset_metadata
-reader.get_metadata = find_asset_path
-reader.get_bitmap = find_bitmap_path
-reader.get_corona_material = build_corona_material
-reader.nexus_source_materials = {}
-
-try:
-    source = Path(os.environ["NEXUS_MAX_DECODE_SOURCE"])
-    output = Path(os.environ["NEXUS_MAX_DECODE_OUTPUT"])
+def prepare_images(source):
     images = ProjectImages(source.parent, reader.load_image)
     reader.load_image = images.load
+    return images
+
+
+def has_renderable_objects(objects):
+    return any(obj.type in {"CAMERA", "LIGHT"}
+               or obj.type == "MESH" and len(obj.data.vertices) >= 3 and len(obj.data.polygons)
+               for obj in objects)
+
+
+def set_mesh_shading(meshes):
+    for mesh in meshes:
+        # MAX meshes without imported shading data need a geometric fallback.
+        if not (mesh.has_custom_normals or mesh.attributes.get("sharp_edge") or mesh.attributes.get("sharp_face")):
+            mesh.set_sharp_from_angle(angle=math.radians(60))
+"""
+
+
+_WORKER = _IMPORTER + """
+
+if bpy.app.version < (4, 2, 0):
+    raise RuntimeError("NEXUS_MAX_DECODE_BLENDER_VERSION")
+
+phase_file = Path(os.environ["NEXUS_MAX_DECODE_STATUS"])
+bpy.ops.wm.read_factory_settings(use_empty=True)
+extension = Path(os.environ["NEXUS_MAX_DECODE_EXTENSION"])
+spec = importlib.util.spec_from_file_location(
+    "_nexus_pinned_io_scene_max", extension / "__init__.py",
+    submodule_search_locations=[str(extension)],
+)
+decoder = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = decoder
+spec.loader.exec_module(decoder)
+decoder.register()
+
+try:
+    configure_reader(importlib.import_module(spec.name + ".import_max"))
+    source = Path(os.environ["NEXUS_MAX_DECODE_SOURCE"])
+    output = Path(os.environ["NEXUS_MAX_DECODE_OUTPUT"])
+    images = prepare_images(source)
     mark_phase("reading")
     result = bpy.ops.import_scene.max(
         filepath=str(source), directory=str(source.parent), use_image_search=True,
     )
-    has_content = any(obj.type in {"CAMERA", "LIGHT"}
-                      or obj.type == "MESH" and len(obj.data.vertices) >= 3 and len(obj.data.polygons)
-                      for obj in bpy.context.scene.objects)
-    if "FINISHED" not in result or not has_content:
+    if "FINISHED" not in result or not has_renderable_objects(bpy.context.scene.objects):
         raise RuntimeError("NEXUS_MAX_DECODE_NO_GEOMETRY")
     meters_per_unit = scene_meters_per_unit(reader)
     if meters_per_unit is None:
@@ -748,10 +775,7 @@ try:
     if not math.isclose(units.scale_length, meters_per_unit, rel_tol=1e-6):
         raise RuntimeError("NEXUS_MAX_DECODE_UNKNOWN_UNITS")
     mark_phase("exporting")
-    for mesh in bpy.data.meshes:
-        # MAX meshes without imported shading data need a geometric fallback.
-        if not (mesh.has_custom_normals or mesh.attributes.get("sharp_edge") or mesh.attributes.get("sharp_face")):
-            mesh.set_sharp_from_angle(angle=math.radians(60))
+    set_mesh_shading(bpy.data.meshes)
     result = bpy.ops.export_scene.fbx(
         filepath=str(output), path_mode="COPY",
         embed_textures=True, use_selection=False,
@@ -783,15 +807,20 @@ def _conversion_helpers():
     return module
 
 
-def _unpack_extension(directory):
+def _read_archive(host):
     archive = Path(__file__).with_name(_ARCHIVE)
     try:
         with archive.open("rb") as handle:
             package = handle.read(_ARCHIVE_SIZE + 1)
     except OSError as error:
-        raise RuntimeError("缺少 Nexus 的 MAX 直接解析组件，请更新 Cinema 4D 桥接") from error
+        raise RuntimeError(f"缺少 Nexus 的 MAX 解析组件，请更新 {host} 桥接") from error
     if len(package) != _ARCHIVE_SIZE or hashlib.sha256(package).hexdigest() != _ARCHIVE_SHA256:
-        raise RuntimeError("MAX 直接解析组件校验失败，请更新 Cinema 4D 桥接")
+        raise RuntimeError(f"MAX 解析组件校验失败，请更新 {host} 桥接")
+    return package
+
+
+def _unpack_extension(directory, host="Cinema 4D"):
+    package = _read_archive(host)
     extension = directory / "io_scene_max"
     extension.mkdir()
     with zipfile.ZipFile(io.BytesIO(package)) as source:
@@ -812,9 +841,72 @@ def _unpack_extension(directory):
                 nexus_source_materials[source_key] = objMaterial
 """
     if code.count(lookup) != 1:
-        raise RuntimeError("MAX 直接解析组件不兼容，请更新 Cinema 4D 桥接")
+        raise RuntimeError(f"MAX 解析组件不兼容，请更新 {host} 桥接")
     importer.write_text(code.replace(lookup, shared_lookup, 1), encoding="utf-8")
     return extension
+
+
+def check_blender_package():
+    _read_archive("Blender")
+
+
+def import_into_blender(path, id_inventory):
+    """Apply the same pinned MAX decoder directly to Blender's current scene."""
+    import bpy
+    from mathutils import Matrix
+
+    source = Path(path).resolve(strict=True)
+    context = bpy.context
+    if context.mode != "OBJECT":
+        raise RuntimeError("请先切换至 Blender 的物体模式，再导入 MAX")
+    slot = context.view_layer.objects
+    camera = context.scene.camera
+    selected = tuple(context.selected_objects)
+    active = slot.active
+    before = id_inventory()
+    if context.window is not None:
+        context.window.cursor_modal_set("WAIT")
+    try:
+        with tempfile.TemporaryDirectory(prefix="nexus-max-import-") as directory:
+            extension = _unpack_extension(Path(directory), "Blender")
+            spec = importlib.util.spec_from_file_location("_nexus_max_reader", extension / "import_max.py")
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            # Evaluate the shared decoder functions without the standalone FBX worker.
+            decoder = {"__name__": "_nexus_max_importer"}
+            exec(compile(_IMPORTER, str(__file__), "exec"), decoder)
+            decoder["configure_reader"](reader)
+            decoder["prepare_images"](source)
+            reader.read(context, str(source), Matrix.Identity(4),
+                        {"MATERIAL", "UV", "PRIMITIVE", "EMPTY", "ARMATURE"}, True, True)
+            objects = [obj for obj in slot if obj.as_pointer() not in before]
+            if not decoder["has_renderable_objects"](objects):
+                raise RuntimeError("此 MAX 文件没有可导入的网格、相机或灯光")
+            meters = decoder["scene_meters_per_unit"](reader)
+            if meters is None:
+                raise RuntimeError("无法确定此 MAX 的场景单位，请从 3ds Max 导出 FBX 后再导入")
+            scale = Matrix.Scale(meters / context.scene.unit_settings.scale_length, 4)
+            members = set(objects)
+            for obj in objects:
+                if obj.parent not in members:
+                    obj.matrix_world = scale @ obj.matrix_world
+            meshes = [mesh for mesh in bpy.data.meshes if mesh.as_pointer() not in before]
+            decoder["set_mesh_shading"](meshes)
+            context.view_layer.update()
+    except Exception as error:
+        created = [value for pointer, value in id_inventory().items() if pointer not in before]
+        if created:
+            bpy.data.batch_remove(ids=created)
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        for obj in selected:
+            obj.select_set(True)
+        slot.active = active
+        raise RuntimeError(f"MAX 导入失败：{error}") from error
+    finally:
+        context.scene.camera = camera
+        if context.window is not None:
+            context.window.cursor_modal_restore()
 
 
 def _log_tail(log):

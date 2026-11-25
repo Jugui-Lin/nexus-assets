@@ -1,9 +1,12 @@
 use serde::Serialize;
 use std::time::Duration;
 use tauri::Manager;
-use tauri_plugin_updater::{Config, Update, UpdaterExt};
+use tauri_plugin_updater::{Config, Update, Updater, UpdaterExt};
 use tokio::sync::Mutex;
 use url::Url;
+
+#[cfg(any(windows, test))]
+mod cache;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -76,17 +79,57 @@ pub(crate) fn register(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-async fn find_update(app: &tauri::AppHandle) -> Result<Option<Update>, String> {
-    let updater = app
-        .updater_builder()
+fn build_updater(app: &tauri::AppHandle) -> Result<Updater, String> {
+    app.updater_builder()
         .configure_client(|client| client.https_only(true))
         .timeout(DOWNLOAD_TIMEOUT)
         .build()
-        .map_err(|error| format!("无法初始化更新检查（{error}）"))?;
+        .map_err(|error| format!("无法初始化更新检查（{error}）"))
+}
+
+async fn find_update(app: &tauri::AppHandle) -> Result<Option<Update>, String> {
+    let updater = build_updater(app)?;
     tokio::time::timeout(CHECK_TIMEOUT, updater.check())
         .await
         .map_err(|_| "检查更新超时，请稍后重试".to_owned())?
         .map_err(|error| format!("检查更新失败（{error}）"))
+}
+
+#[cfg(windows)]
+fn pending_update_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_cache_dir()
+        .map(|path| path.join("nexus-prepared-update.bin"))
+        .map_err(|error| format!("无法确定更新缓存目录（{error}）"))
+}
+
+pub(crate) fn install_cached_on_startup(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    if app.try_state::<UpdateInstall>().is_some() {
+        let result = (|| {
+            let Some((manifest, installer)) = cache::take(&pending_update_path(app)?)
+                .map_err(|error| format!("无法读取更新缓存（{error}）"))?
+            else {
+                return Ok::<_, String>(());
+            };
+            // Restore selects the target and checks that the release is an upgrade.
+            // Install verifies its versioned signature before launching the installer.
+            if let Some(update) = build_updater(app)?
+                .restore_update(manifest)
+                .map_err(|error| format!("无法识别待安装更新（{error}）"))?
+            {
+                update
+                    .install(installer)
+                    .map_err(|error| format!("安装缓存更新失败（{error}）"))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("{error}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 async fn expected_update(app: &tauri::AppHandle, version: &str) -> Result<Update, String> {
@@ -140,7 +183,19 @@ pub(crate) async fn prepare_nexus_update(
         .download(|_, _| {}, || {})
         .await
         .map_err(|error| format!("下载或验证更新失败（{error}）"))?;
-    *prepared = Some(PreparedUpdate { release, installer });
+    let staged = PreparedUpdate { release, installer };
+    #[cfg(windows)]
+    let staged = {
+        let path = pending_update_path(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            cache::store(&path, &staged.release.raw_json, &staged.installer)?;
+            Ok::<_, std::io::Error>(staged)
+        })
+        .await
+        .map_err(|error| format!("无法保存待安装更新（{error}）"))?
+        .map_err(|error| format!("无法保存待安装更新（{error}）"))?
+    };
+    *prepared = Some(staged);
     Ok(())
 }
 
@@ -214,6 +269,8 @@ fn install_when_safe(
     }
     // The last activity checks and launching the already verified installer
     // have no async gap. Keep file-operation leases until Tauri hands off.
+    cache::discard(&pending_update_path(app)?)
+        .map_err(|error| format!("无法移除待安装更新缓存（{error}）"))?;
     prepared
         .release
         .install(&prepared.installer)
@@ -247,11 +304,11 @@ pub(crate) async fn apply_prepared_nexus_update(
         .as_ref()
         .filter(|item| item.release.version == version)
         .ok_or("待安装版本已变更，请重新准备更新")?;
-    if !install_when_safe(&app, staged, !install_now.unwrap_or_default())? {
-        return Ok(false);
+    let result = install_when_safe(&app, staged, !install_now.unwrap_or_default());
+    if !matches!(&result, Ok(false)) {
+        *prepared = None;
     }
-    *prepared = None;
-    Ok(true)
+    result
 }
 
 #[tauri::command]

@@ -23,7 +23,9 @@ pub use windows_drag::*;
 #[cfg(target_os = "windows")]
 mod windows_drag {
     use super::AppState;
-    use crate::{placement::PlacementFile, resolve_asset, team_desktop::Desktop};
+    use crate::{
+        placement::PlacementFile, resolve_asset, session_supports_asset, team_desktop::Desktop,
+    };
     use nexus_core::{clean_path, compatible, now, team::mapped_file};
     use serde::Serialize;
     use serde_json::Value;
@@ -365,8 +367,13 @@ mod windows_drag {
             if let Some(handoff) = c4d_scene_handoff(&self.state, pid, &self.files) {
                 return Some(handoff);
             }
-            let (session, host) =
-                eligible_target(&self.state, pid, |item| item["placement"] == true)?;
+            if let Some(handoff) = missing_blender_max_bridge(&self.state, pid, &self.files) {
+                return Some(handoff);
+            }
+            let (session, host) = eligible_target(&self.state, pid, |item| {
+                item["placement"] == true
+                    && self.files.iter().all(|file| session_supports_asset(item, &file.ext))
+            })?;
             let (id, marker) = self
                 .state
                 .placement
@@ -462,7 +469,7 @@ mod windows_drag {
         if let (true, Some((session, _))) = (direct, &legacy) {
             return Some(Handoff::C4dImport(session.clone()));
         }
-        if legacy.is_some() || is_cinema_4d_process(pid) {
+        if legacy.is_some() || is_named_process(pid, "Cinema 4D.exe") {
             return Some(Handoff::Blocked(
                 "拖入模型或工程需要 Cinema 4D 导入桥接。请在 DCC 连接中心安装或更新桥接并重启 Cinema 4D。",
             ));
@@ -470,15 +477,39 @@ mod windows_drag {
         None
     }
 
+    fn missing_blender_max_bridge(
+        state: &AppState,
+        pid: u32,
+        files: &[PlacementFile],
+    ) -> Option<Handoff> {
+        if !files.iter().any(|file| file.ext.eq_ignore_ascii_case("max"))
+            || eligible_target(state, pid, |item| {
+                item["dcc"] == "blender"
+                    && item["placement"] == true
+                    && session_supports_asset(item, "max")
+            })
+            .is_some()
+        {
+            return None;
+        }
+        let blender = eligible_target(state, pid, |item| item["dcc"] == "blender").is_some()
+            || is_named_process(pid, "blender.exe");
+        blender.then_some(Handoff::Blocked(
+            "拖入 MAX 需要新版 Blender 桥接。请在 DCC 连接中心安装或更新插件并重启 Blender。",
+        ))
+    }
+
     fn released_drop(state: &AppState, pid: u32, files: &[PlacementFile]) -> DropOutcome {
-        match c4d_scene_handoff(state, pid, files) {
+        match c4d_scene_handoff(state, pid, files)
+            .or_else(|| missing_blender_max_bridge(state, pid, files))
+        {
             Some(Handoff::C4dImport(session)) => DropOutcome::C4dImport(session),
             Some(Handoff::Blocked(message)) => DropOutcome::Blocked(message),
             _ => DropOutcome::ReleasedBeforeStart,
         }
     }
 
-    fn is_cinema_4d_process(pid: u32) -> bool {
+    fn is_named_process(pid: u32, name: &str) -> bool {
         let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
         else {
             return false;
@@ -499,7 +530,7 @@ mod windows_drag {
             let path = String::from_utf16_lossy(&image[..length as usize]);
             Path::new(&path)
                 .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("Cinema 4D.exe"))
+                .is_some_and(|file| file.eq_ignore_ascii_case(name))
         })
     }
 
@@ -776,7 +807,7 @@ mod windows_drag {
         #[test]
         fn shell_can_read_the_only_marker_after_release_switches_paths() {
             let _ole = OleApartment::initialize().unwrap();
-            let asset = PathBuf::from(r"C:\素材\椅子.obj");
+            let asset = PathBuf::from(r"C:\素材\椅子.max");
             let marker = PathBuf::from(r"C:\Nexus\viewport-drags\test.nexusdrop");
             let format = drop_format();
             let data = file_data_object(&[asset]).unwrap();

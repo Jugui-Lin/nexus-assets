@@ -92,14 +92,14 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
     }
   }
 
-  async function detect() {
+  async function detect(notice = '') {
     if (!native || busy) return;
     busy = 'detect';
-    message('正在检查已安装的创作软件…');
+    message(notice || '正在检查已安装的创作软件…', Boolean(notice));
     render();
     try {
       updateDetection(await api('bridge_install_status'));
-      message('');
+      message(notice, Boolean(notice));
     } catch (error) {
       message('检测失败 · ' + (error?.message || error), true);
     } finally {
@@ -177,7 +177,7 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
     }
   }
 
-  refreshButton.addEventListener('click', detect);
+  refreshButton.addEventListener('click', () => detect());
   cards.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
@@ -196,10 +196,11 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
   return {
     render,
     refresh: detect,
-    show() {
+    show(notice) {
       open();
       render();
-      void detect();
+      if (notice) message(notice, true);
+      void detect(notice);
     },
   };
 }

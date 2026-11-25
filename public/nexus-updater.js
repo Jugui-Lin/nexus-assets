@@ -49,7 +49,7 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
     installNow.hidden = !readyToInstall(version);
     if (message) status.textContent = message;
     else if (!version) status.textContent = update?.configured ? '已是最新版本' : 'GitHub 更新源待配置';
-    else if (preparedVersion === version) status.textContent = `${version} 已就绪，空闲时自动安装并重启`;
+    else if (preparedVersion === version) status.textContent = `${version} 已就绪，空闲时或下次启动时自动安装`;
     else status.textContent = update.automatic ? `发现新版 ${version}，将自动下载` : `GitHub 已发布 ${version}`;
   }
 

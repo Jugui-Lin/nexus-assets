@@ -56,7 +56,9 @@ impl PlacementTickets {
     ) -> Result<(Uuid, Option<PathBuf>), String> {
         if files.is_empty()
             || files.len() > MAX_FILES
-            || !files.iter().all(|file| compatible(dcc, &file.ext))
+            || !files
+                .iter()
+                .all(|file| compatible(dcc, &file.ext.to_ascii_lowercase()))
         {
             return Err("这批资产不支持交互放置".into());
         }
@@ -208,13 +210,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let tickets = PlacementTickets::default();
         let (id, marker) = tickets
-            .create(temp.path(), "blender-pid", "blender", &[file("obj")])
+            .create(temp.path(), "blender-pid", "blender", &[file("obj"), file("MAX")])
             .unwrap();
         let marker = marker.unwrap();
         assert!(marker.is_file());
         assert!(fs::read(&marker).unwrap().is_empty());
         assert!(tickets.redeem(id, "another-pid").is_none());
-        assert_eq!(tickets.redeem(id, "blender-pid").unwrap()[0].name, "示例");
+        let files = tickets.redeem(id, "blender-pid").unwrap();
+        assert_eq!(files[0].name, "示例");
+        assert_eq!(files[1].ext, "MAX");
         assert!(!marker.exists());
         assert!(tickets.redeem(id, "blender-pid").is_none());
         assert!(tickets.finish(id, "blender-pid", "cancelled"));

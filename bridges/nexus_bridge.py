@@ -12,6 +12,7 @@ import urllib.error
 import builtins
 
 LOCAL_HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+blender_max_import = None
 
 
 def import_asset(dcc, file_path):
@@ -20,7 +21,11 @@ def import_asset(dcc, file_path):
     ext = os.path.splitext(file_path)[1].lower()
     if dcc == "blender":
         import bpy
-        if ext == ".blend":
+        if ext == ".max":
+            if blender_max_import is None:
+                raise RuntimeError("请在 DCC 连接中心更新 Blender 桥接并重启，以导入 MAX")
+            blender_max_import(file_path)
+        elif ext == ".blend":
             with bpy.data.libraries.load(file_path, link=False) as (source, target):
                 target.objects = list(source.objects)
             for obj in target.objects:
@@ -121,6 +126,7 @@ class Bridge:
                     result = self.request("/bridge/register", {
                         "dcc": self.config["dcc"], "pid": os.getpid(), "label": self.label,
                         "placement": self.config.get("placement", False),
+                        "maxImport": self.config["dcc"] == "blender" and blender_max_import is not None,
                         "smartImport": self.smart_import is not None,
                         "projectExport": bool(getattr(self.smart_import, "project_export", None)),
                         "sceneImportOptions": bool(getattr(self.smart_import, "import_progress", None)),

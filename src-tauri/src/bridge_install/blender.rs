@@ -8,6 +8,10 @@ use std::{
 const STARTUP_FILE: &str = "startup/nexus_assets_bridge.py";
 const BOOTSTRAP: &str = include_str!("../../../bridges/install/blender_startup.py");
 const PLACEMENT: &str = include_str!("../../../bridges/install/blender_placement.py");
+const MAX_DECODE: &[u8] = include_bytes!("../../../bridges/install/c4d_max_decode.py");
+const MAX_ADDON: &[u8] = include_bytes!("../../../bridges/install/nexus_io_scene_max_1_9_2.zip");
+const MAX_ADDON_LICENSE: &[u8] =
+    include_bytes!("../../../bridges/install/nexus_io_scene_max_1_9_2_LICENSE.txt");
 
 /// Find the highest supported version actually bundled alongside this Blender executable.
 fn bundled_version(resources: &Path, minimum: (u16, u16)) -> Option<(u16, u16)> {
@@ -161,6 +165,12 @@ pub(super) fn targets(env: &InstallEnvironment) -> Vec<InstallTarget> {
                         InstallFile::managed(
                             "modules/nexus_assets_placement.py",
                             PLACEMENT.as_bytes(),
+                        ),
+                        InstallFile::managed("modules/nexus_assets_max_decode.py", MAX_DECODE),
+                        InstallFile::managed("modules/nexus_io_scene_max_1_9_2.zip", MAX_ADDON),
+                        InstallFile::managed(
+                            "modules/nexus_io_scene_max_1_9_2_LICENSE.txt",
+                            MAX_ADDON_LICENSE,
                         ),
                     ],
                     "重启 Blender 后自动连接，支持三维视口交互放置。",

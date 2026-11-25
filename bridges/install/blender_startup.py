@@ -1,4 +1,5 @@
 """Nexus Assets startup module for Blender."""
+from functools import partial
 import importlib.util
 from pathlib import Path
 
@@ -25,12 +26,20 @@ def _connect():
         print("Nexus Assets bridge:", error)
         return None
     try:
-        placement_path = Path(__file__).resolve().parent.parent / "modules" / "nexus_assets_placement.py"
+        modules = Path(__file__).resolve().parent.parent / "modules"
+        placement_path = modules / "nexus_assets_placement.py"
         placement = _load("nexus_assets_placement", placement_path)
         placement.register(runtime)
         _placement = placement
     except (OSError, RuntimeError, ImportError, ValueError) as error:
         print("Nexus Assets viewport placement:", error)
+    if _placement is not None:
+        try:
+            decoder = _load("nexus_assets_max_decode", modules / "nexus_assets_max_decode.py")
+            decoder.check_blender_package()
+            runtime.blender_max_import = partial(decoder.import_into_blender, id_inventory=_placement._id_inventory)
+        except (OSError, RuntimeError, ImportError, ValueError) as error:
+            print("Nexus Assets MAX importer:", error)
     try:
         _bridge = runtime.connect("blender", placement=_placement is not None)
     except (OSError, ValueError, RuntimeError) as error:

@@ -380,7 +380,7 @@ class OctaneSceneLightTests(unittest.TestCase):
         self.assertIn("已设置 1 盏", report)
         return light.GetTag(MATERIALS._OCT_LIGHT)
 
-    def test_physical_size_is_not_multiplied_by_fbx_transform_again(self):
+    def test_viewport_size_uses_document_units_and_preserves_the_fbx_transform(self):
         settings = dict(source="corona_light", shape="rectangle", width=.32, height=.20, units=0, intensity=24)
         for frame, doc_scale in (((100.0, 100.0, 100.0), 100.0), ((.1, .1, .1), 100.0), ((10, 40, 50), 1.0)):
             with self.subTest(world_scale=frame, document_scale=doc_scale):
@@ -388,18 +388,18 @@ class OctaneSceneLightTests(unittest.TestCase):
                 matrix = light.GetMg()
                 tag = self.convert(light, settings, doc_scale)
                 world = light.GetMg()
-                self.assertEqual(world.off, matrix.off)
+                self.assertIs(world, matrix)
                 self.assertEqual(light["type"], "area")
-                self.assertAlmostEqual(light["size_x"] * world.v1.GetLength(), .32 * doc_scale)
-                self.assertAlmostEqual(light["size_y"] * world.v2.GetLength(), .20 * doc_scale)
-                self.assertAlmostEqual(tag[self.fields["LIGHTTAG_POWER"]], 24 * math.pi * .32 * .20 / 10)
+                self.assertAlmostEqual(light["size_x"], .32 * doc_scale)
+                self.assertAlmostEqual(light["size_y"], .20 * doc_scale)
+                self.assertAlmostEqual(tag[self.fields["LIGHTTAG_POWER"]], 24 * math.pi * .32 * .20)
                 for guide in ("show_illumination", "show_visible", "show_clipping", "show_solid"):
                     self.assertIs(light[guide], False)
                 self.assertEqual(light["falloff_distance"], 2500.0)
                 self.assertIs(tag[self.fields["LIGHTTAG_SURFACE_BRIGHTNESS"]], False)
                 self.assertIs(tag[self.fields["LIGHTTAG_KEEP_INSTANCE_POWER"]], True)
 
-    def test_hundredfold_import_scale_removes_only_unit_bake_and_restores_child_world_transform(self):
+    def test_hundredfold_import_scale_leaves_light_and_child_transforms_intact(self):
         light = self.Light((200, 50, 100))
         light.matrix.v1 = LightVector(0, 200, 0)
         light.matrix.v2 = LightVector(-50, 0, 0)
@@ -408,18 +408,20 @@ class OctaneSceneLightTests(unittest.TestCase):
         light.children.append(child)
         settings = dict(source="corona_light", shape="rectangle", width=.3, height=.12,
                         source_scale=[2, .5, 1], units=1, intensity=683)
-        self.convert(light, settings)
+        tag = self.convert(light, settings)
         world = light.GetMg()
         self.assertEqual(world.off, (2, 4, 8))
-        self.assertEqual(world.v1, (0, 2, 0))
-        self.assertEqual(world.v2, (-.5, 0, 0))
-        self.assertEqual(world.v3, (0, 0, 1))
-        self.assertEqual(child.world_sets, [child_world])
+        self.assertEqual(world.v1, (0, 200, 0))
+        self.assertEqual(world.v2, (-50, 0, 0))
+        self.assertEqual(world.v3, (0, 0, 100))
+        self.assertEqual(light.world_sets, [])
+        self.assertEqual(child.world_sets, [])
         self.assertIs(child.GetMg(), child_world)
-        self.assertAlmostEqual(light["size_x"] * world.v1.GetLength(), 60)
-        self.assertAlmostEqual(light["size_y"] * world.v2.GetLength(), 6)
+        self.assertAlmostEqual(light["size_x"], 30)
+        self.assertAlmostEqual(light["size_y"], 12)
+        self.assertAlmostEqual(tag[self.fields["LIGHTTAG_POWER"]], 1)
 
-    def test_animation_and_shear_keep_imported_transform_and_use_dimension_compensation(self):
+    def test_animation_and_shear_keep_imported_transform_and_viewport_size(self):
         animated = self.Light((100, 100, 100))
         animated.tracks.append("position")
         sheared = self.Light((100, 100, 100))
@@ -428,16 +430,16 @@ class OctaneSceneLightTests(unittest.TestCase):
         for light in (animated, sheared):
             self.convert(light, settings)
             self.assertEqual(light.world_sets, [])
-            self.assertAlmostEqual(light["size_x"], .32)
-            self.assertAlmostEqual(light["size_y"], .20)
+            self.assertAlmostEqual(light["size_x"], 32)
+            self.assertAlmostEqual(light["size_y"], 20)
 
-    def test_original_source_scale_and_spherical_depth_are_kept(self):
+    def test_spherical_viewport_depth_uses_the_source_diameter(self):
         light = self.Light((20, 50, 70))
         self.convert(light, dict(source="corona_light", shape="sphere", width=.4,
                                  source_scale=[1.5, .5, .75], units=1, intensity=683.0))
-        self.assertAlmostEqual(light["size_x"] * 20, 60)
-        self.assertAlmostEqual(light["size_y"] * 50, 20)
-        self.assertAlmostEqual(light["size_z"] * 70, 30)
+        self.assertAlmostEqual(light["size_x"], 40)
+        self.assertAlmostEqual(light["size_y"], 40)
+        self.assertAlmostEqual(light["size_z"], 40)
 
     def test_corona_lux_and_radiance_use_the_same_physical_power_for_a_small_disc(self):
         diameter = .0325
@@ -448,7 +450,7 @@ class OctaneSceneLightTests(unittest.TestCase):
         lux = radiance * 683 * math.pi
         for units, intensity in ((0, radiance), (3, lux)):
             tag = self.convert(self.Light((.1, .1, .1)), dict(base, units=units, intensity=intensity))
-            watts = radiance * math.pi * (math.pi * diameter ** 2 / 4) / 10
+            watts = radiance * math.pi * (math.pi * diameter ** 2 / 4)
             self.assertAlmostEqual(tag[self.fields["LIGHTTAG_POWER"]], watts)
             self.assertLess(watts, 100.0)
 

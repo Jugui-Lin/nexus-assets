@@ -205,14 +205,22 @@ const viewLabel = view => team.active && view === 'favorites' ? '收藏' : names
 const isAssetView = () => ['all', 'favorites', 'recent'].includes(state.view);
 const kindIcons = {video:'play', audio:'play', texture:'grid', scene:'folder', material:'stack', script:'notes', other:'notes'};
 const workflowLabels = {wip:'制作中', review:'待审核', approved:'已审核', archived:'已归档'};
-const dccs={blender:{name:'Blender',logo:'B',hint:'4.5+ · OBJ / FBX / BLEND / USD'},c4d:{name:'Cinema 4D',logo:'C4',hint:'2025+ · OBJ / FBX / C4D / Alembic'},maya:{name:'Maya',logo:'M',hint:'适配待验证 · OBJ / FBX / MA / MB'},max:{name:'3ds Max',logo:'3D',hint:'Windows · 适配待验证 · MAX / FBX / OBJ'},houdini:{name:'Houdini',logo:'H',hint:'适配待验证 · HIP / FBX / 几何文件'}};
-const compat={blender:['obj','fbx','gltf','glb','abc','usd','usda','usdc','stl','ply','blend'],c4d:['obj','fbx','abc','stl','c4d'],maya:['obj','fbx','abc','ma','mb'],max:['obj','fbx','3ds','max'],houdini:['obj','fbx','abc','usd','usda','usdc','hip','hiplc','hipnc']};
+const dccs={blender:{name:'Blender',logo:'B',hint:'4.5+ · OBJ / FBX / BLEND / USD / MAX'},c4d:{name:'Cinema 4D',logo:'C4',hint:'2025+ · OBJ / FBX / C4D / Alembic'},maya:{name:'Maya',logo:'M',hint:'适配待验证 · OBJ / FBX / MA / MB'},max:{name:'3ds Max',logo:'3D',hint:'Windows · 适配待验证 · MAX / FBX / OBJ'},houdini:{name:'Houdini',logo:'H',hint:'适配待验证 · HIP / FBX / 几何文件'}};
+const compat={blender:['obj','fbx','gltf','glb','abc','usd','usda','usdc','stl','ply','blend','max'],c4d:['obj','fbx','abc','stl','c4d'],maya:['obj','fbx','abc','ma','mb'],max:['obj','fbx','3ds','max'],houdini:['obj','fbx','abc','usd','usda','usdc','hip','hiplc','hipnc']};
 const smartFormats = new Set([...compat.c4d, 'blend', 'max', 'zip', 'sbsar', 'png', 'jpg', 'jpeg', 'webp', 'tif', 'tiff', 'exr', 'hdr', 'tga', 'bmp', 'ies', 'psd', 'dds', 'gif']);
 const smartFields = {kind: '#smart-kind', renderer: '#smart-renderer', lod: '#smart-lod', texture_resolution: '#smart-resolution'};
 const smartKey = 'nexus-smart-import-v1';
 
 function canUseSmartImport(session, asset) {
   return session?.dcc === 'c4d' && session.smartImport === true && smartFormats.has(asset?.ext);
+}
+
+function sessionSupportsAsset(session, asset) {
+  return compat[session.dcc]?.includes(asset.ext) && !needsBlenderMaxBridge(session, asset);
+}
+
+function needsBlenderMaxBridge(session, asset) {
+  return session?.dcc === 'blender' && asset?.ext === 'max' && session.maxImport !== true;
 }
 
 function usesC4dSceneDialog(session, asset) {
@@ -1289,9 +1297,10 @@ function updateSend() {
   const unmapped = isTeamAsset(asset) && !asset.teamMounted;
   const fileState = fileStates.get(asset?.id);
   const smart = canUseSmartImport(session, asset);
-  const ok = Boolean(asset && session && !unmapped && !fileState && (smart || compat[session.dcc]?.includes(asset.ext)));
-  const connect = native && asset && !session && !unmapped && !fileState &&
-    (smartFormats.has(asset.ext) || Object.values(compat).some(formats => formats.includes(asset.ext)));
+  const ok = Boolean(asset && session && !unmapped && !fileState && (smart || sessionSupportsAsset(session, asset)));
+  const updateBlender = needsBlenderMaxBridge(session, asset);
+  const connect = native && asset && !unmapped && !fileState && (updateBlender || (!session &&
+    (smartFormats.has(asset.ext) || Object.values(compat).some(formats => formats.includes(asset.ext)))));
   $('#send-asset').disabled = !ok && !connect;
   $('#send-asset-label').textContent = connect ? '打开 DCC 连接中心'
     : usesC4dSceneDialog(session, asset) ? '选择导入选项'
@@ -1300,6 +1309,7 @@ function updateSend() {
   $('#send-hint').textContent = fileState === 'missing' ? '右键卡片以重新关联文件'
     : fileState ? '请检查磁盘和 NAS 是否可用'
     : unmapped ? '请先链接团队共享文件夹'
+    : updateBlender ? '更新 Blender 桥接并重启 Blender 后即可导入 MAX'
     : connect ? '连接创作软件后即可导入'
     : !session ? '先在 DCC 中运行桥接脚本'
     : !ok && session.dcc === 'c4d' && smartFormats.has(asset?.ext) ? '更新 Cinema 4D 桥接后即可智能导入'
@@ -2045,8 +2055,8 @@ $('#send-asset').addEventListener('click', async () => {
   const asset = selected();
   const session = state.sessions.find(item => item.id === $('#target-session').value);
   if (!asset) return;
-  if (!session) {
-    dccConnections.show();
+  if (!session || needsBlenderMaxBridge(session, asset)) {
+    dccConnections.show(session ? '请更新 Blender 桥接并重启 Blender 后导入 MAX。' : undefined);
     return;
   }
   if (usesC4dSceneDialog(session, asset)) {
@@ -3886,7 +3896,7 @@ async function sendAssets(ids, sessionId) {
     return c4dDropImport.show(ids, sessionId);
   }
   await batchAssets(ids, async asset => {
-    if (!canUseSmartImport(session, asset) && !compat[session.dcc]?.includes(asset.ext)) throw Error('不支持 .' + asset.ext);
+    if (!canUseSmartImport(session, asset) && !sessionSupportsAsset(session, asset)) throw Error('不支持 .' + asset.ext);
     const job = await queueAsset(asset, session);
     if (!state.jobs.some(item => item.id === job.id)) state.jobs.unshift(job);
   }, '已进入 ' + (dccs[session.dcc]?.name || session.dcc) + ' 导入队列');
@@ -3938,7 +3948,7 @@ function onlinePlacementHosts(assetIds = null) {
   const names = new Set();
   for (const session of state.sessions) {
     if (session.placement !== true || !dccs[session.dcc]) continue;
-    if (assets && !assets.every(asset => asset && !fileStates.has(asset.id) && compat[session.dcc]?.includes(asset.ext) &&
+    if (assets && !assets.every(asset => asset && !fileStates.has(asset.id) && sessionSupportsAsset(session, asset) &&
       (!isTeamAsset(asset) || asset.teamMounted))) continue;
     names.add(dccs[session.dcc].name);
   }
@@ -3998,7 +4008,7 @@ const workspaceDrag = initWorkspaceDrag({
     if (result.bridgeRequired) {
       if (scope === collectionScope()) {
         runtimeLog.add(result.bridgeRequired, 'error');
-        dccConnections.show();
+        dccConnections.show(result.bridgeRequired);
       }
       return;
     }
@@ -4020,7 +4030,7 @@ const workspaceDrag = initWorkspaceDrag({
     } else if (messages.length) {
       toast(messages.join(' · '), Boolean(result.skipped.length));
     } else if (result.releasedBeforeStart && assetIds.some(id => assetsById.get(id)?.ext === 'max')) {
-      error('文件刚准备好，拖放已结束。请重新拖动，或在资产详情点「选择导入选项」。');
+      error('文件刚准备好，拖放已结束。请重新拖动，或从资产详情导入。');
     }
   },
   drop: dropAssets,
@@ -4352,7 +4362,7 @@ function showAssetCardMenu(event) {
   }
   for (const session of state.sessions) {
     const smart = canUseSmartImport(session, asset);
-    if (smart || compat[session.dcc]?.includes(asset.ext)) {
+    if (smart || sessionSupportsAsset(session, asset)) {
       send.push(['send:' + session.id, 'drag-out', (smart ? '智能导入到 ' : '导入到 ') + (session.label || dccs[session.dcc]?.name || session.dcc)]);
     }
   }
@@ -5562,7 +5572,7 @@ if (native) window.__TAURI__.event.listen('scan-progress', ({payload}) => {
 });
 let activityBusy = false;
 const connectionSnapshot = sessions => JSON.stringify(sessions.map(session =>
-  [session.id, session.dcc, session.label, session.placement, session.smartImport, session.sceneImportOptions,
+  [session.id, session.dcc, session.label, session.placement, session.maxImport, session.smartImport, session.sceneImportOptions,
     session.projectExport]).sort((a, b) => a[0].localeCompare(b[0])));
 const jobSnapshot = jobs => JSON.stringify(jobs.map(job =>
   [job.id, job.status, job.progress, job.progressStage, job.error, job.message, job.projectPath]));

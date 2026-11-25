@@ -74,7 +74,7 @@ pub fn video_mime(ext: &str) -> Option<&'static str> {
 pub fn compatible(dcc: &str, ext: &str) -> bool {
     let formats: &[&str] = match dcc {
         "blender" => &[
-            "obj", "fbx", "gltf", "glb", "abc", "usd", "usda", "usdc", "stl", "ply", "blend",
+            "obj", "fbx", "gltf", "glb", "abc", "usd", "usda", "usdc", "stl", "ply", "blend", "max",
         ],
         "c4d" => &["obj", "fbx", "abc", "stl", "c4d"],
         "maya" => &["obj", "fbx", "abc", "ma", "mb"],
@@ -1308,7 +1308,7 @@ mod tests {
     #[test]
     fn native_formats_have_explicit_boundaries() {
         assert!(!compatible("c4d", "max"));
-        assert!(!compatible("blender", "max"));
+        assert!(compatible("blender", "max"));
         assert!(compatible("blender", "blend"));
         assert!(compatible("c4d", "obj"));
     }

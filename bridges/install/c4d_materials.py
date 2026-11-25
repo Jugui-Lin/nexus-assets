@@ -933,7 +933,6 @@ _OCT_LIGHT_FIELDS = {
     "DAYLIGHTTAG_SUNINTENSITY": 1261,
 }
 _OCT_DAYLIGHT = 1029754
-_OCT_CORONA_AREA_POWER_SCALE = 0.1
 _OCT_AREA_SHAPES = {
     "rectangle": "RECTANGLE",
     "disc": "DISC",
@@ -982,79 +981,30 @@ def _scene_area_light_dimensions(info):
     return tuple(size * axis for size, axis in zip(sizes, _scene_light_source_scale(info)))
 
 
-def _light_matrix_matches(actual, expected):
-    return all((getattr(actual, key) - getattr(expected, key)).GetLength()
-               <= 1e-6 * max(1.0, getattr(expected, key).GetLength())
-               for key in ("off", "v1", "v2", "v3"))
-
-
-def _restore_light_transforms(originals):
-    for node, local, _world in originals:
-        node.SetMl(local)
-
-
-def _remove_fbx_light_unit_scale(c4d, light, info):
-    world = light.GetMg()
-    source_scale = _scene_light_source_scale(info)
-    axes = (world.v1, world.v2, world.v3)
-    lengths = tuple(axis.GetLength() for axis in axes)
-    # A metre FBX bake adds a uniform 100x basis. Keep authored scale and other transforms.
-    if not all(math.isclose(length, source * 100.0, rel_tol=.02) for length, source in zip(lengths, source_scale)):
-        return ()
-    basis = tuple(axis * (1.0 / length) for axis, length in zip(axes, lengths))
-    if any(abs(basis[i].Dot(basis[j])) > 1e-5 for i, j in ((0, 1), (0, 2), (1, 2))):
-        return ()
-    children = light.GetChildren()
-    if any(child.GetCTracks() for child in children):
-        return ()
-    ancestor = light
-    while ancestor is not None:
-        if ancestor.GetCTracks():
-            return ()
-        ancestor = ancestor.GetUp()
-    originals = [(light, light.GetMl(), world), *((child, child.GetMl(), child.GetMg()) for child in children)]
-    target = c4d.Matrix(world.off, *(axis * source for axis, source in zip(basis, source_scale)))
-    try:
-        light.SetMg(target)
-        if not _light_matrix_matches(light.GetMg(), target):
-            raise RuntimeError("Cinema 4D 未接受面光源的缩放")
-        for child, _local, child_world in originals[1:]:
-            child.SetMg(child_world)
-            if not _light_matrix_matches(child.GetMg(), child_world):
-                raise RuntimeError("Cinema 4D 未接受子对象的世界变换")
-    except (AttributeError, RuntimeError, TypeError, ValueError):
-        _restore_light_transforms(originals)
-        return ()
-    return originals
-
-
 def _scene_area_light_values(c4d, doc, light, info, dimensions):
     if not dimensions:
         return {}
-    # MAX dimensions are in metres. FBX can already scale the light's object hierarchy.
+    # The imported FBX transform continues to control the viewport size.
     one_metre = c4d.UnitScaleData()
     if one_metre.SetUnitScale(1.0, c4d.DOCUMENT_UNIT_M) is False:
         raise RuntimeError("无法读取面光源的项目长度单位")
     scale = c4d.utils.CalculateTranslationScale(one_metre, doc[c4d.DOCUMENT_DOCUNIT])
     if not _valid_light_number(scale) or scale <= 0:
         raise RuntimeError("无法换算面光源的项目长度单位")
-    world = light.GetMg()
-    axes = (world.v1, world.v2, world.v3)
-    lengths = tuple(axis.GetLength() for axis in axes[:len(dimensions)])
-    if not all(_valid_light_number(length) and length > 0 for length in lengths):
-        raise RuntimeError("无法读取面光源的对象缩放")
-    local_sizes = tuple(size * scale / length for size, length in zip(dimensions, lengths))
-    if not all(math.isfinite(size) for size in local_sizes):
+    shape = info["shape"]
+    width = info["width"] * scale
+    height = info["height"] * scale if shape in ("rectangle", "cylinder") else width
+    if not all(math.isfinite(size) for size in (width, height)):
         raise RuntimeError("面光源尺寸超出支持范围")
-    shape_symbol = _OCT_AREA_SHAPES[info["shape"]]
+    shape_symbol = _OCT_AREA_SHAPES[shape]
     parameters = {
         c4d.LIGHT_TYPE: c4d.LIGHT_TYPE_AREA,
         c4d.LIGHT_AREADETAILS_SHAPE: getattr(c4d, f"LIGHT_AREADETAILS_SHAPE_{shape_symbol}"),
-        c4d.LIGHT_AREADETAILS_SIZEX: local_sizes[0],
-        c4d.LIGHT_AREADETAILS_SIZEY: local_sizes[1],
+        c4d.LIGHT_AREADETAILS_SIZEX: width,
+        c4d.LIGHT_AREADETAILS_SIZEY: height,
     }
-    if len(local_sizes) == 3:
-        parameters[c4d.LIGHT_AREADETAILS_SIZEZ] = local_sizes[2]
+    if len(dimensions) == 3:
+        parameters[c4d.LIGHT_AREADETAILS_SIZEZ] = width
     # Keep the real emitter dimensions and omit only the auxiliary viewport range guides.
     for symbol in ("LIGHT_SHOWILLUMINATION", "LIGHT_SHOWVISIBLELIGHT", "LIGHT_SHOWCLIPPING",
                    "LIGHT_AREADETAILS_SHOWASSOLIDINVIEWPORT"):
@@ -1148,9 +1098,6 @@ def _oct_scene_regular_light(c4d, light, info, dimensions, brightness, enabled):
     if not _valid_light_number(base) or base <= 0:
         raise RuntimeError("无法读取 Octane 灯光默认功率")
     power, precise, total_watts = _oct_scene_power(base, brightness, info, dimensions)
-    if dimensions:
-        power *= _OCT_CORONA_AREA_POWER_SCALE
-        precise = False
     kelvin = info.get("kelvin")
     use_temperature = _valid_light_number(kelvin) and 500 <= kelvin <= 12000
     _set_oct_light_tag_value(c4d, tag, "OCT_LIGHTTAG_TYPE_SELECT", 0)
@@ -1193,7 +1140,6 @@ def convert_octane_lights(c4d, doc, imported_objects, plan):
         info = info if isinstance(info, dict) else {}
         tag = None
         changed = {}
-        original_transforms = ()
         try:
             directional_types = (c4d.LIGHT_TYPE_DISTANT, c4d.LIGHT_TYPE_PARALLEL)
             allowed_types = (c4d.LIGHT_TYPE_OMNI, c4d.LIGHT_TYPE_SPOT, c4d.LIGHT_TYPE_AREA, *directional_types)
@@ -1204,8 +1150,6 @@ def convert_octane_lights(c4d, doc, imported_objects, plan):
             if not _valid_light_number(brightness):
                 raise RuntimeError("无法读取源灯光强度")
             dimensions = _scene_area_light_dimensions(info)
-            if dimensions:
-                original_transforms = _remove_fbx_light_unit_scale(c4d, light, info)
             area = _scene_area_light_values(c4d, doc, light, info, dimensions)
             enabled = brightness > 0 and info.get("enabled") is not False and info.get("intensity") != 0
             if hasattr(light, "GetRenderMode") and light.GetRenderMode() == getattr(c4d, "MODE_OFF", None):
@@ -1241,7 +1185,6 @@ def convert_octane_lights(c4d, doc, imported_objects, plan):
             for parameter, previous in reversed(list(changed.items())):
                 if previous is not None:
                     light[parameter] = previous
-            _restore_light_transforms(original_transforms)
             failed.append(f"{name}：{str(error) or type(error).__name__}")
     messages = [f"已设置 {converted} 盏 Octane 灯光的颜色和功率"] if converted else []
     if estimated:

@@ -659,7 +659,10 @@ async fn queue_import(
         if !c4d_smart_compatible(&a.ext) {
             return Err(format!("Cinema 4D 智能导入无法处理 .{}。", a.ext));
         }
-    } else if !compatible(host, &a.ext) {
+    } else if !session_supports_asset(&session, &a.ext) {
+        if host == "blender" && a.ext.eq_ignore_ascii_case("max") {
+            return Err("请从 DCC 连接中心更新 Blender 插件并重启 Blender 后导入 MAX。".into());
+        }
         return Err(format!(
             "目标 DCC 暂不支持 .{}，请先使用源软件转换为 OBJ / FBX",
             a.ext
@@ -742,10 +745,22 @@ async fn register(
     let project_export = smart_import && v["projectExport"] == true;
     let scene_import = smart_import && v["sceneImportOptions"] == true;
     let scoped_c4d_preferences = smart_import && v["scopedC4dPreferences"] == true;
-    let session = json!({"id":id,"dcc":dcc,"pid":v["pid"],"placement":placement,"smartImport":smart_import,"projectExport":project_export,"sceneImportOptions":scene_import,"scopedC4dPreferences":scoped_c4d_preferences,"label":v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),"lastSeen":now()});
+    let max_import = dcc == "blender" && v["maxImport"] == true;
+    let session = json!({"id":id,"dcc":dcc,"pid":v["pid"],"placement":placement,"maxImport":max_import,"smartImport":smart_import,"projectExport":project_export,"sceneImportOptions":scene_import,"scopedC4dPreferences":scoped_c4d_preferences,"label":v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),"lastSeen":now()});
     s.sessions.lock().unwrap().insert(id.clone(), session);
     Ok(Json(json!({"id":id})))
 }
+
+fn session_supports_asset(session: &Value, ext: &str) -> bool {
+    let dcc = session["dcc"].as_str().unwrap_or("");
+    let ext = if ext.eq_ignore_ascii_case("max") {
+        "max"
+    } else {
+        ext
+    };
+    compatible(dcc, ext) && (dcc != "blender" || ext != "max" || session["maxImport"] == true)
+}
+
 async fn heartbeat(
     HttpState(s): HttpState<AppState>,
     headers: HeaderMap,
@@ -896,12 +911,7 @@ fn main() {
             // Reserve the bridge endpoint before a second instance can touch the catalog.
             let listener = std::net::TcpListener::bind(("127.0.0.1", 47821))?;
             listener.set_nonblocking(true)?;
-            #[cfg(windows)]
-            if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = youtube_player::install(&window, &app.config().identifier) {
-                    eprintln!("Could not initialize the YouTube player: {error}");
-                }
-            }
+            nexus_updater::install_cached_on_startup(app.handle());
             let root = app.path().app_data_dir()?;
             let global_catalog = Catalog::open(&root).map_err(std::io::Error::other)?;
             let token = global_catalog.token().map_err(std::io::Error::other)?;
@@ -923,6 +933,19 @@ fn main() {
             app.manage(browser_capture.clone());
             let video_streams = asset_video::stream::VideoStreams::new(state.port);
             app.manage(video_streams.clone());
+            if let Some(config) = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|config| config.label == "main")
+            {
+                let _window = tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+                #[cfg(windows)]
+                if let Err(error) = youtube_player::install(&_window, &app.config().identifier) {
+                    eprintln!("Could not initialize the YouTube player: {error}");
+                }
+            }
             let expiring_placements = state.placement.clone();
             let expiring_videos = video_streams.clone();
             tauri::async_runtime::spawn(async move {
@@ -1184,6 +1207,24 @@ mod bridge_tests {
         assert!(libraries.iter().any(|library| library["folders"]
             .as_array()
             .is_some_and(|folders| folders.contains(&json!("文件夹/空目录")))));
+    }
+    #[test]
+    fn blender_max_import_requires_capability_from_the_target_bridge() {
+        tauri::async_runtime::block_on(async {
+            let (_dir, state, headers) = setup();
+            for (client, max_ready) in [
+                (json!({"dcc":"blender","pid":2,"placement":true}), false),
+                (json!({"dcc":"blender","pid":3,"placement":true,"maxImport":true}), true),
+            ] {
+                let Json(response) = register(HttpState(state.clone()), headers.clone(), Json(client))
+                    .await
+                    .unwrap();
+                let sessions = state.sessions.lock().unwrap();
+                let blender = &sessions[response["id"].as_str().unwrap()];
+                assert!(session_supports_asset(blender, "obj"));
+                assert_eq!(session_supports_asset(blender, "MAX"), max_ready);
+            }
+        });
     }
     #[test]
     fn jobs_are_claimed_once_and_receipts_are_bound_to_session() {
