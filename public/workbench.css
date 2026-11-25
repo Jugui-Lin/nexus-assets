@@ -177,9 +177,10 @@
 .about-team-version { margin-top: 8px; }
 .about-team-version[hidden] { display: none; }
 .about-team-version strong { font-size: 14px; }
-.about-updates { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 11px; }
+.about-updates { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 11px; }
 .about-updates[hidden] { display: none; }
-.about-updates .button { flex: none; }
+.about-update-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-inline-start: auto; }
+.about-update-actions .button[hidden] { display: none; }
 :is(.top-tools > summary, #about-button, .version-link).has-nexus-update { position: relative; }
 :is(.top-tools > summary, #about-button, .version-link).has-nexus-update::after {
   content: ""; position: absolute; width: 7px; height: 7px; pointer-events: none;

@@ -7,6 +7,7 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
   if (!enabled) return {opened() {}};
   panel.hidden = false;
   const button = panel.querySelector('button');
+  const installNow = panel.querySelector('#nexus-install-now');
   const status = panel.querySelector('[role="status"]');
   const indicatorTitles = indicators.map(indicator => indicator.title);
   let update;
@@ -28,6 +29,10 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
     return update?.available ? update.version : undefined;
   }
 
+  function readyToInstall(version) {
+    return Boolean(update?.automatic && version && preparedVersion === version);
+  }
+
   function render(message) {
     const version = availableVersion();
     const notice = version ? `Nexus ${version} 可更新` : '';
@@ -41,6 +46,7 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
     button.classList.toggle('primary', manual);
     button.classList.toggle('subtle', !manual);
     button.textContent = manual ? '下载更新' : '检查更新';
+    installNow.hidden = !readyToInstall(version);
     if (message) status.textContent = message;
     else if (!version) status.textContent = update?.configured ? '已是最新版本' : 'GitHub 更新源待配置';
     else if (preparedVersion === version) status.textContent = `${version} 已就绪，空闲时自动安装并重启`;
@@ -49,12 +55,12 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
 
   async function run(action) {
     if (busy || restarting) return;
-    busy = button.disabled = true;
+    busy = button.disabled = installNow.disabled = true;
     try {
       await action();
     } finally {
       busy = false;
-      button.disabled = restarting;
+      button.disabled = installNow.disabled = restarting;
     }
   }
 
@@ -98,16 +104,19 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
     });
   }
 
-  function install(version, automatic) {
+  function install(version, automatic, now = false) {
     return run(async () => {
       render(`正在安装 ${version}，安装后将重新打开 Nexus…`);
       try {
-        if (automatic) restarting = await api('apply_prepared_nexus_update', {version});
-        else {
+        if (automatic) {
+          const args = now ? {version, installNow:true} : {version};
+          restarting = await api('apply_prepared_nexus_update', args);
+        } else {
           await api('install_nexus_update', {version});
           restarting = true;
         }
-        render(restarting ? '已启动安装，请等待 Nexus 重新打开…' : undefined);
+        if (restarting) render('已启动安装，请等待 Nexus 重新打开…');
+        else render(now ? '当前有任务正在进行，完成后可立即安装' : undefined);
       } catch (failure) {
         preparedVersion = undefined;
         if (automatic) retry(failure);
@@ -133,6 +142,15 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
     const version = availableVersion();
     if (version && !update.automatic) return install(version, false);
     return check(true);
+  });
+  installNow.addEventListener('click', () => {
+    const version = availableVersion();
+    if (busy || restarting || !readyToInstall(version)) return;
+    if (!canRestart()) {
+      render('请先保存修改或完成当前操作，再立即安装');
+      return;
+    }
+    return install(version, true, true);
   });
   setTimeout(tick, 3500);
   setInterval(tick, 15_000);

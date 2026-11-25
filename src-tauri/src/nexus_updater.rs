@@ -170,12 +170,16 @@ fn user_is_idle() -> bool {
 }
 
 #[cfg(windows)]
-fn install_if_idle(app: &tauri::AppHandle, prepared: &PreparedUpdate) -> Result<bool, String> {
+fn install_when_safe(
+    app: &tauri::AppHandle,
+    prepared: &PreparedUpdate,
+    wait_for_idle: bool,
+) -> Result<bool, String> {
     use crate::{
         browser_capture::BrowserCapture, cloud_mounts::Mounts, team_desktop::Desktop, AppState,
     };
 
-    if !user_is_idle() {
+    if wait_for_idle && !user_is_idle() {
         return Ok(false);
     }
     let (Some(state), Some(team), Some(browser), Some(mounts)) = (
@@ -205,7 +209,7 @@ fn install_if_idle(app: &tauri::AppHandle, prepared: &PreparedUpdate) -> Result<
         return Ok(false);
     };
     let queued_cutoff = nexus_core::now().saturating_sub(crate::DCC_JOB_QUEUE_TIMEOUT);
-    if catalog.has_pending_dcc_jobs(queued_cutoff)? || !user_is_idle() {
+    if catalog.has_pending_dcc_jobs(queued_cutoff)? || (wait_for_idle && !user_is_idle()) {
         return Ok(false);
     }
     // The last activity checks and launching the already verified installer
@@ -218,7 +222,11 @@ fn install_if_idle(app: &tauri::AppHandle, prepared: &PreparedUpdate) -> Result<
 }
 
 #[cfg(not(windows))]
-fn install_if_idle(_app: &tauri::AppHandle, _prepared: &PreparedUpdate) -> Result<bool, String> {
+fn install_when_safe(
+    _app: &tauri::AppHandle,
+    _prepared: &PreparedUpdate,
+    _wait_for_idle: bool,
+) -> Result<bool, String> {
     Ok(false)
 }
 
@@ -226,6 +234,7 @@ fn install_if_idle(_app: &tauri::AppHandle, _prepared: &PreparedUpdate) -> Resul
 pub(crate) async fn apply_prepared_nexus_update(
     app: tauri::AppHandle,
     version: String,
+    install_now: Option<bool>,
 ) -> Result<bool, String> {
     let installation = app
         .try_state::<UpdateInstall>()
@@ -238,7 +247,7 @@ pub(crate) async fn apply_prepared_nexus_update(
         .as_ref()
         .filter(|item| item.release.version == version)
         .ok_or("待安装版本已变更，请重新准备更新")?;
-    if !install_if_idle(&app, staged)? {
+    if !install_when_safe(&app, staged, !install_now.unwrap_or_default())? {
         return Ok(false);
     }
     *prepared = None;

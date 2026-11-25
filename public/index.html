@@ -621,7 +621,10 @@
   <p class="about-version about-team-version" id="about-team-latest-row" hidden><span>NAS 最新镜像</span> <strong id="about-team-latest" role="status"></strong></p>
   <section id="nexus-updater" class="about-updates" aria-label="应用更新" hidden>
     <span role="status">从 GitHub 获取应用更新</span>
-    <button type="button" class="button subtle">检查更新</button>
+    <div class="about-update-actions">
+      <button type="button" class="button subtle">检查更新</button>
+      <button id="nexus-install-now" type="button" class="button primary" hidden>立即安装并重启</button>
+    </div>
   </section>
   <details id="about-guide" class="about-guide">
     <summary>使用指南</summary>
