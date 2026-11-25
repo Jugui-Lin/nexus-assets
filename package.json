@@ -1,0 +1,9 @@
+{
+  "name": "nexus-asset-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first DCC asset workspace",
+  "type": "module",
+  "scripts": { "start": "node server.mjs", "test": "cargo test --manifest-path src-tauri/Cargo.toml" },
+  "engines": { "node": ">=22" }
+}

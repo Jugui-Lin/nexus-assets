@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE4RUFCODAxNENEQTM1MzAKUldRd05kcE1BYmpxcUh2NnBzZUtXU2xjN3RwZUt4WUNJM2FjRnR1ZTJ2eHdmajBoSElJMjM3cEYK",
+      "endpoints": [
+        "https://github.com/Jugui-Lin/nexus-assets/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true
+    }
+  }
+}

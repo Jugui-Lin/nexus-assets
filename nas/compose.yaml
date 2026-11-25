@@ -1,0 +1,28 @@
+services:
+  nexus-team:
+    build:
+      context: .
+      dockerfile: nas/Dockerfile
+    network_mode: host
+    user: "${NEXUS_TEAM_UID:-1000}:${NEXUS_TEAM_GID:-1000}"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: ./data
+        target: /var/lib/nexus
+        bind:
+          create_host_path: false
+    command:
+      - --data
+      - /var/lib/nexus
+      - serve
+      - "${NEXUS_TEAM_LISTEN:?填写 NAS 的私网 IPv4 和团队端口}"
+      - --allow-lan-http
+      # NEXUS_ADDRESS_JOIN_FLAG

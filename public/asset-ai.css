@@ -1,0 +1,130 @@
+#asset-ai-dialog {
+  width: min(680px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+}
+
+#asset-ai-selection {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.asset-ai-model-row {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.asset-ai-model-row label {
+  flex: 1;
+  min-width: min(240px, 100%);
+  margin: 0;
+}
+
+#asset-ai-model { width: 100%; }
+
+#asset-ai-setup {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--card);
+}
+
+#asset-ai-setup p { margin: 0 0 8px; }
+
+.asset-ai-setup-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.asset-ai-setup-actions code { user-select: text; }
+
+#asset-ai-status {
+  min-height: 1.4em;
+  margin: 12px 0;
+  color: var(--text);
+}
+
+#asset-ai-status[data-error="true"],
+.asset-ai-result-feedback[data-error="true"] {
+  color: var(--dotin-danger, #f1ae9a);
+}
+
+#asset-ai-results {
+  display: grid;
+  gap: 8px;
+  max-height: min(46vh, 410px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow: auto;
+}
+
+.asset-ai-result {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.asset-ai-result-head,
+.asset-ai-result-heading,
+.asset-ai-category,
+.asset-ai-tag {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.asset-ai-result-head {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.asset-ai-result-heading { min-width: 0; }
+.asset-ai-result strong { overflow-wrap: anywhere; }
+.asset-ai-source, .asset-ai-category > span { color: var(--muted); }
+
+.asset-ai-category {
+  margin: 8px 0;
+  gap: 10px;
+}
+
+.asset-ai-category select { max-width: 100%; }
+
+.asset-ai-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.asset-ai-tags small, .asset-ai-result-feedback { color: var(--muted); }
+
+.asset-ai-tag {
+  max-width: 100%;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+
+.asset-ai-result input[type="checkbox"] {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.asset-ai-result-feedback {
+  margin: 7px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.asset-ai-result-feedback:empty { display: none; }
+#asset-ai-dialog .modal-footer { flex-wrap: wrap; }

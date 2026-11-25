@@ -1,0 +1,87 @@
+[package]
+name = "nexus-assets"
+version = "0.10.45"
+edition = "2021"
+default-run = "nexus-assets"
+description = "Cross-platform local DCC asset manager"
+
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:dom_query",
+    "dep:flate2",
+    "dep:quick-xml",
+    "dep:reqwest",
+    "dep:rfd",
+    "dep:same-file",
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-updater",
+    "dep:webview2-com",
+    "dep:windows",
+    "dep:windows-core",
+    "dep:wry",
+]
+
+[[bin]]
+name = "nexus-assets"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[lib]
+name = "nexus_core"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true , features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
+tauri-plugin-updater = { version = "=2.14.1", default-features = false, features = ["native-tls", "system-proxy"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+same-file = { version = "1", optional = true }
+walkdir = "2"
+uuid = { version = "1", features = ["v4"] }
+axum = "0.8"
+futures-util = { version = "0.3", default-features = false }
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "sync", "time"] }
+rfd = { version = "0.15", optional = true }
+include_dir = "0.7"
+dom_query = { version = "=0.29.0", default-features = false, optional = true }
+quick-xml = { version = "=0.42.0", optional = true }
+flate2 = { version = "1", optional = true }
+base64 = "0.22"
+cfb = "0.14"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "ico", "tiff", "tga", "hdr", "exr", "dds"] }
+exr = { version = "1", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls-no-alpn", "json"], optional = true }
+sha2 = "0.11"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = { version = "=0.39.1", optional = true }
+wry = { version = "=0.57.3", default-features = false, optional = true }
+windows-core = { version = "0.62", optional = true }
+windows = { version = "0.62.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_NetworkManagement_WebDav",
+    "Win32_NetworkManagement_WNet",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+

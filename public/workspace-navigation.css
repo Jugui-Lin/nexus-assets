@@ -1,0 +1,180 @@
+.workspace-shortcuts .nav-label {
+  margin-top: 14px;
+}
+
+.workspace-shortcut-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-shortcut-row .nav-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.workspace-shortcut-remove {
+  width: 24px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+}
+
+.workspace-shortcut-remove svg {
+  width: 13px;
+  height: 13px;
+}
+
+#libraries .workspace-located-folder:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+#sidebar-organize-content { display: flex; flex-direction: column; }
+#sidebar-shortcuts { display: flex; flex: 1 0 auto; flex-direction: column; }
+
+.workspace-quick-access {
+  flex: 1;
+  min-height: 66px;
+  margin: 8px 3px 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.workspace-quick-access-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 25px;
+  padding-inline: 6px;
+}
+
+.workspace-quick-access-heading .nav-label { margin: 0; padding: 0; }
+.workspace-quick-access-edit { flex: none; }
+.sidebar-zone-toggle[aria-expanded="false"] ~ .workspace-quick-access-edit { display: none; }
+#quick-access-remove-description { overflow-wrap: anywhere; }
+
+.workspace-team-pins-status { margin: 0 6px 6px; color: var(--muted); font-size: 11px; }
+.workspace-pin-local { flex: none; color: var(--muted); font-size: 10px; }
+.workspace-shortcut-share { flex: none; margin-inline: 3px 5px; color: var(--accent); }
+
+#workspace-quick-access-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-inline: 6px;
+}
+
+#workspace-quick-access-items > .workspace-shortcut-row {
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+#workspace-quick-access-items .nav-item {
+  flex: 1 1 auto;
+  width: auto;
+  margin: 0;
+  gap: 5px;
+}
+
+#workspace-quick-access-items .nav-item svg,
+#workspace-quick-access-items .workspace-shortcut-remove {
+  flex: none;
+}
+
+.workspace-quick-access-empty {
+  margin: 0 5px 6px;
+  padding: 8px;
+  border: 1px dashed #4a5b5c;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+#libraries .folder-row button[data-library] { cursor: grab; }
+.folder-pin-dragging, .folder-pin-dragging * { cursor: grabbing !important; user-select: none; }
+.folder-pin-dragging #libraries .is-pin-source { opacity: .55; }
+.folder-pin-dragging #libraries .is-folder-move-target {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  background: #294843;
+  color: var(--accent);
+}
+.workspace-quick-access.is-pin-target { border-color: #628d85; border-style: dashed; }
+.workspace-quick-access.is-pin-hover { border-color: var(--accent); background: var(--accent-dark); }
+.workspace-quick-access.is-pin-hover .workspace-quick-access-empty { color: var(--accent); }
+.folder-pin-drag-badge {
+  position: fixed;
+  z-index: 26;
+  max-width: min(285px, calc(100vw - 12px));
+  overflow: hidden;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--accent-dark);
+  color: var(--text);
+  box-shadow: 0 2px 12px #0007;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-search-actions,
+.workspace-folder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px 9px;
+}
+
+.workspace-save-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.workspace-save-search svg,
+.workspace-pin-folder svg {
+  width: 14px;
+  height: 14px;
+}
+
+.workspace-folder-button {
+  width: 27px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #343a49;
+  color: #a9b1c9;
+}
+
+.workspace-rescan-folder {
+  font-size: 17px;
+}
+
+.workspace-rescan-folder[aria-disabled="true"] {
+  cursor: progress;
+  opacity: .6;
+}
+
+.workspace-pin-folder[aria-pressed="true"] {
+  background: var(--accent-dark);
+  color: #ffce79;
+}
+
+.workspace-pin-folder[aria-pressed="true"] svg {
+  fill: currentColor;
+}
+
+.workspace-search-dialog {
+  max-width: 390px;
+}
+
+.workspace-search-error {
+  margin: 7px 0 0;
+  color: #f7aa99;
+  font-size: 11px;
+}

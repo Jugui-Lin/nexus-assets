@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus 网页采集</title>
+  <link rel="stylesheet" href="popup.css">
+  <script type="module" src="popup.js"></script>
+</head>
+<body>
+  <header>
+    <img src="icons/nexus-48.png" alt="" width="28" height="28">
+    <h1>Nexus 网页采集</h1>
+    <button id="unpair" class="quiet" type="button" hidden>解除配对</button>
+  </header>
+  <main>
+    <form id="pairing" hidden>
+      <label for="pair-code">Nexus 配对码</label>
+      <p>在桌面版打开「网页采集」，生成配对码。</p>
+      <div class="pairing-controls">
+        <input id="pair-code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="128" required>
+        <button class="primary" type="submit">配对</button>
+      </div>
+    </form>
+    <section id="capture-panel" aria-label="可采集内容" hidden>
+      <div class="page-summary">
+        <div id="page-name"></div>
+        <button id="capture-link" class="quiet" type="button">保存页面链接</button>
+      </div>
+      <div class="page-tools" aria-label="网页采集工具">
+        <button type="button" data-tool="capture-visible">可见区域截图</button>
+        <button type="button" data-tool="capture-area-mode">框选截图</button>
+        <button type="button" data-tool="capture-element-mode">元素截图</button>
+        <button type="button" data-tool="capture-full">整页截图</button>
+        <button type="button" data-tool="capture-gesture-mode">拖拽采集</button>
+      </div>
+      <div class="media-filters" aria-label="媒体类型">
+        <button class="filter" type="button" data-kind="all" aria-pressed="true">全部</button>
+        <button class="filter" type="button" data-kind="image" aria-pressed="false">图片</button>
+        <button class="filter" type="button" data-kind="video" aria-pressed="false">视频</button>
+        <button id="rescan" class="quiet" type="button">重新扫描</button>
+      </div>
+      <p id="media-empty" hidden></p>
+      <ul id="media-list" aria-label="网页媒体"></ul>
+      <div id="batch-controls" class="batch-controls" hidden>
+        <button id="select-shown" type="button">全选</button>
+        <button id="clear-selection" type="button">清空</button>
+        <button id="capture-selected" class="primary" type="button">采集所选</button>
+      </div>
+      <p id="batch-status" role="status" hidden></p>
+    </section>
+    <p id="status" role="status" hidden></p>
+  </main>
+</body>
+</html>

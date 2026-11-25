@@ -1,0 +1,13 @@
+data/
+test-results/
+*.log
+.setup/
+.toolchain/
+src-tauri/target/
+src-tauri/gen/
+dist/
+.env
+.env.*
+!.env.example
+*.key
+*.pass

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" AutodeskProduct="3ds Max" ProductType="Application"
+    Name="Nexus Assets Bridge" AppVersion="__NEXUS_VERSION__"
+    UpgradeCode="{F57D54F0-DA7E-4CAE-B0F6-0BE25A537919}">
+    <CompanyDetails />
+    <Components Description="post-start-up scripts parts">
+        <RuntimeRequirements OS="Win64" Platform="3ds Max" SeriesMin="2022" SeriesMax="9999" />
+        <ComponentEntry AppName="Nexus Assets Bridge" Version="__NEXUS_VERSION__"
+            ModuleName="./Contents/nexus_assets_start.ms" />
+    </Components>
+</ApplicationPackage>

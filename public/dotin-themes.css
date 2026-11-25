@@ -1,0 +1,320 @@
+html[data-theme="dotin-light"] {
+  color-scheme: light;
+  --bg: #f5f5f5;
+  --panel: #fff;
+  --card: #fff;
+  --line: #d4d4d4;
+  --text: #171717;
+  --muted: #5b5b5b;
+  --accent: #ac261d;
+  --accent-dark: #fae9e7;
+  --dotin-chrome: #f9f9f9;
+  --dotin-control: #f0f0f0;
+  --dotin-hover: #e8e8e8;
+  --dotin-control-line: #a1a1a1;
+  --dotin-thumb-start: #e8e8e8;
+  --dotin-thumb-end: #dcdcdc;
+  --dotin-focus: #b42b22;
+  --dotin-danger: #9e251e;
+  --dotin-danger-bg: #faeae8;
+  --dotin-warning: #77500e;
+  --dotin-warning-bg: #f8eddb;
+  --dotin-success: #226345;
+  --dotin-success-bg: #e5f1e9;
+  --dotin-info: #23597e;
+  --dotin-info-bg: #e9f0f5;
+  --dotin-shadow: #10101026;
+  --dotin-backdrop: #10101082;
+}
+
+html[data-theme="dotin-dark"] {
+  color-scheme: dark;
+  --bg: #141414;
+  --panel: #1c1c1c;
+  --card: #242424;
+  --line: #424242;
+  --text: #f4f4f4;
+  --muted: #b5b5b5;
+  --accent: #ff968d;
+  --accent-dark: #3a2423;
+  --dotin-chrome: #1f1f1f;
+  --dotin-control: #292929;
+  --dotin-hover: #343434;
+  --dotin-control-line: #676767;
+  --dotin-thumb-start: #333;
+  --dotin-thumb-end: #272727;
+  --dotin-focus: #ff8176;
+  --dotin-danger: #ffb3ab;
+  --dotin-danger-bg: #3e2624;
+  --dotin-warning: #f4cb8b;
+  --dotin-warning-bg: #3e3324;
+  --dotin-success: #a3d9ba;
+  --dotin-success-bg: #273b30;
+  --dotin-info: #b7d7f1;
+  --dotin-info-bg: #283642;
+  --dotin-shadow: #0008;
+  --dotin-backdrop: #000a;
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) {
+  --dotin-red: #da291c;
+  --dotin-red-hover: #bc241a;
+  --dotin-on-red: #fff;
+}
+
+.appearance-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin: 3px 0;
+  padding: 6px 7px;
+  border-block: 1px solid var(--line);
+}
+
+.appearance-setting #appearance-theme {
+  min-width: 7rem;
+  max-width: 100%;
+}
+
+/* Frame, navigation, and selection */
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.sidebar, .topbar, .main-footer) {
+  background: var(--dotin-chrome);
+  border-color: var(--line);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .sidebar-pane {
+  background-color: var(--panel);
+  border-color: var(--line);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.nav-item, .icon-button, .folder-toggle, .nav-label, .nav-label > span, .breadcrumb, .breadcrumb span, .type-tabs button, .type-tabs span, .results-line, .main-footer, .version-line, .toolbar-connection button, .inspector-title, .preview-help, .field-label, .field-label span, .metadata dt, .send-label, .send-panel p) {
+  color: var(--muted);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.breadcrumb [aria-current], .breadcrumb strong, .sidebar-zone-toggle, #sidebar-tags summary, .metadata dd, .metadata dd.path-value) { color: var(--text); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.nav-count, .tag-filter, .asset-tags span, .workspace-recent-item, .metadata dd.path-value, .workspace-switch, .view-switch, .sidebar-splitter, .folder-address-form, .asset-search, .bulk-bar) {
+  background: var(--dotin-control);
+  border-color: var(--line);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.nav-count, .tag-filter, .asset-tags span, .folder-address-form, .asset-search) { color: var(--muted); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.icon-button, .nav-item, .folder-toggle, .folder-address-open, .folder-browser-row, .workspace-choice, .workspace-switcher-actions button, .sidebar-dock-tab, .asset-filter-trigger, .asset-filter-option, .asset-menu button, .asset-quick-toggle, .browser-site-card .browser-site, .browser-site-card .browser-site-action):is(:hover, :focus-visible) {
+  background-color: var(--dotin-hover);
+  color: var(--text);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.nav-item.active, .tag-filter.active, .type-tabs button[aria-pressed="true"], .workspace-tab[data-active], .view-switch .active, .workspace-home-toggle[aria-pressed="true"], .sidebar-dock-tab[aria-selected="true"], .asset-filter-trigger:is(.is-active, [aria-expanded="true"]), .asset-filter-option:is([aria-pressed="true"], [data-mode="include"]), .asset-filter-menu-row.is-active, .asset-search-toggle:is([aria-expanded="true"], .has-query), .asset-quick-toggle[aria-pressed="true"], .folder-address-toggle:is(:hover, [aria-expanded="true"])) {
+  background-color: var(--accent-dark);
+  border-color: var(--dotin-focus);
+  color: var(--accent);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.folder-children, .tag-children, .folder-branch, .metadata, .send-panel, .sidebar-dock-tabs, .asset-filter-panel-actions, .asset-filter-search + .asset-filter-options) { border-color: var(--line); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.workspace-panel-toggle, .workspace-folder-button, .asset-search-toggle, .asset-filter-mark, .asset-title-row .icon-button, .asset-quick-toggle) { border-color: var(--dotin-control-line); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.text-button, .reveal-button, .workspace-choice-current, .folder-address-go, #workspace-status) { color: var(--accent); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .breadcrumb button { color: var(--muted); }
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .breadcrumb button:hover { color: var(--accent); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .online-avatar-chip[data-dot]::after { border-color: var(--dotin-chrome); }
+
+/* Inputs, dropdowns, and coach marks */
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.text-field, .filter-bar select, .modal select, .send-panel select, .subtle, .save-button, .workspace-panel-toggle, #tag-search, #folder-search) {
+  background-color: var(--dotin-control);
+  border-color: var(--dotin-control-line);
+  color: var(--text);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .folder-address-form { border-color: var(--dotin-control-line); }
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .folder-address-form input { color: var(--text); }
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .folder-address-go { border-color: var(--dotin-control-line); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(input, textarea)::placeholder { color: var(--muted); opacity: 1; }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(button, a, summary, input, textarea, select):focus-visible {
+  outline-color: var(--dotin-focus);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(input, textarea, select):focus { border-color: var(--dotin-focus); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(input, textarea, select, progress) { accent-color: var(--dotin-red); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.primary, .card-check[aria-pressed="true"]) {
+  background-color: var(--dotin-red);
+  border-color: var(--dotin-red);
+  color: var(--dotin-on-red);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.primary, .card-check[aria-pressed="true"]):hover:not(:disabled) {
+  background-color: var(--dotin-red-hover);
+  border-color: var(--dotin-red-hover);
+  filter: none;
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) #import-button {
+  background-color: var(--dotin-control);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) #import-button:hover:not(:disabled) {
+  background-color: var(--dotin-hover);
+  border-color: var(--dotin-control-line);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.top-tools-panel, .workspace-switcher, .asset-menu, .asset-filter-panel, .online-avatar-details) {
+  background-color: var(--panel);
+  border-color: var(--dotin-control-line);
+  color: var(--text);
+  box-shadow: 0 10px 28px var(--dotin-shadow);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) #asset-menu button[data-action="delete-source"] {
+  color: var(--dotin-danger);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.asset-filter-count, .asset-filter-search, [data-filter-count], .version-description small, .asset-list-header, .list-mode .card-info) { color: var(--muted); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .asset-filter-option[data-mode="exclude"] {
+  background: var(--dotin-warning-bg);
+  color: var(--dotin-warning);
+}
+
+/* Cards and media. Status overlays on real artwork stay opaque. */
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.asset-card, .subfolder-card, .tag-filter, .card-info) { border-color: var(--line); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.asset-card, .subfolder-card):is(:hover, .selected, .checked, :focus-visible) { border-color: var(--dotin-focus); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.asset-card.checked, .list-mode .asset-card.selected, .bulk-bar) {
+  background: var(--accent-dark);
+  border-color: var(--dotin-focus);
+  color: var(--text);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.asset-card.checked, .list-mode .asset-card.selected) .card-info { border-color: var(--dotin-focus); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.card-thumb, .preview-stage) {
+  background: radial-gradient(ellipse at 50% 34%, var(--dotin-thumb-start), var(--dotin-thumb-end));
+  border-color: var(--line);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.card-thumb .placeholder-icon, .card-thumb-format, .inspector-empty, .inspector-empty svg, .inspector-empty span, .empty-state) { color: var(--muted); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .empty-state h3 { color: var(--text); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.format-badge, .subfolder-icon, .card-native-drag, .preview-badge, .preview-actions button) {
+  background: #181818eb;
+  border-color: #777;
+  color: #fff;
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.rating-value, .workspace-pin-folder[aria-pressed="true"]) { color: var(--dotin-warning); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.workflow-pill, .dcc-target):not([data-status], [data-state]) {
+  background-color: var(--dotin-control);
+  color: var(--muted);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.workflow-pill[data-status="wip"], .format-boundary, .dcc-target[data-state="conflict"]) {
+  background: var(--dotin-warning-bg);
+  border-color: var(--dotin-control-line);
+  color: var(--dotin-warning);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .format-boundary :is(strong, p) { color: var(--dotin-warning); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.workflow-pill[data-status="review"], .dcc-target[data-state="update"]) {
+  background: var(--dotin-info-bg);
+  color: var(--dotin-info);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.workflow-pill[data-status="approved"], .dcc-online, .dcc-target[data-state="installed"], .job-status:not(.failed, .interrupted)) {
+  background: var(--dotin-success-bg);
+  color: var(--dotin-success);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.list-mode .asset-list-file-warning, .runtime-log-error, .creator-library-status[data-phase="error"], .creator-status[data-phase="error"], #creator-remove, #c4d-import-cache-size[data-error], #c4d-import-cache-status[data-error], .connections-modal #bridge-export-result.error, .c4d-drop-activity[data-status="failed"] :is(strong, #c4d-drop-detail)) { color: var(--dotin-danger); }
+
+/* Dialogs and supporting surfaces */
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) dialog.modal {
+  background: var(--panel);
+  border-color: var(--dotin-control-line);
+  color: var(--text);
+  box-shadow: 0 16px 44px var(--dotin-shadow);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) dialog.modal::backdrop { background: var(--dotin-backdrop); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.modal .button.danger, .toast.error, .job-status:is(.failed, .interrupted), .c4d-drop-activity[data-status="failed"]) {
+  background: var(--dotin-danger-bg);
+  border-color: var(--dotin-focus);
+  color: var(--dotin-danger);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.toast:not(.error), .progress-box, .c4d-drop-activity:not([data-status="failed"])) {
+  background: var(--dotin-control);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.workspace-choice-icon, .dcc-logo, .creator-mark, .team-profile-avatar, .browser-site-mark) {
+  background: var(--accent-dark);
+  border-color: var(--line);
+  color: var(--accent);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.job-info p, .section-heading span, .dcc-targets, .dcc-card-actions :is(.dcc-export, .dcc-import-settings), .connections-modal .dcc-info .dcc-placement-help, .asset-list-name small, .creator-player-feedback p) { color: var(--muted); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.connections-modal #bridge-export-result:not(.error), .dcc-placement) { color: var(--accent); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(#runtime-log-entries, .creator-player-feedback) {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.creator-card, .creator-work):hover { border-color: var(--dotin-focus); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.creator-player-stage, .quick-video-player) { background: #141414; }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .quick-video-buffered > span { background: var(--dotin-control-line); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(.browser-site-confirm p, .browser-capture-feedback[data-error="true"], [data-state="failed"] .browser-capture-state, .workspace-search-error, #browser-site-form-status, #browser-site-remove, #browser-site-confirm-remove) { color: var(--dotin-danger); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) #browser-site-save {
+  background: var(--dotin-red);
+  border-color: var(--dotin-red);
+  color: var(--dotin-on-red);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) #browser-site-save:hover:not(:disabled) {
+  background: var(--dotin-red-hover);
+  border-color: var(--dotin-red-hover);
+  filter: none;
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) #selection-marquee {
+  border-color: var(--dotin-focus);
+  background: color-mix(in srgb, var(--dotin-red) 15%, transparent);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) :is(#drag-badge, .dragging-assets .drop-target-active) {
+  background: var(--accent-dark);
+  border-color: var(--dotin-focus);
+  color: var(--accent);
+}
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) ::-webkit-scrollbar-thumb { background: var(--dotin-control-line); }
+
+html:is([data-theme="dotin-light"], [data-theme="dotin-dark"]) .workspace-home-card:not([data-home-view="all"]) { --card-tone: var(--muted); }
+
+/* Semantic colors with sufficient contrast on the lighter surfaces. */
+html[data-theme="dotin-light"] .card-favorite.is-favorite svg,
+html[data-theme="dotin-light"] #detail-favorite.is-favorite svg { color: #8b550b; fill: #f4b95b; }
+html[data-theme="dotin-light"] .whiteboard-item[data-kind="text"] { color: color-mix(in srgb, var(--board-fill) 35%, #171717); }
