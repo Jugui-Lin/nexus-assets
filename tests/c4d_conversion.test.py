@@ -66,12 +66,13 @@ class MaxTextureTests(TestCase):
     @classmethod
     def setUpClass(cls):
         script = ast.parse(DECODER._WORKER)
-        names = {"file_asset_metadata", "ProjectImages", "preserve_legacy_corona_images"}
+        names = {"file_asset_metadata", "corona_bitmap_asset_path", "ProjectImages", "preserve_legacy_corona_images"}
         definitions = [node for node in script.body
                        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
         namespace = {"os": os, "stat": stat, "struct": struct, "PureWindowsPath": PureWindowsPath}
         exec(compile(ast.Module(body=definitions, type_ignores=[]), str(DECODE_PATH), "exec"), namespace)
         cls.metadata = staticmethod(namespace["file_asset_metadata"])
+        cls.corona_bitmap = staticmethod(namespace["corona_bitmap_asset_path"])
         cls.project_images = namespace["ProjectImages"]
         cls.legacy_corona = staticmethod(namespace["preserve_legacy_corona_images"])
 
@@ -86,10 +87,30 @@ class MaxTextureTests(TestCase):
     def test_reads_unicode_asset_paths_and_unambiguous_legacy_ids(self):
         original = r"G:\失效目录\原始_树.png"
         saved = r"maps\贴图_树_😀.png"
-        data = self.record(101, 8, 2, "Bitmap", original, saved)
-        data += self.record(102, 9, 2, "Bitmap", original, "")
-        self.assertEqual(self.metadata(data), ({101: saved, 102: original},
-                                               {8: saved, 9: original, 2: None}))
+        first = self.record(101, 8, 2, "Bitmap", original, saved)
+        second = self.record(102, 9, 2, "Bitmap", original, "")
+        self.assertEqual(self.metadata(first + second), ({101: saved, 102: original},
+                                                         {8: saved, 9: original, 2: None},
+                                                         {first[:16]: saved, second[:16]: original}))
+
+    def test_corona_bitmap_uses_exact_unambiguous_bitmap_guid(self):
+        original = self.record(101, 8, 2, "Bitmap", "", "maps/normal.png")
+        unrelated = self.record(101, 9, 2, "Bitmap", "", "maps/not-this.png")
+        conflicting = self.record(101, 8, 2, "Bitmap", "", "maps/different.png")
+        non_bitmap = self.record(101, 8, 2, "ExternalReference", "", "scene.max")
+        identifier = SimpleNamespace(data=original[:16])
+        asset = SimpleNamespace(get_first={0x0002: identifier}.get)
+        parameters = SimpleNamespace(guid=0x82, get_first={0x000F: asset}.get)
+        bitmap = SimpleNamespace(guid=0x65484244ABBA5784)
+        reader = SimpleNamespace(get_guid=lambda chunk: getattr(chunk, "guid", None),
+                                 get_references=lambda _chunk: [parameters])
+        self.assertEqual(self.corona_bitmap(reader, bitmap, self.metadata(original + unrelated)[2]),
+                         "maps/normal.png")
+        self.assertIsNone(self.corona_bitmap(reader, bitmap, self.metadata(original + conflicting)[2]))
+        self.assertIsNone(self.corona_bitmap(reader, bitmap, self.metadata(non_bitmap)[2]))
+        self.assertIsNone(self.corona_bitmap(reader, SimpleNamespace(guid=0x240), self.metadata(original)[2]))
+        identifier.data = original[:15]
+        self.assertIsNone(self.corona_bitmap(reader, bitmap, self.metadata(original)[2]))
 
     def test_metadata_with_truncated_or_invalid_utf16_is_left_to_pinned_parser(self):
         valid = self.record(101, 8, 2, "Bitmap", "", "texture.jpg")

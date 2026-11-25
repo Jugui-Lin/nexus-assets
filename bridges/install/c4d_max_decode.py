@@ -103,10 +103,12 @@ def file_asset_metadata(data):
         return None
     paths = {}
     aliases = {}
+    bitmap_guids = {}
     offset = 0
     try:
         while offset < len(data):
             first, short, key = struct.unpack_from("<IH6xI", data, offset)
+            guid = data[offset:offset + 16]
             offset += 16
             fields = []
             for _ in range(3):
@@ -123,6 +125,10 @@ def file_asset_metadata(data):
             if not asset_type or not asset_type.isascii():
                 return None
             path = saved or original
+            bitmap = path if asset_type == "Bitmap" and path else None
+            if guid in bitmap_guids and bitmap_guids[guid] != bitmap:
+                bitmap = None
+            bitmap_guids[guid] = bitmap
             if path:
                 paths[key] = path if key not in paths or paths[key] == path else None
                 # Older bitmap chunks also use the GUID's first integer or
@@ -131,7 +137,22 @@ def file_asset_metadata(data):
                     aliases[alias] = path if alias not in aliases or aliases[alias] == path else None
     except (struct.error, UnicodeError):
         return None
-    return paths, aliases
+    return paths, aliases, bitmap_guids
+
+
+def corona_bitmap_asset_path(reader, bitmap, bitmap_guids):
+    if reader.get_guid(bitmap) != 0x65484244ABBA5784:  # CoronaBitmap.
+        return None
+    references = reader.get_references(bitmap)
+    block = references[0] if references else None
+    if reader.get_guid(block) != 0x82:  # ParamBlock2.
+        return None
+    asset = block.get_first(0x000F)
+    identifier = asset.get_first(0x0002) if asset else None
+    guid = identifier.data if identifier else None
+    if not isinstance(guid, bytes) or len(guid) != 16:
+        return None
+    return bitmap_guids.get(guid)
 
 
 class ProjectImages:
@@ -293,6 +314,7 @@ reader = importlib.import_module(spec.name + ".import_max")
 make_scene = reader.make_scene
 set_metadata = reader.ByteArrayChunk.set_meta_data
 get_metadata = reader.get_metadata
+get_bitmap = reader.get_bitmap
 build_corona = reader.get_corona_material
 
 
@@ -308,8 +330,16 @@ def find_asset_path(index):
     paths = getattr(reader.META_DATA[0], "nexus_paths", None) if reader.META_DATA else None
     if paths is None:
         return get_metadata(index)
-    primary, aliases = paths
+    primary, aliases, _bitmap_guids = paths
     return primary.get(index, aliases.get(index))
+
+
+def find_bitmap_path(bitmap):
+    path = get_bitmap(bitmap)
+    if path:
+        return path
+    paths = getattr(reader.META_DATA[0], "nexus_paths", None) if reader.META_DATA else None
+    return corona_bitmap_asset_path(reader, bitmap, paths[2]) if paths is not None else None
 
 
 def build_corona_material(references):
@@ -670,6 +700,7 @@ def build_scene(context, settings, mscale, transform, parent):
 reader.make_scene = build_scene
 reader.ByteArrayChunk.set_meta_data = set_asset_metadata
 reader.get_metadata = find_asset_path
+reader.get_bitmap = find_bitmap_path
 reader.get_corona_material = build_corona_material
 reader.nexus_source_materials = {}
 
