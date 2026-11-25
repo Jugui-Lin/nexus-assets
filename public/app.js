@@ -2153,12 +2153,38 @@ for (const selector of ['#settings', '#connection-summary']) {
   });
 }
 const nexusUpdater = initNexusUpdater({api,enabled:native,panel:$('#nexus-updater'),indicator:$('#about-button')});
+let aboutTeamVersionRequest = 0;
 for (const id of ['#about-button', '#sidebar-version']) {
   $(id).addEventListener('click', () => {
     closeTopTools(true);
     openDialog('#about-dialog');
     nexusUpdater.opened();
+    showTeamServiceVersion();
   });
+}
+async function showTeamServiceVersion() {
+  const request = ++aboutTeamVersionRequest;
+  const teamId = native && team.active ? team.info?.team.id : null;
+  const row = $('#about-team-version-row');
+  const value = $('#about-team-version');
+  row.hidden = !teamId;
+  value.textContent = '';
+  if (!teamId) return;
+  const epoch = team.epoch;
+  value.textContent = '正在读取…';
+  let version;
+  try {
+    const result = await api('team_service_info', {teamId});
+    version = result?.serverVersion || '版本未上报';
+  } catch {
+    version = '暂时无法读取';
+  }
+  if (request !== aboutTeamVersionRequest) return;
+  if (!team.active || team.epoch !== epoch || team.info?.team.id !== teamId) {
+    row.hidden = true;
+    return;
+  }
+  value.textContent = version;
 }
 async function showClientVersion() {
   const version = $('#about-version');

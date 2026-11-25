@@ -2129,7 +2129,12 @@ async fn service_info(State(store): State<Store>, headers: HeaderMap) -> ApiResu
                 row.get(0)
             })
             .map_err(db_error)?;
-        Ok(json!({"teamId":team_id,"memberId":member.id,"role":member.role}))
+        Ok(json!({
+            "teamId": team_id,
+            "memberId": member.id,
+            "role": member.role,
+            "serverVersion": env!("CARGO_PKG_VERSION")
+        }))
     })
     .await
 }

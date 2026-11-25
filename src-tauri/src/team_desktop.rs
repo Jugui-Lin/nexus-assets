@@ -65,6 +65,14 @@ impl ConnectionIdentity {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamServiceInfo {
+    #[serde(flatten)]
+    identity: ConnectionIdentity,
+    server_version: Option<String>,
+}
+
 #[derive(PartialEq)]
 struct ActiveConnection {
     config: Connection,
@@ -1612,6 +1620,21 @@ pub fn team_status(state: tauri::State<'_, Desktop>) -> Value {
         }
         None => json!({"configured":false}),
     }
+}
+
+#[tauri::command]
+pub async fn team_service_info(
+    state: tauri::State<'_, Desktop>,
+    team_id: String,
+) -> Result<Value, String> {
+    let active = state.connection_for_team(&team_id)?;
+    let info: TeamServiceInfo = state
+        .request(&active.config, Method::GET, "/v1/info", None)
+        .await?;
+    if info.identity != active.identity || state.active_connection()? != active {
+        return Err("团队连接已切换，请重新获取服务信息".into());
+    }
+    Ok(json!({"serverVersion": info.server_version}))
 }
 
 #[tauri::command]

@@ -857,12 +857,19 @@ test('members edit only their own profile and share versioned avatars through th
     server = running.server;
     let request = teamRequest(running.address);
     const url = 'members/' + first.id + '/avatar';
+    assert.equal((await request('GET', 'info')).status, 401);
     assert.equal((await request('GET', 'profile')).status, 401);
     assert.equal((await request('GET', url)).status, 401);
     const original = (await request('GET', 'profile', first)).json;
     assert.deepEqual(original, {name: '美术甲', avatarUrl: null});
     assert.deepEqual((await request('GET', url, peer)).json, {avatarUrl: null});
-    const catalogRevision = (await request('GET', 'catalog/full', first)).json.revision;
+    const initialCatalog = (await request('GET', 'catalog/full', first)).json;
+    const catalogRevision = initialCatalog.revision;
+    const info = await request('GET', 'info', first);
+    assert.equal(info.status, 200);
+    const {serverVersion, ...existingIdentity} = info.json;
+    assert.match(serverVersion, /^\d+\.\d+\.\d+(?:[-+][\w.+-]+)?$/);
+    assert.deepEqual(existingIdentity, {teamId:initialCatalog.team.id, memberId:first.id, role:'member'});
 
     assert.equal((await request('PATCH', 'profile', first, {name: '\n', avatarAction: 'keep'})).status, 400);
     assert.equal((await request('PATCH', 'profile', first, {

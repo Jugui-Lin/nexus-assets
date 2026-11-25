@@ -1068,6 +1068,7 @@ fn main() {
             personal_tags::rename_local_tag,
             personal_tags::delete_local_tag,
             team_desktop::team_status,
+            team_desktop::team_service_info,
             team_desktop::team_online_members,
             team_desktop::team_get_profile,
             team_desktop::team_save_profile,
