@@ -1,0 +1,171 @@
+name: Publish NAS image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published Windows release tag, such as v0.10.45
+        required: true
+        default: v0.10.45
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: nexus-team-ghcr
+  cancel-in-progress: false
+
+jobs:
+  publish-linux-amd64:
+    if: github.repository == 'Jugui-Lin/nexus-assets'
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: ghcr.io/jugui-lin/nexus-team
+    steps:
+      - name: Resolve the published Windows release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a stable release tag such as v0.10.45' >&2
+            exit 1
+          fi
+          version="${TAG#v}"
+          installer="nexus-assets-${version}-windows-x64-setup.exe"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" |
+            jq -e --arg tag "$TAG" --arg installer "$installer" '
+              .tag_name == $tag and .draft == false and .prerelease == false and
+              (.assets | map(.name) | index("latest.json") != null and
+                index($installer) != null and index($installer + ".sig") != null)
+            ' >/dev/null
+          printf 'tag=%s\nversion=%s\n' "$TAG" "$version" >> "$GITHUB_OUTPUT"
+      - name: Check out the build recipe
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          persist-credentials: false
+      - name: Check out the released source
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          path: source
+          persist-credentials: false
+      - name: Verify the release version and prepare the Docker context
+        id: source
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          src = Path("source/src-tauri")
+          expected = sys.argv[1]
+          cargo = tomllib.loads((src / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+          tauri = json.loads((src / "tauri.conf.json").read_text(encoding="utf-8"))["version"]
+          if cargo != expected or tauri != expected:
+              raise SystemExit(f"Tag version {expected} does not match Cargo ({cargo}) and Tauri ({tauri})")
+          PY
+          printf 'commit=%s\n' "$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          cat > source/.dockerignore <<'DOCKERIGNORE'
+          **
+          !src-tauri/
+          !src-tauri/Cargo.toml
+          !src-tauri/Cargo.lock
+          !src-tauri/build.rs
+          !src-tauri/src/
+          !src-tauri/src/**
+          !resources/
+          !resources/demo/
+          !resources/demo/**
+          DOCKERIGNORE
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Check whether this version is already published
+        id: existing
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          REVISION: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .}}' \
+              > "$RUNNER_TEMP/version-image.json" 2> "$RUNNER_TEMP/version-image-error"; then
+            digest="$(jq -er --arg version "$VERSION" --arg revision "$REVISION" '
+              select(.image.os == "linux" and .image.architecture == "amd64" and
+                .image.config.Labels["org.opencontainers.image.version"] == $version and
+                .image.config.Labels["org.opencontainers.image.revision"] == $revision) | .manifest.digest
+              ' "$RUNNER_TEMP/version-image.json")"
+            printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          elif ! grep -Eiq 'manifest unknown|name unknown|not found|denied' "$RUNNER_TEMP/version-image-error"; then
+            cat "$RUNNER_TEMP/version-image-error" >&2
+            exit 1
+          fi
+      - name: Build the linux/amd64 service
+        if: steps.existing.outputs.digest == ''
+        uses: docker/build-push-action@v7
+        with:
+          context: source
+          file: automation/nas/Dockerfile
+          target: team-core
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE }}:${{ steps.release.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.commit }}
+          load: true
+          provenance: false
+          sbom: false
+      - name: Verify the service and push the version
+        if: steps.existing.outputs.digest == ''
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network none "$IMAGE:$VERSION" --help
+          docker push "$IMAGE:$VERSION"
+      - name: Promote the version digest to stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ "$TAG" != "$latest" ]]; then
+            printf 'Keeping stable unchanged because the current Windows release is %s\n' "$latest"
+            exit 0
+          fi
+          digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -er '.digest')"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          if docker buildx imagetools inspect "$IMAGE:stable" --format '{{json .}}' \
+              > "$RUNNER_TEMP/stable-image.json" 2> "$RUNNER_TEMP/stable-image-error"; then
+            current="$(jq -er '.image.config.Labels["org.opencontainers.image.version"]' "$RUNNER_TEMP/stable-image.json")"
+            [[ "$current" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+            if [[ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n 1)" == "$current" ]]; then
+              printf 'Keeping stable at %s\n' "$current"
+              exit 0
+            fi
+          elif ! grep -Eiq 'manifest unknown|name unknown|not found' "$RUNNER_TEMP/stable-image-error"; then
+            cat "$RUNNER_TEMP/stable-image-error" >&2
+            exit 1
+          fi
+          docker buildx imagetools create --prefer-index=false --tag "$IMAGE:stable" "$IMAGE@$digest"
+          published="$(docker buildx imagetools inspect "$IMAGE:stable" --format '{{json .Manifest}}' | jq -er '.digest')"
+          [[ "$published" == "$digest" ]]
+          printf 'Stable %s at %s\n' "$VERSION" "$digest"

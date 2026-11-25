@@ -20,12 +20,15 @@ RUN set -eu; \
       chmod 0755 /output/bdpan; \
     fi
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS team-core
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/src-tauri/target/release/nexus-team /usr/local/bin/nexus-team
-COPY --from=baidu /output/ /usr/local/bin/
 USER 1000:1000
 RUN ["/usr/local/bin/nexus-team", "--help"]
 ENTRYPOINT ["/usr/local/bin/nexus-team"]
 CMD ["--help"]
+
+# Local deployments also bundle the optional provider.
+FROM team-core AS team
+COPY --from=baidu /output/ /usr/local/bin/
