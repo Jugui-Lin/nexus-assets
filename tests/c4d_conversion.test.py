@@ -66,13 +66,15 @@ class MaxTextureTests(TestCase):
     @classmethod
     def setUpClass(cls):
         script = ast.parse(DECODER._WORKER)
-        names = {"file_asset_metadata", "corona_bitmap_asset_path", "ProjectImages", "preserve_legacy_corona_images"}
+        names = {"file_asset_metadata", "corona_bitmap_asset_path", "disabled_corona_channels",
+                 "ProjectImages", "preserve_legacy_corona_images"}
         definitions = [node for node in script.body
                        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
         namespace = {"os": os, "stat": stat, "struct": struct, "PureWindowsPath": PureWindowsPath}
         exec(compile(ast.Module(body=definitions, type_ignores=[]), str(DECODE_PATH), "exec"), namespace)
         cls.metadata = staticmethod(namespace["file_asset_metadata"])
         cls.corona_bitmap = staticmethod(namespace["corona_bitmap_asset_path"])
+        cls.disabled_channels = staticmethod(namespace["disabled_corona_channels"])
         cls.project_images = namespace["ProjectImages"]
         cls.legacy_corona = staticmethod(namespace["preserve_legacy_corona_images"])
 
@@ -111,6 +113,19 @@ class MaxTextureTests(TestCase):
         self.assertIsNone(self.corona_bitmap(reader, SimpleNamespace(guid=0x240), self.metadata(original)[2]))
         identifier.data = original[:15]
         self.assertIsNone(self.corona_bitmap(reader, bitmap, self.metadata(original)[2]))
+
+    def test_corona_map_filter_uses_only_known_explicit_disabled_flags(self):
+        def flag(identifier, enabled, kind=4):
+            return SimpleNamespace(types=0x100E,
+                                   data=struct.pack("<HI9xi", identifier, kind, enabled))
+
+        self.assertEqual(self.disabled_channels(SimpleNamespace(children=[flag(0xA3, 1), flag(0xA7, 0)])),
+                         {"normalmap"})
+        self.assertEqual(self.disabled_channels(SimpleNamespace(children=[flag(0xA3, 0), flag(0xA7, 1)])),
+                         {"glossmap"})
+        self.assertEqual(self.disabled_channels(SimpleNamespace(children=[flag(0xA7, 0, kind=0), flag(0xAE, 0)])),
+                         set())
+        self.assertEqual(self.disabled_channels(None), set())
 
     def test_metadata_with_truncated_or_invalid_utf16_is_left_to_pinned_parser(self):
         valid = self.record(101, 8, 2, "Bitmap", "", "texture.jpg")

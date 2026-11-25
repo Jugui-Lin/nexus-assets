@@ -155,6 +155,19 @@ def corona_bitmap_asset_path(reader, bitmap, bitmap_guids):
     return bitmap_guids.get(guid)
 
 
+def disabled_corona_channels(block):
+    flags = {0xA3: "glossmap", 0xA7: "normalmap"}
+    disabled = set()
+    for child in getattr(block, "children", ()):
+        data = child.data
+        if child.types != 0x100E or not isinstance(data, bytes) or len(data) != 19:
+            continue
+        identifier, kind = struct.unpack_from("<HI", data)
+        if kind == 4 and identifier in flags and data[15:] == bytes(4):
+            disabled.add(flags[identifier])
+    return disabled
+
+
 class ProjectImages:
     def __init__(self, directory, load_image):
         self.directory = directory
@@ -345,6 +358,9 @@ def find_bitmap_path(bitmap):
 def build_corona_material(references):
     material = build_corona(references)
     preserve_legacy_corona_images(reader, material, references)
+    if references:
+        for channel in disabled_corona_channels(references[0]):
+            material.set(channel, None)
     return material
 
 
@@ -639,7 +655,10 @@ def source_material_levels():
         gloss = numeric_parameter(fields.get(0xB4), "<f")
         if len(gloss) == 1 and 0 <= gloss[0] <= 1:
             values["roughness"] = 1 - gloss[0]
-        normal = reader.get_reference(parameter_block(source)).get(6) if fields else None
+        block = parameter_block(source)
+        normal = None
+        if fields and "normalmap" not in disabled_corona_channels(block):
+            normal = reader.get_reference(block).get(6)
         if reader.get_guid(normal) == 0xCC18437C2870CEAA:  # CoronaNormal.
             strength = numeric_parameter(corona_parameters(normal).get(0x1F5), "<f")
             texture = reference_slots(parameter_block(normal), 1)[0]
