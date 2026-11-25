@@ -158,7 +158,11 @@ class SmartImporter:
                             plan["max_material_settings"] = scene_settings["materials"]
                         if scene_settings.get("lights"):
                             plan["max_light_settings"] = scene_settings["lights"]
-                    if mode == "direct" and not export and (scene_import or {}).get("textures", True):
+                    restore_textures = scene_import is None or scene_import["materials"] and scene_import["textures"]
+                    if mode == "direct" and not export and restore_textures:
+                        bindings = self.max_decode.texture_bindings(plan["path"], source)
+                        if bindings:
+                            plan["scene_material_maps"] = bindings
                         baked = self.preparation.collect_baked_scene_maps(source, options, cache)
                         if baked:
                             plan["baked_material_maps"] = baked

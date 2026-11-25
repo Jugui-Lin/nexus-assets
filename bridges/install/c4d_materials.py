@@ -847,9 +847,13 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
     source_settings = plan.get("max_material_settings")
     if not isinstance(source_settings, dict):
         source_settings = {}
+    source_maps = plan.get("scene_material_maps") if include_source else None
+    if not isinstance(source_maps, dict):
+        source_maps = {}
     baked = _baked_material_channels(plan, (material.GetName() for material in originals)) if include_source else {}
     converted = 0
     linked = 0
+    source_links = 0
     restored = 0
     notes = []
     failed = []
@@ -864,8 +868,14 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
                 kept += 1
                 continue
             source = source_settings.get(name) if names[name] == 1 else None
-            if "normal" not in channels and _matches_source_normal(source, channels.get("bump")):
+            authored = source_maps.get(name, {}) if names[name] == 1 else {}
+            normal_path = authored.get("normal")
+            bump_path = channels.get("bump")
+            same_bitmap = normal_path and bump_path and os.path.normcase(normal_path) == os.path.normcase(bump_path)
+            if "normal" not in channels and (same_bitmap or _matches_source_normal(source, bump_path)):
                 channels["normal"] = channels.pop("bump")
+            source_supplements = {key: path for key, path in authored.items() if key not in channels}
+            channels.update(source_supplements)
             supplements = {key: path for key, path in baked.get(name, {}).items()
                            if key not in channels and not (key == "bump" and "normal" in channels)}
             channels.update(supplements)
@@ -892,11 +902,14 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
         original.Remove()
         converted += 1
         linked += len(channels)
+        source_links += len(source_supplements)
         restored += len(supplements)
         notes.extend(warning for warning in warnings if warning not in notes)
     if failed and not converted and not kept:
         raise RuntimeError(failed[0])
     results = [f"已转换 {converted} 个 Octane 材质，连接 {linked} 个实际贴图通道"] if converted else []
+    if source_links:
+        results.append(f"从源材质补接 {source_links} 个贴图通道")
     if restored:
         results.append(f"从目录补接 {restored} 个烘焙贴图通道")
     if failed:

@@ -24,6 +24,21 @@ _VERSION_MARKER = b"NEXUS_MAX_DECODE_BLENDER_VERSION"
 _GEOMETRY_MARKER = b"NEXUS_MAX_DECODE_NO_GEOMETRY"
 _UNITS_MARKER = b"NEXUS_MAX_DECODE_UNKNOWN_UNITS"
 _LOG_TAIL_BYTES = 64 * 1024
+_TEXTURE_MANIFEST_FILE = "texture-bindings.json"
+_TEXTURE_MANIFEST_BYTES = 2 * 1024 * 1024
+_TEXTURE_MANIFEST_MATERIALS = 8192
+_TEXTURE_MANIFEST_UNIQUE_FILES = 4096
+_TEXTURE_TYPES = frozenset((".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".webp",
+                            ".psd", ".dds", ".hdr", ".exr"))
+_TEXTURE_SLOTS = (
+    ("base_color", ("base_color_texture",)),
+    ("roughness", ("roughness_texture",)),
+    ("specular", ("specular_texture", "specular_tint_texture")),
+    ("metallic", ("metallic_texture",)),
+    ("normal", ("normalmap_texture",)),
+    ("opacity", ("alpha_texture",)),
+    ("emission", ("emission_color_texture", "emission_strength_texture")),
+)
 _PHASES = {
     "starting": "启动 Blender",
     "reading": "读取和解码 MAX 场景",
@@ -32,7 +47,11 @@ _PHASES = {
     "exported": "检查 FBX 输出",
 }
 
-_WORKER = """
+_WORKER = (f"TEXTURE_SLOTS = {_TEXTURE_SLOTS!r}\n"
+           f"TEXTURE_TYPES = {tuple(sorted(_TEXTURE_TYPES))!r}\n"
+           f"TEXTURE_MANIFEST_FILE = {_TEXTURE_MANIFEST_FILE!r}\n"
+           f"TEXTURE_MANIFEST_BYTES = {_TEXTURE_MANIFEST_BYTES}\n"
+           f"TEXTURE_MANIFEST_MATERIALS = {_TEXTURE_MANIFEST_MATERIALS}\n") + """
 import importlib.util
 import json
 import math
@@ -121,6 +140,7 @@ class ProjectImages:
         self.load_image = load_image
         self.files = None
         self.images = {}
+        self.loaded_paths = {}
 
     def _index(self):
         files = {}
@@ -167,7 +187,17 @@ class ProjectImages:
                 self.files = self._index()
             path, _ = self.files.get(key, (None, False))
             self.images[key] = self.load_image(path, place_holder=False, recursive=False, check_existing=True) if path else None
+            if self.images[key] is not None:
+                self.loaded_paths[os.path.normcase(os.path.normpath(path))] = path
         return self.images[key]
+
+    def path_for(self, image):
+        if image is None or image.source != "FILE" or not image.filepath:
+            return None
+        # Blender duplicates datablocks for some linear/color uses. A copy can
+        # retain the same original filename, so match the approved path itself.
+        path = self.loaded_paths.get(os.path.normcase(os.path.normpath(image.filepath)))
+        return path if path and Path(path).suffix.casefold() in TEXTURE_TYPES else None
 
     def report(self, materials):
         linked = sum(link.from_node.type == "TEX_IMAGE" and link.from_node.image is not None
@@ -175,6 +205,52 @@ class ProjectImages:
                      for link in material.node_tree.links)
         missing = sum(image is None for image in self.images.values())
         print(f"NEXUS_MAX_TEXTURES {linked} {missing}", flush=True)
+
+
+def material_texture_bindings(objects, images, wrap_material):
+    materials = {slot.material.name: slot.material for obj in objects
+                 for slot in obj.material_slots if slot.material and slot.material.use_nodes}
+    if len(materials) > TEXTURE_MANIFEST_MATERIALS:
+        return {}
+    result = {}
+    for name, material in materials.items():
+        try:
+            shader = wrap_material(material, is_readonly=True)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            continue
+        channels = {}
+        for key, attributes in TEXTURE_SLOTS:
+            for attribute in attributes:
+                try:
+                    texture = getattr(shader, attribute, None)
+                    path = images.path_for(texture.image) if texture is not None else None
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    continue
+                if path:
+                    channels[key] = path
+                    break
+        if channels:
+            result[name] = channels
+    return result
+
+
+def save_texture_bindings(output, source, objects, images, wrap_material):
+    try:
+        materials = material_texture_bindings(objects, images, wrap_material)
+        if not materials:
+            return
+        data = json.dumps({"version": 1, "source": str(source), "materials": materials},
+                          ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(data) > TEXTURE_MANIFEST_BYTES:
+            return
+        manifest = output.with_name(TEXTURE_MANIFEST_FILE)
+        temporary = manifest.with_suffix(".tmp")
+        with temporary.open("xb") as handle:
+            handle.write(data)
+        os.replace(temporary, manifest)
+        print(f"NEXUS_MAX_TEXTURE_BINDINGS {len(materials)} {sum(map(len, materials.values()))}", flush=True)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        print("NEXUS_MAX_TEXTURE_BINDINGS unavailable", flush=True)
 
 
 def preserve_legacy_corona_images(reader, material, references):
@@ -599,6 +675,7 @@ reader.nexus_source_materials = {}
 
 try:
     source = Path(os.environ["NEXUS_MAX_DECODE_SOURCE"])
+    output = Path(os.environ["NEXUS_MAX_DECODE_OUTPUT"])
     images = ProjectImages(source.parent, reader.load_image)
     reader.load_image = images.load
     mark_phase("reading")
@@ -626,15 +703,16 @@ try:
         if not (mesh.has_custom_normals or mesh.attributes.get("sharp_edge") or mesh.attributes.get("sharp_face")):
             mesh.set_sharp_from_angle(angle=math.radians(60))
     result = bpy.ops.export_scene.fbx(
-        filepath=os.environ["NEXUS_MAX_DECODE_OUTPUT"], path_mode="COPY",
+        filepath=str(output), path_mode="COPY",
         embed_textures=True, use_selection=False,
         apply_unit_scale=True, apply_scale_options="FBX_SCALE_NONE",
     )
     if "FINISHED" not in result:
         raise RuntimeError("FBX export did not finish")
+    save_texture_bindings(output, source, bpy.context.scene.objects, images, reader.PrincipledBSDFWrapper)
     images.report(bpy.data.materials)
     try:
-        save_render_settings(Path(os.environ["NEXUS_MAX_DECODE_OUTPUT"]), meters_per_unit)
+        save_render_settings(output, meters_per_unit)
     except (OSError, ValueError, OverflowError):
         print("NEXUS_MAX_RENDER_SETTINGS unavailable", flush=True)
     print("NEXUS_MAX_SCENE_OBJECTS", *scene_object_counts, flush=True)
@@ -693,6 +771,57 @@ def _log_tail(log):
     with log.open("rb") as handle:
         handle.seek(max(0, handle.seek(0, os.SEEK_END) - _LOG_TAIL_BYTES))
         return handle.read(_LOG_TAIL_BYTES)
+
+
+def texture_bindings(output, source):
+    """Read original bitmap bindings produced for this direct MAX conversion."""
+    try:
+        with Path(output).with_name(_TEXTURE_MANIFEST_FILE).open("rb") as handle:
+            raw = handle.read(_TEXTURE_MANIFEST_BYTES + 1)
+        if len(raw) > _TEXTURE_MANIFEST_BYTES:
+            return {}
+        manifest = json.loads(raw)
+        source = Path(source).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return {}
+    if (not isinstance(manifest, dict) or type(manifest.get("version")) is not int or manifest["version"] != 1
+            or not isinstance(manifest.get("source"), str) or source != Path(manifest["source"])):
+        return {}
+    materials = manifest.get("materials")
+    if not isinstance(materials, dict) or len(materials) > _TEXTURE_MANIFEST_MATERIALS:
+        return {}
+    root = source.parent
+    allowed = {key for key, _ in _TEXTURE_SLOTS}
+    checked = {}
+    result = {}
+    for name, channels in materials.items():
+        if not name or len(name) > 256 or any(ord(character) < 32 for character in name):
+            continue
+        if not isinstance(channels, dict) or len(channels) > len(allowed):
+            continue
+        approved = {}
+        for key, path in channels.items():
+            if key not in allowed or not isinstance(path, str) or not 0 < len(path) <= 4096 or "\0" in path:
+                continue
+            if path not in checked:
+                if len(checked) == _TEXTURE_MANIFEST_UNIQUE_FILES:
+                    return {}
+                checked[path] = None
+                candidate = Path(path)
+                if (not candidate.is_absolute() or ".." in candidate.parts
+                        or candidate.suffix.casefold() not in _TEXTURE_TYPES or not candidate.is_relative_to(root)):
+                    continue
+                try:
+                    resolved = candidate.resolve(strict=True)
+                    if resolved.is_relative_to(root) and resolved.is_file():
+                        checked[path] = str(resolved)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+            if checked[path]:
+                approved[key] = checked[path]
+        if approved:
+            result[name] = approved
+    return result
 
 
 def texture_warning(output):

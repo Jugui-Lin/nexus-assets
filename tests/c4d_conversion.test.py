@@ -168,6 +168,27 @@ class MaxTextureTests(TestCase):
                     else:
                         self.assertEqual(report, "")
 
+    def test_texture_manifest_is_bound_to_the_scene_and_its_real_texture_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            assets = root / "assets"
+            assets.mkdir()
+            scene = assets / "scene.max"
+            texture = assets / "source-normal.png"
+            outside = root / "unrelated-rough.png"
+            for file in (scene, texture, outside):
+                file.touch()
+            output = root / "converted.fbx"
+            manifest = root / "texture-bindings.json"
+            data = {"version": 1, "source": str(scene), "materials": {"Surface": {
+                "normal": str(texture), "roughness": str(outside), "base_color": "not-an-absolute.png",
+                "opacity": str(assets / "missing.png")}}}
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            self.assertEqual(DECODER.texture_bindings(output, scene), {"Surface": {"normal": str(texture)}})
+            data["source"] = str(assets / "another.max")
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            self.assertEqual(DECODER.texture_bindings(output, scene), {})
+
 
 class ConversionTests(TestCase):
     def test_blender_command_sets_a_small_thread_count_before_loading_a_file(self):

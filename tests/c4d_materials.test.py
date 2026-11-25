@@ -160,6 +160,39 @@ class OctaneScalarTests(unittest.TestCase):
         self.c4d = SimpleNamespace(BaseMaterial=Node, BaseShader=Node, Vector=lambda *values: values)
         self.ids = MATERIALS._OCT_SYMBOLS
 
+    def test_authored_scene_bindings_fill_only_missing_channels_of_the_exact_material(self):
+        c4d = SimpleNamespace(Mmaterial="native", Ttexture="texture")
+        material = Node("native", "Surface")
+        unbound = Node("native", "Surface.C002")
+        names = []
+        doc = SimpleNamespace(InsertMaterial=lambda _mat: None, GetDocumentPath=lambda: "")
+        plan = {"path":"scene.fbx", "renderer":"octane", "scene_material_maps": {
+            "Surface": {"base_color":"original.png", "roughness":"roughness.png", "normal":"normal.png"}}}
+
+        def build(_c4d, name, channels, **_kwargs):
+            names.append((name, dict(channels)))
+            return Node("octane"), []
+
+        def imported(_c4d, node, _resolve):
+            channels = {"base_color":"embedded.png"}
+            if node == material:
+                channels["bump"] = "normal.png"
+            return channels, None, None, 0
+
+        with patch.object(MATERIALS, "wants_octane", return_value=True), patch.object(MATERIALS, "_renderer"), \
+                patch.object(MATERIALS, "_imported_octane_settings", return_value={}), \
+                patch.object(MATERIALS, "_imported_standard_channels", side_effect=imported), \
+                patch.object(MATERIALS, "_oct_material", side_effect=build):
+            report = MATERIALS.convert_octane(c4d, doc, [material, unbound], [], plan)
+            self.assertIn("从源材质补接 1 个贴图通道", report)
+            self.assertEqual(names, [("Surface", {"base_color":"embedded.png", "roughness":"roughness.png",
+                                                  "normal":"normal.png"}),
+                                     ("Surface.C002", {"base_color":"embedded.png"})])
+            names.clear()
+            plan["scene_import"] = {"textures":False}
+            MATERIALS.convert_octane(c4d, doc, [material], [], plan)
+        self.assertEqual(names, [("Surface", {"base_color":"embedded.png", "bump":"normal.png"})])
+
     def value(self, node, name):
         return node[self.ids[name]]
 

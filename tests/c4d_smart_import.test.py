@@ -273,6 +273,7 @@ class SmartImportTests(TestCase):
         importer.cache = Path("fixtures/cache")
         importer.cache_warning = None
         baked = {"c0001": {"base_color": "maps_baked/mat_C0001_diffuse.png"}}
+        authored = {"Surface": {"roughness": "maps/surface-rough.png"}}
         importer.preparation = SimpleNamespace(
             prepare=lambda _host, path, *_options: {"kind": "scene", "path": path},
             collect_baked_scene_maps=lambda *_: baked,
@@ -283,6 +284,7 @@ class SmartImportTests(TestCase):
             scene_object_warning=lambda *_: "MAX 直接解析：2 盏灯使用通用光源",
             render_settings=lambda _: {"materials": {"Surface": {"normal_strength": 0.4}},
                                        "lights": {"Sun": {"intensity": 0.3}}},
+            texture_bindings=lambda *_: authored,
         )
         requests = []
 
@@ -301,11 +303,18 @@ class SmartImportTests(TestCase):
             "MAX 直接解析：2 盏灯使用通用光源",
         ])
         self.assertEqual(plan["baked_material_maps"], baked)
+        self.assertEqual(plan["scene_material_maps"], authored)
         self.assertEqual(plan["max_material_settings"], {"Surface": {"normal_strength": 0.4}})
         self.assertEqual(plan["max_light_settings"], {"Sun": {"intensity": 0.3}})
         self.assertEqual(requests, [("source.MAX", "direct")])
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "preparing"})
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "direct-max"})
+        importer._prepare({"id": "drop", "path": "source.MAX", "options": {"max_mode": "direct",
+            "scene_import": {"objects":True, "materials":True, "textures":False}}}, 2)
+        _, _, plan, failure = importer.results.get_nowait()
+        self.assertIsNone(failure)
+        self.assertNotIn("scene_material_maps", plan)
+        self.assertNotIn("baked_material_maps", plan)
 
     def test_status_feedback_tracks_only_the_active_job_and_clears_when_cancelled(self):
         importer = self.importer
