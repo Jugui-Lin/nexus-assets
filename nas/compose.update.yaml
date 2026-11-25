@@ -1,0 +1,3 @@
+services:
+  nexus-team:
+    image: "${NEXUS_TEAM_UPDATE_IMAGE:?由 Nexus NAS 更新脚本设置目标镜像}"

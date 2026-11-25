@@ -23,6 +23,18 @@ docker compose up -d
 
 初始化只对没有团队的数据库生效。请保存初始化输出的管理员访问密钥。
 
+## GitHub 镜像自动更新
+
+将 `nas/compose.update.yaml` 放到团队服务项目目录，在 NAS 主机的计划任务中执行下面的命令。把目录、项目名和 Compose 文件名换成现有部署的值。
+
+```sh
+sh /path/to/nas/update-team.sh --project-directory /path/to/nexus-team --project-name nexus-team --compose-file docker-compose.yaml
+```
+
+脚本追踪 `ghcr.io/jugui-lin/nexus-team:stable`，保留 Compose 的原数据绑定，停服备份 SQLite 后按镜像摘要更新。启动检查失败时尝试回到原镜像，并在项目的 `.nexus-team-update/blocked` 记录结果。备份保存在 `.nexus-team-update/backups`。
+
+现有部署若附带百度网盘的 `bdpan`，可将 NAS 上的可执行文件以只读方式挂载到 `/usr/local/bin/bdpan`。定时任务应由有 Docker 权限的 NAS 管理账号运行，脚本和 Compose 配置应放在该账号控制的目录。
+
 ## 服务器自动扫描素材
 
 把 NAS 上实际的素材文件夹作为只读卷挂载进容器。0.9.5 起，可以在 `nexus-team` 服务的 Compose 配置中同时填写 `NEXUS_TEAM_WATCH_LIBRARY`（已有团队库的编号）和 `NEXUS_TEAM_WATCH_ROOT`（容器内的素材路径），服务启动时会登记自动扫描。保留原有数据库数据卷。成员对这个共享目录里的素材进行新增、修改或移动后，NAS 更新索引，客户端自动同步。
