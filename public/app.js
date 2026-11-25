@@ -41,8 +41,10 @@ const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const native=Boolean(window.__TAURI__?.core),invoke=window.__TAURI__?.core.invoke;
 const nativeDragOut = native && /Windows/i.test(navigator.userAgent);
 const runtimeLog = initRuntimeLog({copy:copyWorkspaceText});
+let pendingNativeRequests = 0;
 document.addEventListener('nexus-appearance-change', event => runtimeLog.add(`切换界面主题 · ${event.detail}`));
 const api=async(command,args={})=>{
+  if (native) pendingNativeRequests++;
   try {
     runtimeLog.start(command, args);
     let data;
@@ -57,6 +59,8 @@ const api=async(command,args={})=>{
   } catch (failure) {
     runtimeLog.operation(command, args, null, failure);
     throw failure;
+  } finally {
+    if (native) pendingNativeRequests--;
   }
 };
 const gridZoomKey = 'nexus-grid-zoom-width';
@@ -2155,6 +2159,12 @@ for (const selector of ['#settings', '#connection-summary']) {
 const nexusUpdater = initNexusUpdater({
   api, enabled:native, panel:$('#nexus-updater'),
   indicators:[topTools.querySelector('summary'), $('#about-button'), $('#sidebar-version')],
+  canRestart() {
+    return !pendingNativeRequests && !editor.dirty && !editor.saving &&
+      !folderScan && !ingestBusy && !publishing &&
+      !whiteboard.busyForUpdate() &&
+      !$('dialog[open]:not(#about-dialog), .asset-menu:not(.hidden), #files-drop-overlay:not(.hidden), .dragging-assets, .marquee-selecting');
+  },
 });
 let aboutTeamVersionRequest = 0;
 for (const id of ['#about-button', '#sidebar-version']) {

@@ -108,6 +108,13 @@ impl PlacementTickets {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn hold_if_idle(&self) -> Option<impl Sized + '_> {
+        let mut tickets = self.0.try_lock().ok()?;
+        Self::expire(&mut tickets);
+        tickets.is_empty().then_some(tickets)
+    }
+
     fn redeem(&self, id: Uuid, session: &str) -> Option<Vec<PlacementFile>> {
         let mut tickets = self.0.lock().ok()?;
         Self::expire(&mut tickets);

@@ -482,7 +482,8 @@ def build_render_objects(context, collection, scene, mscale):
         obj = None
         name = reader.get_node_name(node)
         try:
-            world = mscale @ static_world_matrix(node, matrices, set())
+            source_world = static_world_matrix(node, matrices, set())
+            world = mscale @ source_world
             if not all(math.isfinite(value) for row in world for value in row):
                 raise ValueError("Invalid MAX scene object transform")
             data = namespace.new(name) if is_camera else namespace.new(name, MAX_LIGHT_TYPES[reader.get_guid(source)])
@@ -497,6 +498,11 @@ def build_render_objects(context, collection, scene, mscale):
                 obj.parent = bpy.data.objects.get(reader.get_node_name(source_parent))
             obj.matrix_world = world
             if metadata is not None:
+                if metadata["source"] == "corona_light":
+                    # Keep the source node scale separate from the FBX unit conversion.
+                    axes = [axis.length for axis in source_world.to_3x3().col]
+                    if all(math.isfinite(scale) and scale > 0 for scale in axes):
+                        metadata["source_scale"] = axes
                 max_light_settings[obj.name] = metadata
             if is_camera and context.scene.camera is None:
                 context.scene.camera = obj

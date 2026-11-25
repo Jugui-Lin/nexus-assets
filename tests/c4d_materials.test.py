@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -254,6 +255,199 @@ class OctaneScalarTests(unittest.TestCase):
         mix = self.value(mat, "OCT_MATERIAL_NORMAL_LINK")
         self.assertEqual(self.value(mix, "MIXTEX_AMOUNT_FLOAT"), 0.65)
         self.assertEqual(self.value(self.value(mix, "MIXTEX_TEXTURE2_LNK"), "IMAGETEXTURE_FILE"), "tex/normal.png")
+
+
+class LightVector(tuple):
+    def __new__(cls, *values):
+        return super().__new__(cls, values)
+
+    def GetLength(self):
+        return math.hypot(*self)
+
+    def Dot(self, other):
+        return sum(left * right for left, right in zip(self, other))
+
+    def __mul__(self, scalar):
+        return LightVector(*(value * scalar for value in self))
+
+    def __sub__(self, other):
+        return LightVector(*(left - right for left, right in zip(self, other)))
+
+
+class OctaneSceneLightTests(unittest.TestCase):
+    class Light(Node):
+        def __init__(self, scale, name="Corona Light"):
+            super().__init__("light", name, type="omni", brightness=1.0, show_illumination=True,
+                             show_visible=True, show_clipping=True, show_solid=True, falloff_distance=2500.0)
+            axes = [LightVector(scale[0], 0, 0), LightVector(0, scale[1], 0), LightVector(0, 0, scale[2])]
+            self.matrix = SimpleNamespace(off=LightVector(2, 4, 8), v1=axes[0], v2=axes[1], v3=axes[2])
+            self.tags = {}
+            self.children = []
+            self.tracks = []
+            self.world_sets = []
+
+        def GetMg(self):
+            return self.matrix
+
+        def SetMg(self, matrix):
+            self.matrix = matrix
+            self.world_sets.append(matrix)
+
+        def GetMl(self):
+            return self.matrix
+
+        def SetMl(self, matrix):
+            self.matrix = matrix
+
+        def GetChildren(self):
+            return self.children
+
+        def GetCTracks(self):
+            return self.tracks
+
+        def GetUp(self):
+            return None
+
+        def GetTag(self, kind):
+            return self.tags.get(kind)
+
+        def InsertTag(self, tag):
+            self.tags[tag.kind] = tag
+
+    def setUp(self):
+        self.fields = MATERIALS._OCT_LIGHT_FIELDS
+
+        def new_tag(kind):
+            tag = Node(kind)
+            tag[self.fields["LIGHTTAG_POWER"]] = 100.0
+            tag[self.fields["LIGHTTAG_SURFACE_BRIGHTNESS"]] = True
+            tag[self.fields["LIGHTTAG_KEEP_INSTANCE_POWER"]] = False
+            return tag
+
+        self.c4d = SimpleNamespace(
+            Olight="light", LIGHT_TYPE="type", LIGHT_TYPE_OMNI="omni", LIGHT_TYPE_SPOT="spot",
+            LIGHT_TYPE_AREA="area", LIGHT_TYPE_DISTANT="distant", LIGHT_TYPE_PARALLEL="parallel",
+            LIGHT_BRIGHTNESS="brightness", LIGHT_AREADETAILS_SHAPE="shape", LIGHT_AREADETAILS_SHAPE_RECTANGLE="rect",
+            LIGHT_AREADETAILS_SHAPE_DISC="disc", LIGHT_AREADETAILS_SHAPE_SPHERE="sphere",
+            LIGHT_AREADETAILS_SIZEX="size_x", LIGHT_AREADETAILS_SIZEY="size_y", LIGHT_AREADETAILS_SIZEZ="size_z",
+            LIGHT_SHOWILLUMINATION="show_illumination", LIGHT_SHOWVISIBLELIGHT="show_visible",
+            LIGHT_SHOWCLIPPING="show_clipping", LIGHT_AREADETAILS_SHOWASSOLIDINVIEWPORT="show_solid",
+            DOCUMENT_UNIT_M="metre", DOCUMENT_DOCUNIT="unit", BaseTag=new_tag,
+            Matrix=lambda off, v1, v2, v3: SimpleNamespace(off=off, v1=v1, v2=v2, v3=v3),
+            UnitScaleData=lambda: SimpleNamespace(SetUnitScale=lambda value, unit: (value, unit) == (1.0, "metre")),
+            utils=SimpleNamespace(CalculateTranslationScale=lambda _source, target: target),
+        )
+
+    def convert(self, light, info=None, document_units=100.0):
+        plan = {"path": "scene.fbx", "renderer": "octane"}
+        if info is not None:
+            plan["max_light_settings"] = {light.GetName(): info}
+        with patch.object(MATERIALS, "wants_octane", return_value=True):
+            report = MATERIALS.convert_octane_lights(self.c4d, {"unit": document_units}, [light], plan)
+        self.assertIn("已设置 1 盏", report)
+        return light.GetTag(MATERIALS._OCT_LIGHT)
+
+    def test_physical_size_is_not_multiplied_by_fbx_transform_again(self):
+        settings = dict(source="corona_light", shape="rectangle", width=.32, height=.20, units=0, intensity=24)
+        for frame, doc_scale in (((100.0, 100.0, 100.0), 100.0), ((.1, .1, .1), 100.0), ((10, 40, 50), 1.0)):
+            with self.subTest(world_scale=frame, document_scale=doc_scale):
+                light = self.Light(frame)
+                matrix = light.GetMg()
+                tag = self.convert(light, settings, doc_scale)
+                world = light.GetMg()
+                self.assertEqual(world.off, matrix.off)
+                self.assertEqual(light["type"], "area")
+                self.assertAlmostEqual(light["size_x"] * world.v1.GetLength(), .32 * doc_scale)
+                self.assertAlmostEqual(light["size_y"] * world.v2.GetLength(), .20 * doc_scale)
+                self.assertAlmostEqual(tag[self.fields["LIGHTTAG_POWER"]], 24 * math.pi * .32 * .20 / 10)
+                for guide in ("show_illumination", "show_visible", "show_clipping", "show_solid"):
+                    self.assertIs(light[guide], False)
+                self.assertEqual(light["falloff_distance"], 2500.0)
+                self.assertIs(tag[self.fields["LIGHTTAG_SURFACE_BRIGHTNESS"]], False)
+                self.assertIs(tag[self.fields["LIGHTTAG_KEEP_INSTANCE_POWER"]], True)
+
+    def test_hundredfold_import_scale_removes_only_unit_bake_and_restores_child_world_transform(self):
+        light = self.Light((200, 50, 100))
+        light.matrix.v1 = LightVector(0, 200, 0)
+        light.matrix.v2 = LightVector(-50, 0, 0)
+        child = self.Light((6, 7, 8), "Child")
+        child_world = child.GetMg()
+        light.children.append(child)
+        settings = dict(source="corona_light", shape="rectangle", width=.3, height=.12,
+                        source_scale=[2, .5, 1], units=1, intensity=683)
+        self.convert(light, settings)
+        world = light.GetMg()
+        self.assertEqual(world.off, (2, 4, 8))
+        self.assertEqual(world.v1, (0, 2, 0))
+        self.assertEqual(world.v2, (-.5, 0, 0))
+        self.assertEqual(world.v3, (0, 0, 1))
+        self.assertEqual(child.world_sets, [child_world])
+        self.assertIs(child.GetMg(), child_world)
+        self.assertAlmostEqual(light["size_x"] * world.v1.GetLength(), 60)
+        self.assertAlmostEqual(light["size_y"] * world.v2.GetLength(), 6)
+
+    def test_animation_and_shear_keep_imported_transform_and_use_dimension_compensation(self):
+        animated = self.Light((100, 100, 100))
+        animated.tracks.append("position")
+        sheared = self.Light((100, 100, 100))
+        sheared.matrix.v2 = LightVector(60, 80, 0)
+        settings = dict(source="corona_light", shape="rectangle", width=.32, height=.20, units=0, intensity=24)
+        for light in (animated, sheared):
+            self.convert(light, settings)
+            self.assertEqual(light.world_sets, [])
+            self.assertAlmostEqual(light["size_x"], .32)
+            self.assertAlmostEqual(light["size_y"], .20)
+
+    def test_original_source_scale_and_spherical_depth_are_kept(self):
+        light = self.Light((20, 50, 70))
+        self.convert(light, dict(source="corona_light", shape="sphere", width=.4,
+                                 source_scale=[1.5, .5, .75], units=1, intensity=683.0))
+        self.assertAlmostEqual(light["size_x"] * 20, 60)
+        self.assertAlmostEqual(light["size_y"] * 50, 20)
+        self.assertAlmostEqual(light["size_z"] * 70, 30)
+
+    def test_corona_lux_and_radiance_use_the_same_physical_power_for_a_small_disc(self):
+        diameter = .0325
+        base = dict(source="corona_light", shape="disc", width=diameter)
+        # The direct worker's actual Corona fixture changed the intensity by 683*pi when
+        # the same source was switched from the default radiance mode to lux.
+        radiance = 1234.5
+        lux = radiance * 683 * math.pi
+        for units, intensity in ((0, radiance), (3, lux)):
+            tag = self.convert(self.Light((.1, .1, .1)), dict(base, units=units, intensity=intensity))
+            watts = radiance * math.pi * (math.pi * diameter ** 2 / 4) / 10
+            self.assertAlmostEqual(tag[self.fields["LIGHTTAG_POWER"]], watts)
+            self.assertLess(watts, 100.0)
+
+    def test_regular_fbx_without_source_metadata_keeps_geometry_and_brightness_fallback(self):
+        light = self.Light((100, 100, 100))
+        light["brightness"] = 0.25
+        light["size_x"] = 52.0
+        tag = self.convert(light)
+        self.assertEqual(light["type"], "omni")
+        self.assertEqual(light["size_x"], 52.0)
+        self.assertIs(light["show_illumination"], True)
+        self.assertEqual(tag[self.fields["LIGHTTAG_POWER"]], 25.0)
+        self.assertIs(tag[self.fields["LIGHTTAG_SURFACE_BRIGHTNESS"]], True)
+        self.assertIs(tag[self.fields["LIGHTTAG_KEEP_INSTANCE_POWER"]], False)
+
+    def test_rejected_octane_tag_restores_original_viewport_guides(self):
+        light = self.Light((100, 100, 100))
+        matrix = light.GetMg()
+        light["size_x"] = light["size_y"] = 100.0
+        light["shape"] = "disc"
+        light.InsertTag = lambda _tag: None
+        info = dict(source="corona_light", shape="rectangle", width=.32, height=.20, units=0, intensity=24)
+        plan = {"path": "scene.fbx", "renderer": "octane", "max_light_settings": {light.GetName(): info}}
+        with patch.object(MATERIALS, "wants_octane", return_value=True):
+            report = MATERIALS.convert_octane_lights(self.c4d, {"unit": 100.0}, [light], plan)
+        self.assertIn("无法挂接 Octane 灯光标签", report)
+        self.assertEqual(light["type"], "omni")
+        self.assertEqual(light["shape"], "disc")
+        self.assertEqual(light["size_x"], 100.0)
+        self.assertIs(light.GetMg(), matrix)
+        for guide in ("show_illumination", "show_visible", "show_clipping", "show_solid"):
+            self.assertIs(light[guide], True)
 
 
 if __name__ == "__main__":

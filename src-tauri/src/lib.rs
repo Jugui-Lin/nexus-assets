@@ -726,6 +726,18 @@ impl Catalog {
             [session],
         )
     }
+    pub fn has_pending_dcc_jobs(&self, queued_cutoff: u64) -> Result<bool, String> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM jobs WHERE status='running' OR
+                    (status='queued' AND CAST(json_extract(data,'$.created') AS INTEGER) >= ?1)
+                )",
+                [queued_cutoff],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    }
     pub fn session_job(&self, session: &str, id: &str) -> Result<Option<Value>, String> {
         self.query_job(
             "SELECT data FROM jobs WHERE session=?1 AND id=?2",

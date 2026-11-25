@@ -25,6 +25,7 @@ const PAIR_SECONDS: u64 = 120;
 const PAIR_ATTEMPTS: u8 = 8;
 const MAX_GRANTS: usize = 16;
 const MAX_HISTORY: usize = 24;
+const CAPTURE_SLOTS: u32 = 2;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_IMAGE: u64 = 25 * 1024 * 1024;
 const MAX_VIDEO: u64 = 200 * 1024 * 1024;
@@ -121,8 +122,13 @@ impl BrowserCapture {
                 grants,
             }),
             captures: Mutex::new(VecDeque::new()),
-            slots: Arc::new(Semaphore::new(2)),
+            slots: Arc::new(Semaphore::new(CAPTURE_SLOTS as usize)),
         }))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn hold_if_idle(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        self.0.slots.try_acquire_many(CAPTURE_SLOTS).ok()
     }
 
     pub(crate) fn router(self) -> Router {

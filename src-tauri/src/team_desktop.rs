@@ -785,7 +785,7 @@ impl Desktop {
         self.save_connection(next, cache_from(snapshot)?)
     }
 
-    fn begin_storage_operation(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+    pub(crate) fn begin_storage_operation(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
         self.connecting
             .try_lock()
             .map_err(|_| "团队库正在处理其他操作，请稍候".into())

@@ -912,12 +912,15 @@ _OCT_LIGHT_FIELDS = {
     "OCT_LIGHTTAG_TYPE_SELECT": 1159,
     "LIGHTTAG_USELIGHT_PARAMS": 1160,
     "LIGHTTAG_ENABLE": 1161,
+    "LIGHTTAG_SURFACE_BRIGHTNESS": 1166,
+    "LIGHTTAG_KEEP_INSTANCE_POWER": 1175,
     "DAYLIGHTTAG_SUNCOLOR": 1235,
     "DAYLIGHTTAG_SUNSIZE": 1236,
     "DAYLIGHTTAG_USESKY": 1237,
     "DAYLIGHTTAG_SUNINTENSITY": 1261,
 }
 _OCT_DAYLIGHT = 1029754
+_OCT_CORONA_AREA_POWER_SCALE = 0.1
 _OCT_AREA_SHAPES = {
     "rectangle": "RECTANGLE",
     "disc": "DISC",
@@ -941,66 +944,154 @@ def _set_oct_light_tag_value(c4d, tag, name, value):
         raise RuntimeError(f"Octane 灯光标签未接受参数 {name}")
 
 
-def _scene_area_light_values(c4d, doc, info):
+def _scene_light_source_scale(info):
+    scale = info.get("source_scale")
+    if (isinstance(scale, (tuple, list)) and len(scale) == 3
+            and all(_valid_light_number(axis) and axis > 0 for axis in scale)):
+        return scale
+    return (1.0, 1.0, 1.0)
+
+
+def _scene_area_light_dimensions(info):
     if info.get("source") != "corona_light":
-        return {}
+        return ()
     shape = info.get("shape")
-    shape_symbol = _OCT_AREA_SHAPES.get(shape) if isinstance(shape, str) else None
-    if not shape_symbol:
-        return {}
+    if not isinstance(shape, str) or shape not in _OCT_AREA_SHAPES:
+        return ()
     width, height = info.get("width"), info.get("height")
     if not _valid_light_number(width) or width <= 0:
-        return {}
+        return ()
     if shape in ("rectangle", "cylinder") and (not _valid_light_number(height) or height <= 0):
+        return ()
+    sizes = (width, height if shape in ("rectangle", "cylinder") else width)
+    if shape in ("sphere", "cylinder"):
+        sizes += (width,)
+    return tuple(size * axis for size, axis in zip(sizes, _scene_light_source_scale(info)))
+
+
+def _light_matrix_matches(actual, expected):
+    return all((getattr(actual, key) - getattr(expected, key)).GetLength()
+               <= 1e-6 * max(1.0, getattr(expected, key).GetLength())
+               for key in ("off", "v1", "v2", "v3"))
+
+
+def _restore_light_transforms(originals):
+    for node, local, _world in originals:
+        node.SetMl(local)
+
+
+def _remove_fbx_light_unit_scale(c4d, light, info):
+    world = light.GetMg()
+    source_scale = _scene_light_source_scale(info)
+    axes = (world.v1, world.v2, world.v3)
+    lengths = tuple(axis.GetLength() for axis in axes)
+    # A metre FBX bake adds a uniform 100x basis. Keep authored scale and other transforms.
+    if not all(math.isclose(length, source * 100.0, rel_tol=.02) for length, source in zip(lengths, source_scale)):
+        return ()
+    basis = tuple(axis * (1.0 / length) for axis, length in zip(axes, lengths))
+    if any(abs(basis[i].Dot(basis[j])) > 1e-5 for i, j in ((0, 1), (0, 2), (1, 2))):
+        return ()
+    children = light.GetChildren()
+    if any(child.GetCTracks() for child in children):
+        return ()
+    ancestor = light
+    while ancestor is not None:
+        if ancestor.GetCTracks():
+            return ()
+        ancestor = ancestor.GetUp()
+    originals = [(light, light.GetMl(), world), *((child, child.GetMl(), child.GetMg()) for child in children)]
+    target = c4d.Matrix(world.off, *(axis * source for axis, source in zip(basis, source_scale)))
+    try:
+        light.SetMg(target)
+        if not _light_matrix_matches(light.GetMg(), target):
+            raise RuntimeError("Cinema 4D 未接受面光源的缩放")
+        for child, _local, child_world in originals[1:]:
+            child.SetMg(child_world)
+            if not _light_matrix_matches(child.GetMg(), child_world):
+                raise RuntimeError("Cinema 4D 未接受子对象的世界变换")
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        _restore_light_transforms(originals)
+        return ()
+    return originals
+
+
+def _scene_area_light_values(c4d, doc, light, info, dimensions):
+    if not dimensions:
         return {}
-    # The worker records physical dimensions in metres. C4D scene units may vary.
+    # MAX dimensions are in metres. FBX can already scale the light's object hierarchy.
     one_metre = c4d.UnitScaleData()
     if one_metre.SetUnitScale(1.0, c4d.DOCUMENT_UNIT_M) is False:
         raise RuntimeError("无法读取面光源的项目长度单位")
     scale = c4d.utils.CalculateTranslationScale(one_metre, doc[c4d.DOCUMENT_DOCUNIT])
     if not _valid_light_number(scale) or scale <= 0:
         raise RuntimeError("无法换算面光源的项目长度单位")
-    shape_value = getattr(c4d, f"LIGHT_AREADETAILS_SHAPE_{shape_symbol}")
-    converted_width = width * scale
-    converted_height = height * scale if shape in ("rectangle", "cylinder") else converted_width
-    if not all(math.isfinite(size) for size in (converted_width, converted_height)):
+    world = light.GetMg()
+    axes = (world.v1, world.v2, world.v3)
+    lengths = tuple(axis.GetLength() for axis in axes[:len(dimensions)])
+    if not all(_valid_light_number(length) and length > 0 for length in lengths):
+        raise RuntimeError("无法读取面光源的对象缩放")
+    local_sizes = tuple(size * scale / length for size, length in zip(dimensions, lengths))
+    if not all(math.isfinite(size) for size in local_sizes):
         raise RuntimeError("面光源尺寸超出支持范围")
-    return {
+    shape_symbol = _OCT_AREA_SHAPES[info["shape"]]
+    parameters = {
         c4d.LIGHT_TYPE: c4d.LIGHT_TYPE_AREA,
-        c4d.LIGHT_AREADETAILS_SHAPE: shape_value,
-        c4d.LIGHT_AREADETAILS_SIZEX: converted_width,
-        c4d.LIGHT_AREADETAILS_SIZEY: converted_height,
+        c4d.LIGHT_AREADETAILS_SHAPE: getattr(c4d, f"LIGHT_AREADETAILS_SHAPE_{shape_symbol}"),
+        c4d.LIGHT_AREADETAILS_SIZEX: local_sizes[0],
+        c4d.LIGHT_AREADETAILS_SIZEY: local_sizes[1],
     }
+    if len(local_sizes) == 3:
+        parameters[c4d.LIGHT_AREADETAILS_SIZEZ] = local_sizes[2]
+    # Keep the real emitter dimensions and omit only the auxiliary viewport range guides.
+    for symbol in ("LIGHT_SHOWILLUMINATION", "LIGHT_SHOWVISIBLELIGHT", "LIGHT_SHOWCLIPPING",
+                   "LIGHT_AREADETAILS_SHOWASSOLIDINVIEWPORT"):
+        parameter = getattr(c4d, symbol, None)
+        if parameter is not None and light[parameter] is True:
+            parameters[parameter] = False
+    return parameters
 
 
-def _oct_scene_power(base, brightness, info):
+def _scene_emitting_area(shape, dimensions):
+    if not dimensions:
+        return 0.0
+    width, height = dimensions[:2]
+    if shape == "rectangle":
+        return width * height
+    if shape == "disc":
+        return math.pi * width * height / 4.0
+    depth = dimensions[2]
+    if shape == "sphere":
+        # Exact for a sphere and approximates a source scaled to an ellipsoid.
+        return math.pi * (width * height + width * depth + height * depth) / 3.0
+    # The side of a cylinder, with an approximate circumference if scaled unevenly.
+    return math.pi * math.hypot(width, depth) * height / math.sqrt(2.0)
+
+
+def _oct_scene_power(base, brightness, info, dimensions):
     scalar = info.get("intensity")
     units = info.get("units")
     if not _valid_light_number(scalar) or scalar <= 0:
-        return base * max(0.0, brightness), False
+        return base * max(0.0, brightness), False, False
     if units in ("w", "watts", "watt"):
-        return scalar, True
+        return scalar, True, True
     if units in ("relative", "multiplier") or info.get("source") == "corona_sun":
-        return base * scalar, False
+        return base * scalar, False, False
     if units in (1, "lm", "lumen", "lumens"):
         # 683 lm/W is the photopic reference at 555 nm, used here as an estimate.
-        return scalar / 683.0, False
+        return scalar / 683.0, False, True
     shape = info.get("shape")
     if units in (2, "cd", "candela") and shape in ("sphere", "rectangle", "disc"):
         solid_angle = 4.0 * math.pi if shape == "sphere" else math.pi
-        return scalar * solid_angle / 683.0, False
-    if units == 0 and shape in ("sphere", "rectangle", "disc", "cylinder"):
-        width, height = info.get("width"), info.get("height")
-        if _valid_light_number(width) and width > 0:
-            area = {"sphere": math.pi * width ** 2, "disc": math.pi * (width / 2.0) ** 2}.get(shape, 0.0)
-            if shape in ("rectangle", "cylinder") and _valid_light_number(height) and height > 0:
-                # Approximate a cylindrical emitter from its lateral surface.
-                area = width * height * (math.pi if shape == "cylinder" else 1.0)
-            if area > 0:
-                # Radiance over a Lambertian emitting surface, estimated for one-sided emission.
-                return scalar * math.pi * area, False
-    # Lux or unknown source units have no unique conversion without additional reference data.
-    return base * max(0.0, brightness), False
+        return scalar * solid_angle / 683.0, False, True
+    area = _scene_emitting_area(shape, dimensions)
+    if area > 0:
+        if units == 0:
+            # Integrate Corona's radiance over the emitting area and hemisphere.
+            return scalar * math.pi * area, False, True
+        if units in (3, "lx", "lux"):
+            # Corona's lux mode converts to radiance by dividing by 683*pi.
+            return scalar * area / 683.0, False, True
+    return base * max(0.0, brightness), False, False
 
 
 def _has_octane_environment(doc):
@@ -1035,7 +1126,7 @@ def _oct_scene_daylight(c4d, light, info, brightness):
     return tag
 
 
-def _oct_scene_regular_light(c4d, light, info, brightness, enabled):
+def _oct_scene_regular_light(c4d, light, info, dimensions, brightness, enabled):
     tag = c4d.BaseTag(_OCT_LIGHT)
     if tag is None:
         raise RuntimeError("Cinema 4D 当前未加载 Octane 灯光标签")
@@ -1043,13 +1134,22 @@ def _oct_scene_regular_light(c4d, light, info, brightness, enabled):
     base = tag[power_id]
     if not _valid_light_number(base) or base <= 0:
         raise RuntimeError("无法读取 Octane 灯光默认功率")
-    power, precise = _oct_scene_power(base, brightness, info)
+    power, precise, total_watts = _oct_scene_power(base, brightness, info, dimensions)
+    if dimensions:
+        power *= _OCT_CORONA_AREA_POWER_SCALE
+        precise = False
     kelvin = info.get("kelvin")
     use_temperature = _valid_light_number(kelvin) and 500 <= kelvin <= 12000
     _set_oct_light_tag_value(c4d, tag, "OCT_LIGHTTAG_TYPE_SELECT", 0)
     _set_oct_light_tag_value(c4d, tag, "LIGHTTAG_USELIGHT_PARAMS", not use_temperature)
     if use_temperature:
         _set_oct_light_tag_value(c4d, tag, "LIGHTTAG_BB_TEMPERATURE", float(kelvin))
+    if total_watts:
+        # Power was already integrated across the physical source. Do not apply area again.
+        _set_oct_light_tag_value(c4d, tag, "LIGHTTAG_SURFACE_BRIGHTNESS", False)
+        instance_power = getattr(c4d, "LIGHTTAG_KEEP_INSTANCE_POWER", _OCT_LIGHT_FIELDS["LIGHTTAG_KEEP_INSTANCE_POWER"])
+        if isinstance(tag[instance_power], bool):
+            _set_oct_light_tag_value(c4d, tag, "LIGHTTAG_KEEP_INSTANCE_POWER", True)
     # Enable is authoritative at zero since Octane's UI limits Power to 0.0001 W.
     enabled = enabled and power > 0
     _set_oct_light_tag_value(c4d, tag, "LIGHTTAG_ENABLE", enabled)
@@ -1080,6 +1180,7 @@ def convert_octane_lights(c4d, doc, imported_objects, plan):
         info = info if isinstance(info, dict) else {}
         tag = None
         changed = {}
+        original_transforms = ()
         try:
             directional_types = (c4d.LIGHT_TYPE_DISTANT, c4d.LIGHT_TYPE_PARALLEL)
             allowed_types = (c4d.LIGHT_TYPE_OMNI, c4d.LIGHT_TYPE_SPOT, c4d.LIGHT_TYPE_AREA, *directional_types)
@@ -1089,7 +1190,10 @@ def convert_octane_lights(c4d, doc, imported_objects, plan):
             brightness = light[c4d.LIGHT_BRIGHTNESS]
             if not _valid_light_number(brightness):
                 raise RuntimeError("无法读取源灯光强度")
-            area = _scene_area_light_values(c4d, doc, info)
+            dimensions = _scene_area_light_dimensions(info)
+            if dimensions:
+                original_transforms = _remove_fbx_light_unit_scale(c4d, light, info)
+            area = _scene_area_light_values(c4d, doc, light, info, dimensions)
             enabled = brightness > 0 and info.get("enabled") is not False and info.get("intensity") != 0
             if hasattr(light, "GetRenderMode") and light.GetRenderMode() == getattr(c4d, "MODE_OFF", None):
                 enabled = False
@@ -1103,7 +1207,7 @@ def convert_octane_lights(c4d, doc, imported_objects, plan):
                 if light_type == c4d.LIGHT_TYPE_PARALLEL:
                     area = {c4d.LIGHT_TYPE: c4d.LIGHT_TYPE_DISTANT}
             else:
-                tag, approximate = _oct_scene_regular_light(c4d, light, info, brightness, enabled)
+                tag, approximate = _oct_scene_regular_light(c4d, light, info, dimensions, brightness, enabled)
                 tag_id = _OCT_LIGHT
             for parameter, value in area.items():
                 changed[parameter] = light[parameter]
@@ -1124,6 +1228,7 @@ def convert_octane_lights(c4d, doc, imported_objects, plan):
             for parameter, previous in reversed(list(changed.items())):
                 if previous is not None:
                     light[parameter] = previous
+            _restore_light_transforms(original_transforms)
             failed.append(f"{name}：{str(error) or type(error).__name__}")
     messages = [f"已设置 {converted} 盏 Octane 灯光的颜色和功率"] if converted else []
     if estimated:

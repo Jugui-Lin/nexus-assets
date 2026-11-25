@@ -120,6 +120,19 @@ impl Mounts {
         f(&mut processes)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn hold_if_idle(&self) -> Option<impl Sized + '_> {
+        let mut processes = self.processes.try_lock().ok()?;
+        if processes
+            .rclone
+            .values_mut()
+            .any(rclone::RcloneMount::has_live_child)
+        {
+            return None;
+        }
+        Some(processes)
+    }
+
     pub(crate) fn stop_owned_processes(&self) {
         #[cfg(windows)]
         if let Ok(mut processes) = self.processes.try_lock() {

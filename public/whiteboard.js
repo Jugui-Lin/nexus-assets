@@ -273,6 +273,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   let pointerPosition;
   let localClipboard;
   let linkStart;
+  let pendingMedia = 0;
   const preparedAssets = new Map();
 
   function orderedItems(state, board) {
@@ -303,8 +304,13 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }
 
   function savePersonal(state) {
-    try { localStorage.setItem(storageKey + state.key, JSON.stringify({items:[...state.base.values()]})); }
-    catch { notify('本机白板暂时无法保存。', true); }
+    try {
+      localStorage.setItem(storageKey + state.key, JSON.stringify({items:[...state.base.values()]}));
+      state.storageError = false;
+    } catch {
+      state.storageError = true;
+      notify('本机白板暂时无法保存。', true);
+    }
   }
 
   function saveOutbox(state) {
@@ -896,6 +902,15 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     return true;
   }
 
+  async function insertMedia(operation, ...args) {
+    pendingMedia++;
+    try {
+      return await operation(...args);
+    } finally {
+      pendingMedia--;
+    }
+  }
+
   async function insertImages(files, point) {
     if (!visible || !scope) return;
     const target = scope;
@@ -1073,7 +1088,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const target = scope;
     const references = parseWhiteboardAssetClipboard(text);
     if (references && !json) {
-      await insertAssetReferences(references, point);
+      await insertMedia(insertAssetReferences, references, point);
       return;
     }
     let content;
@@ -1127,7 +1142,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         if (!text && item.types.includes('text/plain')) text = await (await item.getType('text/plain')).text();
       }
       if (!visible || scope !== target) return;
-      if (files.length) await insertImages(files, point);
+      if (files.length) await insertMedia(insertImages, files, point);
       else await pasteContents(json, text, point);
     } catch {
       if (!visible || scope !== target) return;
@@ -1152,7 +1167,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     }
     event.preventDefault();
     const point = insertionPoint();
-    if (files.length) insertImages(files, point);
+    if (files.length) insertMedia(insertImages, files, point);
     else pasteContents(event.clipboardData.getData(clipboardType), event.clipboardData.getData('text/plain'), point);
   });
   for (const action of ['copy','cut']) {
@@ -1174,10 +1189,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (!event.dataTransfer?.files.length) return;
     event.preventDefault();
     event.stopPropagation();
-    insertImages([...event.dataTransfer.files], insertionPoint({x:event.clientX,y:event.clientY}));
+    insertMedia(insertImages, [...event.dataTransfer.files], insertionPoint({x:event.clientX,y:event.clientY}));
   });
   imagePicker.addEventListener('change', () => {
-    if (imagePicker.files.length) insertImages([...imagePicker.files]);
+    if (imagePicker.files.length) insertMedia(insertImages, [...imagePicker.files]);
     imagePicker.value = '';
   });
 
@@ -1931,6 +1946,11 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }
 
   return {
+    busyForUpdate() {
+      return Boolean(gesture || editing || pendingMedia ||
+        [...states.values()].some(state => state.storageError && (!state.teamId || state.queue.length)) ||
+        [...stage.querySelectorAll('video')].some(video => !video.paused && !video.ended));
+    },
     refresh() {
       if (!visible) return;
       for (const [id,item] of items()) {
@@ -1943,7 +1963,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     dropNativeImages(paths, position) {
       if (!visible || !scope) return false;
       const point = position ? {x:position.x / window.devicePixelRatio,y:position.y / window.devicePixelRatio} : undefined;
-      insertImages(nativeImages(paths), insertionPoint(point));
+      insertMedia(insertImages, nativeImages(paths), insertionPoint(point));
       return true;
     },
     contextMenu(event) {

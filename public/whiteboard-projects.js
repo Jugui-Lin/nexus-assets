@@ -295,6 +295,7 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
     showProjects,
     openProject,
     captureProject() { return activeProject; },
+    busyForUpdate() { return board.busyForUpdate(); },
     dropNativeImages(paths, position) { return Boolean(activeProject) && board.dropNativeImages(paths, position); },
     contextMenu(event) {
       if (!visible) return null;

@@ -60,6 +60,8 @@ mod workspaces;
 mod youtube_player;
 use team_desktop::Desktop;
 
+const DCC_JOB_QUEUE_TIMEOUT: u64 = 120;
+
 #[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<Catalog>>,
@@ -778,7 +780,7 @@ async fn claim(
         .next_queued_job(session)
         .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?
     {
-        if now().saturating_sub(j["created"].as_u64().unwrap_or(0)) > 120 {
+        if now().saturating_sub(j["created"].as_u64().unwrap_or(0)) > DCC_JOB_QUEUE_TIMEOUT {
             j["status"] = json!("failed");
             j["error"] = json!("等待超时，请重新发送");
             c.put_job(&j)
@@ -955,6 +957,8 @@ fn main() {
             get_state,
             nexus_updater::check_nexus_update,
             nexus_updater::install_nexus_update,
+            nexus_updater::prepare_nexus_update,
+            nexus_updater::apply_prepared_nexus_update,
             get_activity,
             list_recycled_assets,
             recycle_assets,

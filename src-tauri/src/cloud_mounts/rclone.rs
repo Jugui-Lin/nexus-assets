@@ -22,6 +22,10 @@ pub(super) struct RcloneMount {
 }
 
 impl RcloneMount {
+    pub(super) fn has_live_child(&mut self) -> bool {
+        !matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+
     pub(super) fn is_running(&mut self) -> Result<bool, String> {
         match self.child.try_wait().map_err(|error| error.to_string())? {
             None => Ok(true),
