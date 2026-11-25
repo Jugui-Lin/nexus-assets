@@ -180,7 +180,14 @@
 .about-updates { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 11px; }
 .about-updates[hidden] { display: none; }
 .about-updates .button { flex: none; }
-#about-button.has-nexus-update::after { content: ""; width: 6px; height: 6px; margin-inline-start: auto; border-radius: 50%; background: var(--accent); }
+:is(.top-tools > summary, #about-button, .version-link).has-nexus-update { position: relative; }
+:is(.top-tools > summary, #about-button, .version-link).has-nexus-update::after {
+  content: ""; position: absolute; width: 7px; height: 7px; pointer-events: none;
+  border-radius: 50%; background: #e65359;
+}
+.top-tools > summary.has-nexus-update::after { inset: 3px 3px auto auto; }
+#about-button.has-nexus-update::after { inset: calc(50% - 3.5px) 10px auto auto; }
+.version-link.has-nexus-update::after { inset: 0 -10px auto auto; }
 .about-guide { margin-top: 14px; border-top: 1px solid var(--line); }
 .about-guide summary { padding: 12px 2px 3px; cursor: pointer; color: var(--text); }
 .about-guide summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

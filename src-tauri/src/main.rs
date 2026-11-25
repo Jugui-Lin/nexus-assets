@@ -49,6 +49,7 @@ mod team_desktop;
 mod team_host;
 mod team_import;
 mod team_nas;
+mod team_update_version;
 mod thumbnail_desktop;
 mod workspace_asset_deletion;
 mod workspace_data;
@@ -1069,6 +1070,7 @@ fn main() {
             personal_tags::delete_local_tag,
             team_desktop::team_status,
             team_desktop::team_service_info,
+            team_update_version::latest_team_service_version,
             team_desktop::team_online_members,
             team_desktop::team_get_profile,
             team_desktop::team_save_profile,

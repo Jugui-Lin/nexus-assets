@@ -1,16 +1,22 @@
-export function initNexusUpdater({api, enabled, panel, indicator}) {
+export function initNexusUpdater({api, enabled, panel, indicators}) {
   if (!enabled) return {opened() {}};
   panel.hidden = false;
   const button = panel.querySelector('button');
   const status = panel.querySelector('[role="status"]');
+  const indicatorTitles = indicators.map(indicator => indicator.title);
   let update;
   let busy = false;
   let lastCheck = 0;
 
   function showUpdate() {
     const version = update?.available && update.version;
-    indicator.classList.toggle('has-nexus-update',Boolean(version));
-    indicator.title = version ? `Nexus ${version} 可更新` : '';
+    const notice = version ? `Nexus ${version} 可更新` : '';
+    indicators.forEach((indicator, index) => {
+      indicator.classList.toggle('has-nexus-update', Boolean(version));
+      indicator.title = notice || indicatorTitles[index];
+      if (notice) indicator.setAttribute('aria-description', notice);
+      else indicator.removeAttribute('aria-description');
+    });
     button.classList.toggle('primary',Boolean(version));
     button.classList.toggle('subtle',!version);
     button.textContent = version ? '下载更新' : '检查更新';

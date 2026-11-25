@@ -2152,7 +2152,10 @@ for (const selector of ['#settings', '#connection-summary']) {
     dccConnections.show();
   });
 }
-const nexusUpdater = initNexusUpdater({api,enabled:native,panel:$('#nexus-updater'),indicator:$('#about-button')});
+const nexusUpdater = initNexusUpdater({
+  api, enabled:native, panel:$('#nexus-updater'),
+  indicators:[topTools.querySelector('summary'), $('#about-button'), $('#sidebar-version')],
+});
 let aboutTeamVersionRequest = 0;
 for (const id of ['#about-button', '#sidebar-version']) {
   $(id).addEventListener('click', () => {
@@ -2162,29 +2165,36 @@ for (const id of ['#about-button', '#sidebar-version']) {
     showTeamServiceVersion();
   });
 }
-async function showTeamServiceVersion() {
+function showTeamServiceVersion() {
   const request = ++aboutTeamVersionRequest;
-  const teamId = native && team.active ? team.info?.team.id : null;
-  const row = $('#about-team-version-row');
-  const value = $('#about-team-version');
-  row.hidden = !teamId;
-  value.textContent = '';
-  if (!teamId) return;
+  const teamId = native && team.active ? team.info?.team?.id : null;
   const epoch = team.epoch;
-  value.textContent = '正在读取…';
-  let version;
-  try {
+
+  async function displayVersion(selector, readVersion) {
+    const row = $(`${selector}-row`);
+    const value = $(selector);
+    row.hidden = !teamId;
+    value.textContent = teamId ? '正在读取…' : '';
+    if (!teamId) return;
+    let version;
+    try {
+      version = await readVersion();
+    } catch {
+      version = '暂时无法读取';
+    }
+    if (request !== aboutTeamVersionRequest) return;
+    if (!team.active || team.epoch !== epoch || team.info?.team?.id !== teamId) {
+      row.hidden = true;
+      return;
+    }
+    value.textContent = version;
+  }
+
+  displayVersion('#about-team-version', async () => {
     const result = await api('team_service_info', {teamId});
-    version = result?.serverVersion || '版本未上报';
-  } catch {
-    version = '暂时无法读取';
-  }
-  if (request !== aboutTeamVersionRequest) return;
-  if (!team.active || team.epoch !== epoch || team.info?.team.id !== teamId) {
-    row.hidden = true;
-    return;
-  }
-  value.textContent = version;
+    return result?.serverVersion || '服务未提供版本号';
+  });
+  displayVersion('#about-team-latest', () => api('latest_team_service_version'));
 }
 async function showClientVersion() {
   const version = $('#about-version');
