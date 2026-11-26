@@ -1,5 +1,6 @@
 use crate::AssetCollection;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -7,6 +8,8 @@ pub struct Organization {
     pub available: bool,
     pub revision: u64,
     pub favorite_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_times: Option<BTreeMap<String, u64>>,
     pub collections: Vec<AssetCollection>,
 }
 
@@ -24,8 +27,11 @@ pub struct FavoriteRequest {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FavoriteChanged {
     pub favorite: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_at: Option<u64>,
     pub revision: u64,
 }
 

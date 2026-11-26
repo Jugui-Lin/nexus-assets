@@ -7,9 +7,9 @@ use axum::{
     routing::{get, patch, post},
     Json, Router,
 };
-use nexus_core::{team_organization::*, AssetCollection};
+use nexus_core::{now_millis, team_organization::*, AssetCollection};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 pub(super) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -19,7 +19,8 @@ pub(super) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         INSERT OR IGNORE INTO organization_revision VALUES (1, 0);
         CREATE TABLE IF NOT EXISTS shared_favorites (
-            asset TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE
+            asset TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+            favorite_at INTEGER
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS shared_collections (
             id TEXT PRIMARY KEY,
@@ -31,6 +32,22 @@ pub(super) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY(collection,asset)
         );
         CREATE INDEX IF NOT EXISTS shared_collection_asset ON shared_collection_members(asset);",
+    )?;
+    if !has_favorite_time_column(conn)? {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        if !has_favorite_time_column(&tx)? {
+            tx.execute("ALTER TABLE shared_favorites ADD COLUMN favorite_at INTEGER", [])?;
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn has_favorite_time_column(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('shared_favorites') WHERE name='favorite_at')",
+        [],
+        |row| row.get(0),
     )
 }
 
@@ -55,6 +72,29 @@ pub(super) fn routes() -> Router<Store> {
             "/v1/organization/collections/{id}/members",
             patch(set_membership).layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
         )
+}
+
+#[cfg(test)]
+#[test]
+fn shared_favorite_migration_preserves_legacy_rows_without_a_time() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE assets (id TEXT PRIMARY KEY);
+         CREATE TABLE shared_favorites (asset TEXT PRIMARY KEY REFERENCES assets(id)) WITHOUT ROWID;
+         INSERT INTO assets VALUES ('existing');
+         INSERT INTO shared_favorites VALUES ('existing');",
+    )
+    .unwrap();
+    init_schema(&conn).unwrap();
+    init_schema(&conn).unwrap();
+    let timestamp: Option<u64> = conn
+        .query_row(
+            "SELECT favorite_at FROM shared_favorites WHERE asset='existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(timestamp, None);
 }
 
 fn revision(conn: &Connection) -> rusqlite::Result<u64> {
@@ -155,13 +195,20 @@ async fn list(State(store): State<Store>, headers: HeaderMap) -> ApiResult<Organ
         let tx = conn.transaction().map_err(db_error)?;
         let current_revision = revision(&tx).map_err(db_error)?;
         let mut favorites = tx
-            .prepare("SELECT asset FROM shared_favorites ORDER BY asset")
+            .prepare("SELECT asset,favorite_at FROM shared_favorites ORDER BY asset")
             .map_err(db_error)?;
-        let favorite_ids = favorites
-            .query_map([], |row| row.get(0))
-            .map_err(db_error)?
-            .collect::<rusqlite::Result<Vec<_>>>()
+        let mut favorite_ids = Vec::new();
+        let mut favorite_times = BTreeMap::new();
+        let favorite_rows = favorites
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<u64>>(1)?)))
             .map_err(db_error)?;
+        for entry in favorite_rows {
+            let (id, time) = entry.map_err(db_error)?;
+            if let Some(time) = time {
+                favorite_times.insert(id.clone(), time);
+            }
+            favorite_ids.push(id);
+        }
         let mut statement = tx
             .prepare(
                 "SELECT c.id,c.name,m.asset FROM shared_collections c
@@ -191,6 +238,7 @@ async fn list(State(store): State<Store>, headers: HeaderMap) -> ApiResult<Organ
             available: true,
             revision: current_revision,
             favorite_ids,
+            favorite_times: Some(favorite_times),
             collections,
         })
     })
@@ -216,16 +264,27 @@ async fn set_favorite(
                 return Err(missing_asset());
             }
             tx.execute(
-                "INSERT INTO shared_favorites (asset) VALUES (?1) ON CONFLICT DO NOTHING",
-                [&asset],
+                "INSERT INTO shared_favorites (asset,favorite_at) VALUES (?1,?2) ON CONFLICT DO NOTHING",
+                params![asset, now_millis()],
             )
         } else {
             tx.execute("DELETE FROM shared_favorites WHERE asset=?1", [&asset])
         }
         .map_err(db_error)?;
+        let favorite_at = if input.favorite {
+            tx.query_row(
+                "SELECT favorite_at FROM shared_favorites WHERE asset=?1",
+                [&asset],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?
+        } else {
+            None
+        };
         let revision = commit(tx, updated != 0)?;
         Ok(FavoriteChanged {
             favorite: input.favorite,
+            favorite_at,
             revision,
         })
     })

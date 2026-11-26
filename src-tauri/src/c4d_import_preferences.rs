@@ -13,6 +13,8 @@ mod cache;
 
 const FILE: &str = "c4d-import-preferences.json";
 const WORKSPACES: &str = "c4d-import-workspaces";
+const DEFAULT_CACHE_REMINDER_GB: f64 = 1.0;
+const MAX_CACHE_REMINDER_GB: f64 = 9_007_199_254_740_991.0 / (1024.0 * 1024.0 * 1024.0);
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -22,14 +24,28 @@ pub(crate) enum MaxMode {
     Application,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Preferences {
     directory: Option<String>,
     cleanup_on_startup: bool,
+    cache_reminder_gb: f64,
     blender_executable: Option<String>,
     max_batch_executable: Option<String>,
     max_mode: MaxMode,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            directory: None,
+            cleanup_on_startup: false,
+            cache_reminder_gb: DEFAULT_CACHE_REMINDER_GB,
+            blender_executable: None,
+            max_batch_executable: None,
+            max_mode: MaxMode::default(),
+        }
+    }
 }
 
 fn workspace_key(workspace: Option<&str>) -> Result<Option<String>, String> {
@@ -127,6 +143,11 @@ fn write(
     workspace_key: Option<&str>,
     mut preferences: Preferences,
 ) -> Result<Value, String> {
+    if !(0.0 < preferences.cache_reminder_gb
+        && preferences.cache_reminder_gb <= MAX_CACHE_REMINDER_GB)
+    {
+        return Err("请输入有效的缓存提醒阈值（GB）。".into());
+    }
     preferences.directory = preferences
         .directory
         .filter(|path| !path.trim().is_empty())
@@ -209,6 +230,7 @@ pub(crate) struct CacheUsage {
     #[serde(flatten)]
     size: cache::Size,
     effective_directory: String,
+    cache_reminder_gb: f64,
 }
 
 #[tauri::command]
@@ -224,6 +246,7 @@ pub(crate) async fn c4d_import_cache_size(
         Ok(CacheUsage {
             size: cache::size(&directory)?,
             effective_directory: clean_path(&directory),
+            cache_reminder_gb: preferences.cache_reminder_gb,
         })
     })
     .await
@@ -252,4 +275,37 @@ pub(crate) async fn pick_c4d_converter(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_preferences_default_the_threshold_and_preserve_other_settings() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join(FILE),
+            br#"{"cleanupOnStartup":true,"maxMode":"direct"}"#,
+        )
+        .unwrap();
+        let mut preferences = read(root.path()).unwrap();
+        assert_eq!(preferences.cache_reminder_gb, 1.0);
+        assert!(preferences.cleanup_on_startup);
+        assert!(matches!(preferences.max_mode, MaxMode::Direct));
+
+        preferences.cache_reminder_gb = 2.5;
+        let saved = write(root.path(), None, preferences).unwrap();
+        assert_eq!(saved["cacheReminderGb"], json!(2.5));
+        assert_eq!(read(root.path()).unwrap().cache_reminder_gb, 2.5);
+
+        let invalid = Preferences {
+            cache_reminder_gb: 0.0,
+            ..Preferences::default()
+        };
+        assert!(write(root.path(), None, invalid).is_err());
+        let retained = read(root.path()).unwrap();
+        assert_eq!(retained.cache_reminder_gb, 2.5);
+        assert!(retained.cleanup_on_startup);
+    }
 }

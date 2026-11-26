@@ -3,9 +3,20 @@ import {normalizeImageTransform, normalizeImageRotation, resizeImage, imageLocal
   imageBounds, cropImage, resetImageCrop, snapBoardMove} from './whiteboard-image-transform.js';
 import {boardHistoryEntry, boardHistoryOperations} from './whiteboard-history.js';
 import {parseWhiteboardAssetClipboard} from './whiteboard-asset-clipboard.js';
-import {groupSelected, ungroupSelected, extendGroupSelection, alignSelection, canAlignSelection} from './whiteboard-arrange.js';
-import {boardPorts, isBoardConnectable, boardPortPoint, nearestBoardPort} from './whiteboard-connections.js';
+import {groupSelected, ungroupSelected, extendGroupSelection, alignSelection, distributeSelection,
+  stackSelection, canAlignSelection, canDockSelection, canNormalizeSelection,
+  normalizeSelection, normalizeScaleItems} from './whiteboard-arrange.js';
+import {boardPorts, isBoardConnectable, boardPortPoint, nearestBoardEdge, facingBoardPort,
+  boardConnectionControls, readBoardConnectionOffsets, writeBoardConnectionOffsets} from './whiteboard-connections.js';
 import {strokeCurve} from './whiteboard-stroke.js';
+import {readWhiteboardLink, whiteboardLinkCard, whiteboardLinkPatch} from './whiteboard-links.js';
+import {createWhiteboardFilePreviews, readWhiteboardFile, whiteboardFileCard, writeWhiteboardFile} from './whiteboard-files.js';
+import {initVideoHoverPreview} from './video-hover-preview.js';
+import {readVideoCover, writeVideoCover, copyVideoFrame, videoFrameUrl, loadVideoCoverFrame} from './whiteboard-video-cover.js';
+import {initWhiteboardPresence} from './whiteboard-presence.js';
+import {readWhiteboardMediaDimensions} from './whiteboard-media-dimensions.js';
+import {canOptimizeArrangement, optimizeArrangement} from './whiteboard-optimize.js';
+import {initWhiteboardStackSettings, stackSettingsLabel} from './whiteboard-stack-settings.js';
 
 const storageKey = 'nexus-whiteboard-v1:';
 const clipboardType = 'application/x-nexus-whiteboard+json';
@@ -18,6 +29,7 @@ const tools = {select:['选择','V','locate'], pan:['平移','H','arrow'], note:
   arrow:['连接线','L','arrow'], frame:['画框','F','expand'], stroke:['画笔','P','edit'], eraser:['橡皮擦','E','trash']};
 const limits = {items:500, text:2048, points:768, batch:16, history:80};
 const svgNS = 'http://www.w3.org/2000/svg';
+const connectorCurve = Symbol('connectorCurve');
 const resizeCorners = {nw:[-1,-1,'左上'],ne:[1,-1,'右上'],sw:[-1,1,'左下'],se:[1,1,'右下']};
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 const coordinate = value => Math.round(clamp(value, -1_000_000, 1_000_000) * 10) / 10;
@@ -32,11 +44,30 @@ const imageActions = {
   resetTransform:['重置变换','refresh','Ctrl+Shift+T'],
 };
 const alignActions = {
-  left:['左对齐','x','start'],right:['右对齐','x','end'],
-  top:['顶对齐','y','start'],bottom:['底对齐','y','end'],
-  centerX:['水平居中','x','center'],centerY:['垂直居中','y','center'],
+  left:['左对齐','x','start','align-left','Ctrl+←','Control+ArrowLeft Meta+ArrowLeft'],
+  right:['右对齐','x','end','align-right','Ctrl+→','Control+ArrowRight Meta+ArrowRight'],
+  top:['顶对齐','y','start','align-top','Ctrl+↑','Control+ArrowUp Meta+ArrowUp'],
+  bottom:['底对齐','y','end','align-bottom','Ctrl+↓','Control+ArrowDown Meta+ArrowDown'],
+  centerX:['水平居中','x','center','align-center-horizontal'],
+  centerY:['垂直居中','y','center','align-center-vertical'],
+  distributeX:['水平排列','x',null,'distribute-horizontal','Ctrl+Alt+Shift+↑','Control+Alt+Shift+ArrowUp Meta+Alt+Shift+ArrowUp'],
+  distributeY:['垂直排列','y',null,'distribute-vertical','Ctrl+Alt+Shift+↓','Control+Alt+Shift+ArrowDown Meta+Alt+Shift+ArrowDown'],
+  stack:['堆叠',null,null,'stack','Ctrl+Alt+S','Control+Alt+S Meta+Alt+S'],
+  optimal:['优化排列',null,null,'grid','Ctrl+P','Control+P Meta+P'],
 };
 const alignKeys = {ArrowLeft:'left',ArrowRight:'right',ArrowUp:'top',ArrowDown:'bottom'};
+const directionalAlignActions = new Set(Object.values(alignKeys));
+const distributeKeys = {ArrowUp:'distributeX',ArrowDown:'distributeY'};
+const normalizeActions = {
+  height:['等高','align-top','Ctrl+Alt+←','Control+Alt+ArrowLeft Meta+Alt+ArrowLeft'],
+  width:['等宽','align-left','Ctrl+Alt+→','Control+Alt+ArrowRight Meta+Alt+ArrowRight'],
+  size:['等最长边','expand','Ctrl+Alt+↑','Control+Alt+ArrowUp Meta+Alt+ArrowUp'],
+  area:['等面积','grid'],
+  scale:['等缩放比例','sliders','Ctrl+Alt+↓','Control+Alt+ArrowDown Meta+Alt+ArrowDown'],
+};
+const normalizeKeys = {ArrowLeft:'height',ArrowRight:'width',ArrowUp:'size',ArrowDown:'scale'};
+const normalizeModes = {first:'以首个选中项为准',average:'取平均值'};
+const normalizeModeKey = 'nexus-whiteboard-normalize-mode';
 const portNames = {top:'上边',right:'右边',bottom:'下边',left:'左边'};
 
 function fromItems(items) {
@@ -89,7 +120,17 @@ function arrowPoints(points) {
 function pathPoints(item) {
   const points = Array.isArray(item.points) ? item.points.slice(0, 1024)
     .filter(point => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite)) : [];
-  return item.kind === 'arrow' ? arrowPoints(points) : points;
+  if (item.kind !== 'arrow') return points;
+  if (!item[connectorCurve] || points.length !== 2) return arrowPoints(points);
+  const [start,end] = points;
+  const [first,last] = item[connectorCurve];
+  const samples = Array.from({length:25}, (_, index) => {
+    const t = index / 24;
+    const u = 1 - t;
+    return [0,1].map(i => u ** 3 * start[i] + 3 * u * u * t * first[i] +
+      3 * u * t * t * last[i] + t ** 3 * end[i]);
+  });
+  return [...samples,...arrowPoints([last,end]).slice(2)];
 }
 
 const inkCurves = new WeakMap();
@@ -108,6 +149,27 @@ function arrowGeometry(start, end) {
     height:length(Math.max(...points.map(point => point[1])) + 16)};
 }
 
+function connectedGeometry(start, end, fromItem, fromSide, toItem, toSide) {
+  const geometry = arrowGeometry(start,end);
+  const curve = boardConnectionControls(start,end,fromItem,fromSide,toItem,toSide)
+    .map(([x,y]) => [x - geometry.x,y - geometry.y]);
+  return {...geometry,[connectorCurve]:curve};
+}
+
+function connectionShaft(item) {
+  const [start,end] = item.points;
+  const [first,last] = item[connectorCurve];
+  return 'M' + start.join(' ') + ' C' + [first,last,end].map(point => point.join(' ')).join(' ');
+}
+
+function connectionPath(item) {
+  const [,end] = item.points;
+  const [,last] = item[connectorCurve];
+  const head = arrowPoints([last,end]).slice(2);
+  const shaft = connectionShaft(item);
+  return head.length ? shaft + ' M' + head.map(point => point.join(' ')).join(' L') : shaft;
+}
+
 function overlapsBox(item, bounds) {
   return item.x <= bounds.right && item.y <= bounds.bottom &&
     item.x + item.width >= bounds.left && item.y + item.height >= bounds.top;
@@ -119,7 +181,7 @@ function intersectsMarquee(item, bounds) {
     return image.left <= bounds.right && image.right >= bounds.left &&
       image.top <= bounds.bottom && image.bottom >= bounds.top;
   }
-  if (!overlapsBox(item, bounds)) return false;
+  if (!item[connectorCurve] && !overlapsBox(item, bounds)) return false;
   if (item.kind === 'frame') {
     return item.x >= bounds.left && item.y >= bounds.top &&
       item.x + item.width <= bounds.right && item.y + item.height <= bounds.bottom;
@@ -188,13 +250,33 @@ function loadOutbox(key, teamId) {
   return {queue:[]};
 }
 
-export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage = async () => null}) {
+export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage = async () => null, openLink,
+  locateAsset, loadPresenceAvatar, revealPastedFile, importPastedFiles, handleDroppedFiles, loadFilePreview}) {
+  const stackSettings = initWhiteboardStackSettings(notify);
+  let normalizeSource = 'first';
+  try { if (localStorage.getItem(normalizeModeKey) === 'average') normalizeSource = 'average'; } catch {}
   const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
   panel.innerHTML = `<div class="whiteboard-shell">
     <div class="whiteboard-stage" tabindex="0" role="region" aria-label="白板画布">
-      <div class="whiteboard-plane"><div class="whiteboard-group-outline" aria-hidden="true" hidden></div></div>
+      <div class="whiteboard-grid" aria-hidden="true"></div>
+      <div class="whiteboard-plane">
+        <div class="whiteboard-group-frames" aria-hidden="true"></div>
+        <div class="whiteboard-group-outline" aria-hidden="true" hidden></div>
+        <div class="whiteboard-connector-endpoints" data-pane-transient hidden>
+          <button type="button" data-board-endpoint="from" aria-label="移动连接线起点" title="拖动调整连接线起点"></button>
+          <button type="button" data-board-endpoint="to" aria-label="移动连接线终点" title="拖动调整连接线终点"></button>
+          <button type="button" data-board-cut-connector aria-label="断开连接线" title="断开连接线">${icon('scissors')}</button>
+        </div>
+      </div>
       <div class="whiteboard-marquee" aria-hidden="true" hidden></div>
       <p class="whiteboard-empty" hidden>粘贴图片，或选择工具开始</p>
+      <div class="whiteboard-presence-cursors" data-pane-transient aria-hidden="true"></div>
+      <div class="whiteboard-node-picker" role="group" aria-label="添加连接节点" hidden>
+        <button type="button" data-board-node-kind="note">${icon('notes')}便签</button>
+        <button type="button" data-board-node-kind="text">${icon('list')}文字</button>
+        <button type="button" data-board-node-kind="image">${icon('picture')}图片</button>
+      </div>
+      <input type="file" data-board-node-image accept="image/png,image/jpeg,image/webp,image/gif" hidden>
     </div>
     <div class="whiteboard-tools" role="toolbar" aria-label="白板工具">${Object.entries(tools).map(([id,[label,key,glyph]]) =>
       `<button type="button" data-board-tool="${id}" aria-pressed="false" title="${label}（${key}）" aria-keyshortcuts="${key}">${icon(glyph)}<span>${label}</span></button>`).join('')}
@@ -211,20 +293,39 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       <div class="whiteboard-arrange" hidden>
         <button type="button" data-board-arrange="group" title="成组（Ctrl+G）" aria-keyshortcuts="Control+G Meta+G">${icon('stack')}成组</button>
         <button type="button" data-board-arrange="ungroup" title="解组（Ctrl+Shift+G）" aria-keyshortcuts="Control+Shift+G Meta+Shift+G">解组</button>
-        <details class="whiteboard-align">
-          <summary>对齐${icon('chevron')}</summary>
-          <div class="whiteboard-align-options">${Object.entries(alignActions).map(([id,[label]]) =>
-            `<button type="button" data-board-arrange="${id}">${label}</button>`).join('')}</div>
-        </details>
+      </div>
+      <div class="whiteboard-align-actions" role="group" aria-label="对齐与排列" hidden>${Object.entries(alignActions).map(([id,[label,,,glyph,shortcut,key]]) => {
+        const button = `<button type="button" data-board-arrange="${id}" aria-label="${label}" title="${label}${shortcut ? `（${shortcut}）` : ''}"${key ? ` aria-keyshortcuts="${key}"` : ''}>${icon(glyph)}</button>`;
+        if (id !== 'stack') return button;
+        return `<div class="whiteboard-stack-control" role="group" aria-label="堆叠操作" hidden>
+          ${button}<button type="button" data-board-stack-preferences aria-label="${stackSettingsLabel}" title="${stackSettingsLabel}"
+            aria-haspopup="dialog" aria-controls="whiteboard-stack-settings">${icon('chevron')}</button>
+        </div>`;
+      }).join('')}</div>
+      <div class="whiteboard-normalize" hidden>
+        <button type="button" data-board-normalize-toggle aria-label="缩放对齐" aria-expanded="false" aria-controls="whiteboard-normalize-panel">
+          ${icon('expand')}<span>缩放对齐</span>${icon('chevron')}
+        </button>
+        <div id="whiteboard-normalize-panel" class="whiteboard-normalize-panel" role="group" aria-label="缩放对齐" data-pane-transient hidden>
+          <div class="whiteboard-normalize-modes" role="group" aria-label="缩放参照">${Object.entries(normalizeModes).map(([id,label]) =>
+            `<button type="button" data-board-normalize-source="${id}" aria-pressed="${normalizeSource === id}">${label}</button>`).join('')}</div>
+          <div class="whiteboard-normalize-actions">${Object.entries(normalizeActions).map(([id,[label,glyph,shortcut,key]]) =>
+            `<button type="button" data-board-normalize="${id}"${key ? ` aria-keyshortcuts="${key}"` : ''}>
+              ${icon(glyph)}<span>${label}</span>${shortcut ? `<kbd aria-hidden="true">${shortcut}</kbd>` : ''}
+            </button>`).join('')}</div>
+        </div>
       </div>
       <button type="button" class="whiteboard-delete" title="删除所选项（Delete）" aria-label="删除所选项" disabled>${icon('trash')}</button>
     </div>
-    <div class="whiteboard-sync"><span role="status"></span><button type="button" hidden>重试</button></div>
+    <div class="whiteboard-sync">
+      <div class="whiteboard-presence-roster" data-pane-transient role="group" aria-label="此白板的在线协作者" hidden></div>
+      <span role="status"></span><button type="button" hidden>重试</button>
+    </div>
     <div class="whiteboard-view" role="toolbar" aria-label="视图缩放">
       <button type="button" data-board-view="out" title="缩小" aria-label="缩小">−</button>
       <button type="button" data-board-view="reset" title="恢复 100% 缩放">100%</button>
       <button type="button" data-board-view="in" title="放大" aria-label="放大">+</button>
-      <button type="button" data-board-view="fit" title="适应全部内容" aria-label="适应全部内容">${icon('expand')}</button>
+      <button type="button" data-board-view="fit" title="优化画布（Ctrl+O）" aria-label="适应全部内容" aria-keyshortcuts="Control+O Meta+O">${icon('expand')}</button>
     </div>
     <div class="whiteboard-history" role="toolbar" aria-label="编辑历史">
       <button type="button" data-board-history="undo" title="撤销（Ctrl+Z）" aria-label="撤销" aria-keyshortcuts="Control+Z Meta+Z" disabled>${icon('undo')}</button>
@@ -234,34 +335,70 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     <p class="whiteboard-link-hint" role="status" hidden>点击要连接的元素 · Esc 取消</p>
   </div>`;
   const get = selector => panel.querySelector(selector);
+  const shell = get('.whiteboard-shell');
   const stage = get('.whiteboard-stage');
+  const filePreviews = createWhiteboardFilePreviews(stage,loadFilePreview);
+  const grid = get('.whiteboard-grid');
   const plane = get('.whiteboard-plane');
   const marquee = get('.whiteboard-marquee');
   const empty = get('.whiteboard-empty');
-  const status = get('.whiteboard-sync span');
+  const status = get('.whiteboard-sync > span');
   const retry = get('.whiteboard-sync button');
   const deleteButton = get('.whiteboard-delete');
   const imagePicker = get('[data-board-image-picker]');
   const undoButton = get('[data-board-history="undo"]');
   const redoButton = get('[data-board-history="redo"]');
+  const zoomLabel = get('[data-board-view="reset"]');
   const imageTools = get('.whiteboard-image-actions');
   const colorTools = get('.whiteboard-color-actions');
   const cropHint = get('.whiteboard-crop-hint');
+  const groupFrameLayer = get('.whiteboard-group-frames');
   const groupOutline = get('.whiteboard-group-outline');
+  const connectorEndpoints = get('.whiteboard-connector-endpoints');
+  const endpointHandles = connectorEndpoints.querySelectorAll('[data-board-endpoint]');
+  const connectorCut = get('[data-board-cut-connector]');
+  const connectorMeasure = document.createElementNS(svgNS,'path');
   const linkHint = get('.whiteboard-link-hint');
+  const nodePicker = get('.whiteboard-node-picker');
+  const nodeImage = get('[data-board-node-image]');
   const arrangeTools = get('.whiteboard-arrange');
-  const alignMenu = get('.whiteboard-align');
+  const alignmentTools = get('.whiteboard-align-actions');
+  const alignmentDock = alignmentTools.parentElement;
+  const alignOptions = alignmentTools.querySelectorAll('[data-board-arrange]');
+  const stackControl = get('.whiteboard-stack-control');
+  const stackPreferencesButton = get('[data-board-stack-preferences]');
+  const normalizeTools = get('.whiteboard-normalize');
+  const normalizeToggle = get('[data-board-normalize-toggle]');
+  const normalizeLabel = normalizeToggle.querySelector('span');
+  const normalizePanel = get('#whiteboard-normalize-panel');
+  const normalizeSources = normalizePanel.querySelectorAll('[data-board-normalize-source]');
+  const normalizeScale = normalizePanel.querySelector('[data-board-normalize="scale"]');
   const groupButton = get('[data-board-arrange="group"]');
   const ungroupButton = get('[data-board-arrange="ungroup"]');
   const media = createWhiteboardImages({api});
+  const presence = initWhiteboardPresence({stage,cursors:get('.whiteboard-presence-cursors'),
+    avatars:get('.whiteboard-presence-roster'),api,world,loadAvatar:loadPresenceAvatar});
   const states = new Map();
   const nodes = new Map();
+  const groupFrames = new Map();
+  const selectionChrome = {
+    stage, toolbar:alignmentTools, sidebar:get('.whiteboard-tools'),
+    history:get('.whiteboard-history'), palette:alignmentDock, zoom:get('.whiteboard-view'),
+  };
+  const chromeSizes = new Map();
+  let selectionBox;
+  let outlinedGroup;
   let scope;
   let visible = false;
+  let visibilityRevision = 0;
   let tool = 'select';
   let activeColor = 'yellow';
   let selected = new Set();
   let gesture;
+  let gestureFrame = 0;
+  let gestureEvent;
+  let viewFrame = 0;
+  let paintedZoom;
   let editing;
   let cropMode = false;
   let cropKey = false;
@@ -271,10 +408,75 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   let focusedImage;
   let beforeFocus;
   let pointerPosition;
+  let pendingContextImage;
   let localClipboard;
   let linkStart;
+  let pendingNode;
+  let pendingNodeImage;
   let pendingMedia = 0;
+  let normalizeRequest;
   const preparedAssets = new Map();
+  const videoReferences = new WeakMap();
+  const pinnedVideoFrames = new Map();
+  let restoreVideoCovers = Promise.resolve();
+  let pendingCoverPin;
+  const videoCoverObserver = new IntersectionObserver(entries => {
+    for (const {target:node,isIntersecting} of entries) {
+      if (!isIntersecting) continue;
+      videoCoverObserver.unobserve(node);
+      const reference = videoReferences.get(node);
+      if (reference) queueVideoCover(reference);
+    }
+  }, {root:stage});
+  const whiteboardHover = initVideoHoverPreview({
+    grid:stage,
+    source(node) { return videoReferences.get(node)?.asset.playback(); },
+    canPreview(node) {
+      const reference = videoReferences.get(node);
+      return reference?.active() && reference.video.paused && !reference.play.disabled;
+    },
+    isBlocked: () => !visible || tool !== 'select' || Boolean(gesture || editing || pendingNode || linkStart ||
+      cropMode || cropKey || cropAdjustKey || zoomKey ||
+      document.querySelector('dialog[open], .asset-menu:not(.hidden), .dragging-assets, .marquee-selecting')),
+    scrub:{
+      target(target) {
+        const node = target.closest?.('[data-board-id]');
+        return node && videoReferences.has(node) ? node : null;
+      },
+      ratio(node, event) {
+        const point = world(event.clientX,event.clientY);
+        const item = current(node.dataset.boardId);
+        return item ? imageLocalPoint(item,point.x,point.y).x : 0;
+      },
+      mount(node, layer, video, guide) {
+        layer.classList.add('whiteboard-video-hover');
+        video.className = 'whiteboard-image';
+        layer.setAttribute('data-pane-transient','');
+        guide.setAttribute('data-pane-transient','');
+        videoReferences.get(node).clip.append(layer);
+        node.append(guide);
+      },
+      frame(node, video) {
+        const reference = videoReferences.get(node);
+        if (!reference) return;
+        const canvas = copyVideoFrame(video,reference.preview?.canvas);
+        if (canvas) reference.preview = {canvas,time:video.currentTime};
+      },
+      leave(node) {
+        const reference = videoReferences.get(node);
+        const preview = reference?.preview;
+        if (!preview) return;
+        reference.preview = null;
+        const url = videoFrameUrl(preview.canvas);
+        if (!url || !reference.active()) return;
+        reference.lastFrame = {url,time:preview.time};
+        reference.video.hidden = true;
+        reference.image.src = url;
+        reference.image.hidden = false;
+        return reference.lastFrame;
+      },
+    },
+  });
 
   function orderedItems(state, board) {
     for (const id of board.keys()) {
@@ -283,7 +485,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     return new Map([...board].sort(([left],[right]) => state.order.get(left) - state.order.get(right)));
   }
 
-  const items = () => scope ? orderedItems(scope, applyOperations(scope.base, scope.queue)) : new Map();
+  const emptyBoard = new Map();
+  const items = () => scope
+    ? (scope.board ??= orderedItems(scope, applyOperations(scope.base, scope.queue)))
+    : emptyBoard;
   const current = id => items().get(id);
   const canTransformImages = () => Boolean(scope && (!scope.teamId || scope.imageTransforms));
   const canUseAssetReferences = () => Boolean(scope && (!scope.teamId || scope.assetReferences));
@@ -329,6 +534,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   async function sync(state = scope) {
     if (!state?.teamId || state.busy || state.workspaceKey !== scope?.workspaceKey ||
+      (state === scope && gesture && !state.queue.length) ||
       ((!visible || state !== scope) && !state.queue.length)) return;
     state.busy = true;
     if (!state.batch && state.queue.length) {
@@ -339,6 +545,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const batch = state.batch;
     const target = state.projectId && state.projectId !== 'default'
       ? {teamId:state.teamId,projectId:state.projectId} : {teamId:state.teamId};
+    let changed = false;
     try {
       if (batch) {
         const references = new Set(batch.operations.map(operation => operation.patch?.imageId).filter(Boolean));
@@ -350,12 +557,17 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         ? await api('team_whiteboard_apply', {...target, ...batch})
         : await api('team_whiteboard_get', target);
       if (!Array.isArray(snapshot?.items) || !Number.isSafeInteger(snapshot.revision)) throw Error('团队白板返回了无效数据。');
-      state.base = fromItems(snapshot.items);
-      state.imageTransforms = snapshot.imageTransforms === true;
-      state.assetReferences = snapshot.assetReferences === true;
-      state.restoreItems = snapshot.restoreItems === true;
-      state.groups = snapshot.groups === true;
-      state.connections = snapshot.connections === true;
+      changed = Boolean(batch) || state.revision !== snapshot.revision;
+      if (changed) {
+        state.base = fromItems(snapshot.items);
+        state.revision = snapshot.revision;
+        state.board = undefined;
+      }
+      for (const feature of ['imageTransforms','assetReferences','restoreItems','groups','connections']) {
+        const supported = snapshot[feature] === true;
+        changed ||= state[feature] !== supported;
+        state[feature] = supported;
+      }
       if (batch) {
         state.queue.splice(0, batch.operations.length);
         state.batch = undefined;
@@ -367,12 +579,16 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       state.error = String(failure?.message || failure || '无法连接团队白板').slice(0, 180);
     } finally {
       state.busy = false;
-      if (scope === state && visible) render();
+      if (scope === state && visible) {
+        if (changed) render();
+        else showSync();
+      }
       if (!state.error && state.queue.length) sync(state);
     }
   }
 
   function applyChanges(operations, next) {
+    scope.board = undefined;
     if (scope.teamId) {
       scope.queue.push(...operations);
       saveOutbox(scope);
@@ -448,7 +664,24 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   function itemContent(node, item) {
     releaseImage(node);
-    if (item.kind === 'image') {
+    const link = item.kind === 'text' && readWhiteboardLink(item.text);
+    const file = item.kind === 'text' && readWhiteboardFile(item.text);
+    node.toggleAttribute('data-board-link-card', Boolean(link));
+    node.toggleAttribute('data-board-file-card', Boolean(file));
+    node.setAttribute('aria-label', file ? (file.isFolder ? '文件夹 · ' : '文件 · ') + file.name : link ? '链接 · ' + link.title : kinds[item.kind]);
+    if (link) {
+      node.replaceChildren(whiteboardLinkCard(link, icon, openLink));
+    } else if (file) {
+      const target = scope;
+      const available = () => visible && scope === target && current(item.id)?.text === item.text;
+      const reveal = revealPastedFile && file.teamId === target?.teamId ? async () => {
+        if (!available()) return;
+        try { await revealPastedFile(file); }
+        catch (failure) { notify(String(failure?.message || failure),true); }
+      } : null;
+      node.replaceChildren(whiteboardFileCard(file,icon,reveal));
+      if (!file.isFolder && file.teamId === target?.teamId) filePreviews?.add(node,file,available);
+    } else if (item.kind === 'image') {
       renderImage(node, item);
     } else if (item.kind === 'frame') {
       const svg = document.createElementNS(svgNS, 'svg');
@@ -465,25 +698,49 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       caption.className = 'whiteboard-frame-title';
       caption.textContent = item.text || '画框';
       node.replaceChildren(svg, caption);
-    } else if (item.kind === 'stroke' || item.kind === 'arrow') {
-      const svg = document.createElementNS(svgNS, 'svg');
-      svg.setAttribute('viewBox', `0 0 ${item.width} ${item.height}`);
+    } else if (item.kind === 'text') {
+      const value = document.createElement('span');
+      value.className = 'whiteboard-text-value';
+      value.textContent = item.text || '';
+      node.replaceChildren(value);
+    } else if (item.kind === 'stroke' || item.kind === 'arrow') paintStroke(node,item);
+    else node.textContent = item.kind === 'note' ? item.text || '' : '';
+  }
+
+  function paintStroke(node,item) {
+    const stroke = item.kind === 'stroke';
+    const curve = item[connectorCurve];
+    const tag = stroke || curve ? 'path' : 'polyline';
+    let svg = node.firstElementChild;
+    let hitArea = svg?.firstElementChild;
+    let line = svg?.lastElementChild;
+    if (!hitArea?.classList.contains('whiteboard-stroke-hit') || line?.localName !== tag) {
+      svg = document.createElementNS(svgNS, 'svg');
       svg.setAttribute('aria-hidden', 'true');
-      const stroke = item.kind === 'stroke';
-      const line = document.createElementNS(svgNS, stroke ? 'path' : 'polyline');
-      if (stroke) {
-        line.setAttribute('class','whiteboard-ink-path');
-        line.setAttribute('d',inkCurve(item).path);
-      } else line.setAttribute('points', pathPoints(item).map(point => point.join(',')).join(' '));
-      const hitArea = line.cloneNode();
+      line = document.createElementNS(svgNS, tag);
+      hitArea = line.cloneNode();
       hitArea.setAttribute('class', 'whiteboard-stroke-hit');
       hitArea.setAttribute('vector-effect', 'non-scaling-stroke');
       svg.append(hitArea, line);
       node.replaceChildren(svg);
-    } else node.textContent = item.kind === 'note' || item.kind === 'text' ? item.text || '' : '';
+    }
+    svg.setAttribute('viewBox', `0 0 ${item.width} ${item.height}`);
+    if (stroke) line.setAttribute('class','whiteboard-ink-path');
+    else if (curve) line.setAttribute('class','whiteboard-curve-path');
+    const attribute = tag === 'path' ? 'd' : 'points';
+    const path = stroke ? inkCurve(item).path : curve ? connectionPath(item)
+      : pathPoints(item).map(point => point.join(',')).join(' ');
+    hitArea.setAttribute(attribute,path);
+    line.setAttribute(attribute,path);
   }
 
   function releaseImage(node) {
+    filePreviews?.remove(node);
+    whiteboardHover.stopFor(node);
+    videoCoverObserver.unobserve(node);
+    videoReferences.get(node)?.coverAbort.abort();
+    videoReferences.delete(node);
+    node.whiteboardAsset = null;
     if (node.whiteboardImageUrl) URL.revokeObjectURL(node.whiteboardImageUrl);
     node.whiteboardImageUrl = null;
     const video = node.querySelector('video');
@@ -494,18 +751,106 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     }
   }
 
-  function attachReferenceVideo(node, clip, image, asset, active) {
+  function rememberVideoCover(key, url) {
+    pinnedVideoFrames.delete(key);
+    pinnedVideoFrames.set(key,url);
+    if (pinnedVideoFrames.size > 24) pinnedVideoFrames.delete(pinnedVideoFrames.keys().next().value);
+  }
+
+  function videoCoverKey(workspace, assetId, time) {
+    return JSON.stringify([workspace,assetId,Number(time.toFixed(3))]);
+  }
+
+  function queueVideoCover(reference) {
+    const {coverAbort:{signal},coverTime,coverKey,asset,active,image} = reference;
+    restoreVideoCovers = restoreVideoCovers.then(async () => {
+      if (signal.aborted || !active() || !visible) return;
+      const url = pinnedVideoFrames.get(coverKey) || await loadVideoCoverFrame(asset.playback,coverTime,signal);
+      if (!url || signal.aborted || !active()) return;
+      rememberVideoCover(coverKey,url);
+      if (!reference.lastFrame) {
+        image.src = url;
+        image.hidden = false;
+      }
+    }).catch(() => {});
+  }
+
+  function finishVideoCoverPin(save) {
+    const pending = pendingCoverPin;
+    if (!pending) return;
+    pendingCoverPin = null;
+    clearTimeout(pending.timer);
+    if (save) pending.save();
+  }
+
+  function clickVideoPreview(drag, event) {
+    if (event?.pointerType !== 'mouse' || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const node = nodes.get(drag.clicked);
+    if (!videoReferences.has(node)) return;
+    if (drag.videoPreview) pinVideoCover(drag.clicked,drag.videoPreview.frame);
+    else whiteboardHover.previewAt(node,event);
+  }
+
+  function pinVideoCover(id, frame) {
+    const reference = videoReferences.get(nodes.get(id));
+    const item = current(id);
+    if (!frame || !item?.assetId || !reference?.video.paused) return;
+    const {time,url} = frame;
+    const text = writeVideoCover(item.text,time);
+    const workspace = scope.workspaceKey;
+    const revision = visibilityRevision;
+    finishVideoCoverPin(pendingCoverPin?.id !== id);
+    const save = () => {
+      if (!visible || visibilityRevision !== revision || !reference.active() || current(id)?.assetId !== item.assetId) return;
+      rememberVideoCover(videoCoverKey(workspace,item.assetId,time),url);
+      if (current(id).text !== text) commit({id,patch:{text}});
+    };
+    pendingCoverPin = {id,save,timer:setTimeout(() => finishVideoCoverPin(true),500)};
+  }
+
+  function updateVideoCover(node, item, reference) {
+    const {title,time} = readVideoCover(item.text);
+    const key = time === null ? null : videoCoverKey(scope.workspaceKey,item.assetId,time);
+    reference.image.alt = title || '白板图片';
+    node.title = (reference.asset.name || title || '资产') + ' · 资产库引用';
+    if (reference.coverKey === key) return;
+
+    whiteboardHover.stopFor(node);
+    videoCoverObserver.unobserve(node);
+    reference.coverAbort.abort();
+    reference.coverAbort = new AbortController();
+    reference.coverTime = time;
+    reference.coverKey = key;
+    reference.lastFrame = null;
+    const cached = key && pinnedVideoFrames.get(key);
+    const url = cached || reference.asset.poster;
+    if (url) reference.image.src = url;
+    else reference.image.removeAttribute('src');
+    reference.image.hidden = !url || !reference.video.hidden;
+    if (key && !cached) videoCoverObserver.observe(node);
+  }
+
+  function attachReferenceVideo(node, clip, image, asset, item, active) {
     const video = document.createElement('video');
     video.className = 'whiteboard-image';
     video.playsInline = true;
     video.preload = 'none';
     video.hidden = true;
-    if (asset.poster) image.src = asset.poster;
-    else image.hidden = true;
+    const {time:coverTime} = readVideoCover(item.text);
+    const coverKey = coverTime === null ? null : videoCoverKey(scope.workspaceKey,item.assetId,coverTime);
+    const cachedCover = coverKey && pinnedVideoFrames.get(coverKey);
+    if (cachedCover) image.src = cachedCover;
+    else if (asset.poster) {
+      if (!image.hasAttribute('src')) image.src = asset.poster;
+    } else image.hidden = true;
     clip.append(video);
     const play = document.createElement('button');
     play.type = 'button';
     play.dataset.boardPlayVideo = '';
+    const reference = {asset,active,clip,image,video,play,coverTime,coverKey,
+      assetId:item.assetId,imageId:item.imageId,coverAbort:new AbortController()};
+    videoReferences.set(node,reference);
+    if (coverKey && !cachedCover) videoCoverObserver.observe(node);
     const setPlaying = running => {
       play.toggleAttribute('data-playing', running);
       play.innerHTML = icon(running ? 'media-pause' : 'media-play');
@@ -517,28 +862,39 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     video.addEventListener('pause', () => setPlaying(false));
     video.addEventListener('ended', () => setPlaying(false));
     play.addEventListener('click', async () => {
+      whiteboardHover.stopFor(node);
       if (!video.paused) { video.pause(); return; }
+      const revision = visibilityRevision;
+      const stillVisible = () => active() && visible && revision === visibilityRevision;
+      const startTime = video.hidden || video.ended ? reference.lastFrame?.time ?? reference.coverTime ?? 0 : null;
+      const startPlayback = () => {
+        if (startTime !== null) {
+          const end = Number.isFinite(video.duration) ? Math.max(0,video.duration - .05) : Infinity;
+          video.currentTime = Math.min(startTime,end);
+        }
+        return video.play();
+      };
       play.disabled = true;
       try {
-        if (video.ended && video.src) video.currentTime = 0;
         if (!video.hasAttribute('src')) {
           const source = await asset.playback();
-          if (!active() || !visible) return;
+          if (!stillVisible()) return;
           for (const url of [source?.url, source?.fallbackUrl].filter(Boolean)) {
             video.src = url;
-            try { await video.play(); break; } catch {}
-            if (!active() || !visible) return;
+            try { await startPlayback(); break; } catch {}
+            if (!stillVisible()) return;
           }
           if (video.paused) throw Error('视频暂时无法播放');
-          video.hidden = false;
-          image.hidden = true;
-        } else await video.play();
+        } else await startPlayback();
+        if (!stillVisible()) return;
+        video.hidden = false;
+        image.hidden = true;
       } catch {
         video.removeAttribute('src');
         video.load();
         video.hidden = true;
-        image.hidden = !asset.poster;
-        if (active() && visible) notify('引用的视频暂时无法播放。', true);
+        image.hidden = !image.hasAttribute('src');
+        if (stillVisible()) notify('引用的视频暂时无法播放。', true);
       } finally { play.disabled = false; }
     });
     node.append(play);
@@ -547,11 +903,14 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   function renderImage(node, item) {
     const target = scope;
     node.whiteboardAssetReference = Boolean(item.assetId);
+    const prepared = preparedAssets.get(item.id);
+    preparedAssets.delete(item.id);
     const clip = document.createElement('div');
     clip.className = 'whiteboard-image-clip';
-    const image = document.createElement('img');
+    const image = prepared?.previewImage || document.createElement('img');
     image.className = 'whiteboard-image';
-    image.alt = item.text || '白板图片';
+    const title = readVideoCover(item.text).title;
+    image.alt = title || '白板图片';
     image.draggable = false;
     const crop = document.createElement('div');
     crop.className = 'whiteboard-crop-box';
@@ -561,20 +920,20 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     node.replaceChildren(clip, crop);
     const active = () => scope === target && clip.parentElement === node && node.isConnected;
     if (item.assetId) {
-      const prepared = preparedAssets.get(item.id);
-      preparedAssets.delete(item.id);
       Promise.resolve(prepared || resolveAssetImage(item.assetId,target.workspaceKey)).then(asset => {
         if (!active()) return;
-        if (asset?.kind === 'video') attachReferenceVideo(node,clip,image,asset,active);
-        else if (asset?.url) image.src = asset.url;
-        else throw Error('资产暂时无法读取');
-        node.title = (asset.name || item.text || '资产') + ' · 资产库引用';
+        node.whiteboardAsset = asset;
+        if (asset?.kind === 'video') attachReferenceVideo(node,clip,image,asset,item,active);
+        else if (asset?.url) {
+          if (!image.hasAttribute('src')) image.src = asset.url;
+        } else throw Error('资产暂时无法读取');
+        node.title = (asset.name || title || '资产') + ' · 资产库引用';
       }).catch(() => {
         if (!active()) return;
         image.hidden = true;
         const fallback = document.createElement('span');
         fallback.className = 'whiteboard-reference-missing';
-        fallback.textContent = item.text ? item.text + ' · 引用暂不可用' : '资产引用暂不可用';
+        fallback.textContent = title ? title + ' · 引用暂不可用' : '资产引用暂不可用';
         node.append(fallback);
         node.title = fallback.textContent;
       });
@@ -616,6 +975,14 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   function render() {
     const board = items();
+    const textAttachments = new Map();
+    for (const item of board.values()) {
+      const to = item.connection?.to;
+      if (!to || textAttachments.has(to.id) || board.get(to.id)?.kind !== 'text' ||
+          !isBoardConnectable(board.get(item.connection.from?.id)) || !Object.hasOwn(boardPorts,to.side) ||
+          readBoardConnectionOffsets(item.text).to !== .5) continue;
+      textAttachments.set(to.id,to.side);
+    }
     for (const [id, node] of nodes) {
       if (board.has(id)) continue;
       if (editing?.id === id) editing = undefined;
@@ -640,15 +1007,30 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       previous = node;
       node.toggleAttribute('data-board-connected',Boolean(item.connection));
       if (item.connection) continue;
-      place(node, presentedItem(item));
+      if (item.kind === 'text') {
+        const side = textAttachments.get(id);
+        if (side !== node.dataset.boardTextSide) {
+          if (side) node.dataset.boardTextSide = side;
+          else delete node.dataset.boardTextSide;
+        }
+      }
+      if (gesture?.mode === 'move') {
+        place(node, item);
+        const position = gesture.positions.get(id);
+        if (position) translateMove(node,item,position);
+      } else place(node, presentedItem(item));
       const signature = item.kind === 'image' ? JSON.stringify([item.imageId, item.assetId, item.text])
         : item.kind === 'stroke' || item.kind === 'arrow' ? JSON.stringify([item.width, item.height, item.points]) : item.text || '';
       if (editing?.id !== id && signature !== node.whiteboardContent) {
         node.whiteboardContent = signature;
-        itemContent(node, item);
+        const reference = videoReferences.get(node);
+        if (reference && item.kind === 'image' && item.assetId === reference.assetId && item.imageId === reference.imageId) {
+          updateVideoCover(node,item,reference);
+        } else itemContent(node, item);
       }
       if (item.kind === 'image') drawCropBox(node, gesture?.id === id ? gesture.region : null);
     }
+    renderGroupFrames(board);
     renderConnections(board);
     empty.hidden = board.size > 0 || Boolean(gesture?.preview) || !scope?.loaded;
     renderSelection(board);
@@ -657,13 +1039,20 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   function renderSelection(board = items()) {
     selected = extendGroupSelection(board,selected);
+    updateNormalizeControls(board);
     const canAlign = canAlignSelection(board,selected);
+    const canDock = !canAlign && canDockSelection(board,selected);
+    const canOptimize = selected.size > 0 && canOptimizeArrangement(board,selected);
     const hasGroup = [...selected].some(id => board.get(id).groupId);
-    arrangeTools.hidden = !canAlign && !hasGroup;
     groupButton.hidden = !canAlign || !canUseGroups();
     ungroupButton.hidden = !hasGroup || !canUseGroups();
-    alignMenu.hidden = !canAlign;
-    if (alignMenu.hidden) alignMenu.open = false;
+    arrangeTools.hidden = groupButton.hidden && ungroupButton.hidden;
+    alignmentTools.hidden = !canAlign && !canDock && !canOptimize;
+    stackControl.hidden = !canAlign;
+    for (const option of alignOptions) {
+      const action = option.dataset.boardArrange;
+      option.hidden = action === 'optimal' ? !canOptimize : !canAlign && (!canDock || !directionalAlignActions.has(action));
+    }
     undoButton.disabled = !scope?.undo.length;
     redoButton.disabled = !scope?.redo.length;
     const imageOnly = selected.size > 0 && [...selected].every(id => board.get(id).kind === 'image');
@@ -677,6 +1066,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     stage.classList.toggle('is-cropping', cropMode || cropKey);
     const canResize = tool === 'select' && !cropMode && !cropKey && selected.size === 1;
     updateGroupOutline(board);
+    updateConnectorEndpoints(board);
     for (const [id, node] of nodes) {
       node.classList.toggle('is-selected', selected.has(id));
       updateConnectionPorts(node,board.get(id));
@@ -736,15 +1126,107 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const board = items();
     const align = alignActions[action];
     let operations;
-    if (align) operations = alignSelection(board,selected,align[1],align[2]);
-    else {
+    if (action === 'optimal') { runOptimalArrangement(); return; }
+    if (action === 'stack') operations = stackSelection(board,selected,stackSettings.current(),canTransformImages());
+    else if (align) {
+      const [,axis,edge] = align;
+      operations = edge ? alignSelection(board,selected,axis,edge) : distributeSelection(board,selected,axis);
+    } else {
       if (!canUseGroups()) { notify('请更新团队服务后使用组合。', true); return; }
       operations = action === 'group' ? groupSelected(board,selected,crypto.randomUUID())
         : ungroupSelected(board,selected);
     }
-    alignMenu.open = false;
     commit(...operations);
     stage.focus({preventScroll:true});
+  }
+
+  function setNormalizeOpen(open, restoreFocus = false) {
+    normalizePanel.hidden = !open;
+    normalizeToggle.setAttribute('aria-expanded', String(open));
+    if (open) {
+      [...normalizeSources].find(button => button.dataset.boardNormalizeSource === normalizeSource)?.focus({preventScroll:true});
+    } else if (restoreFocus && !normalizeTools.hidden) normalizeToggle.focus({preventScroll:true});
+  }
+
+  function cancelNormalizeRequest() {
+    const request = normalizeRequest;
+    normalizeRequest = undefined;
+    request?.controller.abort();
+  }
+
+  function normalizeRequestCurrent(request, board = items()) {
+    return normalizeRequest === request && visible && scope === request.target && visibilityRevision === request.revision &&
+      board === request.board && selected.size === request.selection.size &&
+      [...selected].every((id,index) => id === request.order[index]);
+  }
+
+  function updateNormalizeControls(board) {
+    if (normalizeRequest && !normalizeRequestCurrent(normalizeRequest,board)) cancelNormalizeRequest();
+    const available = canNormalizeSelection(board,selected);
+    normalizeTools.hidden = !available;
+    normalizeScale.disabled = !available || !canNormalizeSelection(board,selected,'scale');
+    normalizeToggle.setAttribute('aria-busy', String(Boolean(normalizeRequest)));
+    normalizeToggle.setAttribute('aria-disabled', String(Boolean(normalizeRequest)));
+    normalizeLabel.textContent = normalizeRequest ? '读取尺寸…' : '缩放对齐';
+    if (!available && !normalizePanel.hidden) setNormalizeOpen(false);
+  }
+
+  function setNormalizeSource(source) {
+    if (!Object.hasOwn(normalizeModes,source) || source === normalizeSource) return;
+    cancelNormalizeRequest();
+    normalizeSource = source;
+    try { localStorage.setItem(normalizeModeKey,source); } catch {}
+    for (const button of normalizeSources) {
+      button.setAttribute('aria-pressed', String(button.dataset.boardNormalizeSource === source));
+    }
+    updateNormalizeControls(items());
+  }
+
+  async function runNormalize(action) {
+    const board = items();
+    if (!visible || !scope || gesture || !canNormalizeSelection(board,selected,action)) return;
+    cancelNormalizeRequest();
+    const selection = new Set(selected);
+    const source = normalizeSource;
+    if (action !== 'scale') {
+      updateNormalizeControls(board);
+      commit(...normalizeSelection(board,selection,action,source));
+      return;
+    }
+    const target = scope;
+    const controller = new AbortController();
+    const request = {target,revision:visibilityRevision,board,selection,order:[...selection],controller};
+    normalizeRequest = request;
+    updateNormalizeControls(board);
+    try {
+      const mediaItems = normalizeScaleItems(board,selection);
+      const dimensions = new Map();
+      for (let index = 0; index < mediaItems.length; index += 4) {
+        const batch = mediaItems.slice(index,index + 4);
+        const sizes = await Promise.all(batch.map(item => {
+          const node = nodes.get(item.id);
+          return readWhiteboardMediaDimensions({
+            item,node,videoReference:videoReferences.get(node),
+            resolveAssetImage:() => resolveAssetImage(item.assetId,target.workspaceKey),
+            imageUrl:() => media.url(target,item.imageId),signal:controller.signal,
+          });
+        }));
+        if (!normalizeRequestCurrent(request)) return;
+        if (sizes.some(size => !size || !(size.width > 0 && size.height > 0))) {
+          notify('暂时无法读取全部素材的原始尺寸。',true);
+          return;
+        }
+        for (const [position,item] of batch.entries()) dimensions.set(item.id,sizes[position]);
+      }
+      if (!normalizeRequestCurrent(request)) return;
+      normalizeRequest = undefined;
+      commit(...normalizeSelection(board,selection,action,source,dimensions));
+    } catch {
+      if (normalizeRequestCurrent(request)) notify('暂时无法读取全部素材的原始尺寸。',true);
+    } finally {
+      if (normalizeRequest === request) cancelNormalizeRequest();
+      if (visible && scope === target) updateNormalizeControls(items());
+    }
   }
 
   function presentedItem(item) {
@@ -759,16 +1241,118 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       top:Math.min(...boxes.map(box => box.top)),bottom:Math.max(...boxes.map(box => box.bottom))};
   }
 
+  function paintBounds(node, elements) {
+    const box = unionBounds(elements.map(presentedItem));
+    node.style.left = box.left + 'px';
+    node.style.top = box.top + 'px';
+    node.style.width = box.right - box.left + 'px';
+    node.style.height = box.bottom - box.top + 'px';
+    return box;
+  }
+
+  function positionSelectionTools() {
+    if (!selectionBox || !scope?.view || alignmentTools.hidden) return;
+    const viewport = chromeSizes.get(stage);
+    const toolbar = chromeSizes.get(alignmentTools);
+    if (!viewport?.width || !toolbar?.width) return;
+    const {x,y,zoom} = scope.view;
+    const left = selectionBox.left * zoom + x;
+    const right = selectionBox.right * zoom + x;
+    const top = selectionBox.top * zoom + y;
+    const bottom = selectionBox.bottom * zoom + y;
+    const visible = left < viewport.width && right > 0 && top < viewport.height && bottom > 0;
+    alignmentTools.toggleAttribute('data-positioned',visible);
+    if (!visible) return;
+
+    const gap = 12;
+    const maxLeft = Math.max(gap,viewport.width - toolbar.width - gap);
+    const leftLimit = Math.min(maxLeft,gap * 2 + (chromeSizes.get(selectionChrome.sidebar)?.width || 0));
+    const center = (clamp(left,0,viewport.width) + clamp(right,0,viewport.width)) / 2;
+    const toolbarX = clamp(center - toolbar.width / 2,leftLimit,maxLeft);
+    const topLimit = gap * 2 + (chromeSizes.get(selectionChrome.history)?.height || 0);
+    const foot = Math.max(chromeSizes.get(alignmentDock)?.height || 0,chromeSizes.get(selectionChrome.zoom)?.height || 0);
+    const maxTop = Math.max(topLimit,viewport.height - toolbar.height - foot - gap * 2);
+    const above = top - toolbar.height - gap;
+    const below = bottom + gap;
+    const spaceAbove = top - topLimit;
+    const spaceBelow = maxTop + toolbar.height - bottom;
+    const topAt = below <= maxTop || (above < topLimit && spaceBelow > spaceAbove) ? below : above;
+    const toolbarY = clamp(topAt,topLimit,maxTop);
+    alignmentTools.style.transform = `translate3d(${Math.round(toolbarX)}px, ${Math.round(toolbarY)}px, 0)`;
+  }
+
+  function followSelectionTools(box) {
+    selectionBox = box;
+    const follow = Boolean(box);
+    if (alignmentTools.hasAttribute('data-floating') !== follow) {
+      const focus = alignmentTools.contains(document.activeElement) ? document.activeElement : null;
+      alignmentTools.toggleAttribute('data-floating',follow);
+      alignmentTools.toggleAttribute('data-pane-transient',follow);
+      if (follow) shell.append(alignmentTools);
+      else {
+        alignmentTools.removeAttribute('data-positioned');
+        alignmentTools.style.removeProperty('transform');
+        alignmentDock.insertBefore(alignmentTools,normalizeTools);
+      }
+      focus?.focus({preventScroll:true});
+    }
+    positionSelectionTools();
+  }
+
+  const chromeObserver = new ResizeObserver(entries => {
+    for (const entry of entries) {
+      const sizes = entry.borderBoxSize?.[0];
+      chromeSizes.set(entry.target,sizes ? {width:sizes.inlineSize,height:sizes.blockSize} : entry.contentRect);
+    }
+    positionSelectionTools();
+  });
+  for (const element of Object.values(selectionChrome)) chromeObserver.observe(element);
+
+  function renderGroupFrames(board) {
+    const groups = new Map();
+    for (const item of board.values()) {
+      if (!item.groupId || item.connection) continue;
+      if (!groups.has(item.groupId)) groups.set(item.groupId, []);
+      groups.get(item.groupId).push(item);
+    }
+    for (const [id,frame] of groupFrames) {
+      if (groups.get(id)?.length >= 2) continue;
+      frame.node.remove();
+      groupFrames.delete(id);
+    }
+    for (const [id,members] of groups) {
+      if (members.length < 2) continue;
+      let frame = groupFrames.get(id);
+      if (!frame) {
+        const node = document.createElement('div');
+        node.className = 'whiteboard-group-frame';
+        node.hidden = id === outlinedGroup;
+        frame = {node,members};
+        groupFrames.set(id,frame);
+        groupFrameLayer.append(node);
+      } else frame.members = members;
+      paintBounds(frame.node,members);
+    }
+  }
+
   function updateGroupOutline(board) {
-    const entries = [...selected].map(id => board.get(id)).filter(Boolean);
-    const group = entries[0]?.groupId;
-    groupOutline.hidden = !group || entries.length < 2 || !entries.every(item => item.groupId === group);
-    if (groupOutline.hidden) return;
-    const box = unionBounds(entries.map(presentedItem));
-    groupOutline.style.left = box.left + 'px';
-    groupOutline.style.top = box.top + 'px';
-    groupOutline.style.width = box.right - box.left + 'px';
-    groupOutline.style.height = box.bottom - box.top + 'px';
+    const entries = [...selected].map(id => board.get(id)).filter(item => item && !item.connection);
+    const group = entries.length > 1 && entries[0].groupId;
+    const matchingGroup = group && entries.every(item => item.groupId === group) ? group : undefined;
+    if (outlinedGroup !== matchingGroup) {
+      const before = groupFrames.get(outlinedGroup);
+      if (before) {
+        before.node.hidden = false;
+        paintBounds(before.node,before.members);
+      }
+      outlinedGroup = matchingGroup;
+      const now = groupFrames.get(outlinedGroup)?.node;
+      if (now) now.hidden = true;
+    }
+    groupOutline.hidden = entries.length < 2;
+    if (groupOutline.hidden) { followSelectionTools(null); return; }
+    groupOutline.toggleAttribute('data-grouped', Boolean(matchingGroup));
+    followSelectionTools(paintBounds(groupOutline,entries));
   }
 
   function visibleConnector(item, board) {
@@ -776,24 +1360,84 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const to = item.connection?.to;
     const source = board.get(from?.id);
     const target = board.get(to?.id);
-    const start = source && boardPortPoint(presentedItem(source),from.side);
-    const end = target && boardPortPoint(presentedItem(target),to.side);
-    return start && end ? {...item,...arrowGeometry(start,end)} : item;
+    if (!source || !target) return item;
+    const origin = presentedItem(source);
+    const destination = presentedItem(target);
+    const offsets = readBoardConnectionOffsets(item.text);
+    const preview = gesture?.mode === 'endpoint' && gesture.id === item.id && gesture.edge ? gesture : null;
+    if (preview) offsets[preview.endpoint] = preview.edge.offset;
+    const fromSide = preview?.endpoint === 'from' ? preview.edge.side : from.side;
+    const toSide = preview?.endpoint === 'to' ? preview.edge.side : to.side;
+    const start = boardPortPoint(origin,fromSide,offsets.from);
+    const end = boardPortPoint(destination,toSide,offsets.to);
+    return start && end ? {...item,...connectedGeometry(start,end,origin,fromSide,destination,toSide)} : item;
   }
 
-  function renderConnections(board) {
-    for (const [id,item] of board) {
-      if (!item.connection) continue;
-      const node = nodes.get(id);
-      if (!node) continue;
-      const arrow = visibleConnector(item,board);
-      place(node,arrow);
-      const signature = JSON.stringify([arrow.width,arrow.height,arrow.points]);
-      if (signature !== node.whiteboardContent) {
-        node.whiteboardContent = signature;
-        itemContent(node,arrow);
-      }
+  function showConnectorEndpoints(arrow) {
+    connectorEndpoints.hidden = !arrow?.[connectorCurve];
+    if (connectorEndpoints.hidden) return;
+    for (const [index,handle] of endpointHandles.entries()) {
+      handle.style.left = arrow.x + arrow.points[index][0] + 'px';
+      handle.style.top = arrow.y + arrow.points[index][1] + 'px';
     }
+    connectorMeasure.setAttribute('d',connectionShaft(arrow));
+    const middle = connectorMeasure.getPointAtLength(connectorMeasure.getTotalLength() / 2);
+    connectorCut.style.left = arrow.x + middle.x + 'px';
+    connectorCut.style.top = arrow.y + middle.y + 'px';
+  }
+
+  function updateConnectorEndpoints(board) {
+    const id = selected.size === 1 ? selected.values().next().value : null;
+    const item = board.get(id);
+    const show = item?.connection && tool === 'select' && !linkStart && !cropMode && !cropKey && canUseConnections();
+    connectorEndpoints.dataset.connectorId = show ? id : '';
+    showConnectorEndpoints(show ? visibleConnector(item,board) : null);
+  }
+
+  function renderConnector(item,board) {
+    const node = nodes.get(item.id);
+    if (!node) return;
+    const arrow = visibleConnector(item,board);
+    place(node,arrow);
+    const signature = JSON.stringify([arrow.width,arrow.height,arrow.points,arrow[connectorCurve]]);
+    if (signature !== node.whiteboardContent) {
+      node.whiteboardContent = signature;
+      itemContent(node,arrow);
+    }
+    if (connectorEndpoints.dataset.connectorId === item.id) showConnectorEndpoints(arrow);
+  }
+
+  function renderConnections(board, moved) {
+    for (const item of board.values()) {
+      if (!item.connection) continue;
+      if (moved && !moved.has(item.connection.from?.id) && !moved.has(item.connection.to?.id)) continue;
+      renderConnector(item,board);
+    }
+  }
+
+  function previewConnectorEndpoint(drag, point) {
+    if (!drag.edge && Math.hypot(point.x - drag.start.x,point.y - drag.start.y) * scope.view.zoom < 2) return;
+    const board = items();
+    const item = board.get(drag.id);
+    const binding = item?.connection?.[drag.endpoint];
+    const card = board.get(binding?.id);
+    if (binding?.id !== drag.cardId || !isBoardConnectable(card)) return;
+    const location = {x:point.x + drag.grab.x,y:point.y + drag.grab.y};
+    drag.edge = nearestBoardEdge(card,location,drag.edge?.side ?? binding.side);
+    renderConnector(item,board);
+  }
+
+  function moveConnectorEndpoint(item,endpoint,position) {
+    const binding = item?.connection?.[endpoint];
+    if (!binding || !position || !canUseConnections()) return false;
+    const offsets = readBoardConnectionOffsets(item.text);
+    const offset = Math.round(clamp(position.offset,0,1) * 1_000_000) / 1_000_000;
+    if (binding.side === position.side && offsets[endpoint] === offset) return false;
+    offsets[endpoint] = offset;
+    const patch = {text:writeBoardConnectionOffsets(offsets)};
+    if (position.side !== binding.side) patch.connection = {...item.connection,[endpoint]:{...binding,side:position.side}};
+    commit({id:item.id,patch});
+    return true;
   }
 
   function setLinkStart(value) {
@@ -803,6 +1447,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     for (const [id,node] of nodes) {
       for (const port of node.querySelectorAll('[data-board-port]')) port.tabIndex = value || selected.has(id) ? 0 : -1;
     }
+    updateConnectorEndpoints(items());
   }
 
   function updateConnectionPorts(node, item) {
@@ -837,44 +1482,186 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const id = node?.closest('[data-board-id]')?.dataset.boardId;
     const item = id && current(id);
     if (id === from.id || !isBoardConnectable(item)) return null;
-    const side = node.closest('[data-board-port]')?.dataset.boardPort || nearestBoardPort(item,point);
-    return {id,side};
+    const port = node.closest('[data-board-port]')?.dataset.boardPort;
+    return {id,...(port ? {side:port,offset:.5} : nearestBoardEdge(item,point))};
   }
 
   function connectItems(from,to) {
     if (!canUseConnections() || !to || from.id === to.id) return;
     const board = items();
-    const start = boardPortPoint(board.get(from.id),from.side);
-    const end = boardPortPoint(board.get(to.id),to.side);
+    const start = boardPortPoint(board.get(from.id),from.side,from.offset);
+    const end = boardPortPoint(board.get(to.id),to.side,to.offset);
     if (!start || !end) return;
-    // Clicking an edge is also supported so keyboard users can choose both endpoints.
-    add({kind:'arrow',...arrowGeometry(start,end),color:activeColor,connection:{from,to}});
+    const connection = {from:{id:from.id,side:from.side},to:{id:to.id,side:to.side}};
+    const text = writeBoardConnectionOffsets({from:from.offset,to:to.offset});
+    add({kind:'arrow',...arrowGeometry(start,end),color:activeColor,connection,...(text && {text})});
   }
 
   function previewConnection(drag, event, point) {
     if (!drag.active && Math.hypot(point.x - drag.start.x,point.y - drag.start.y) * scope.view.zoom < 4) return;
     drag.active = true;
     const target = connectionTarget(event,drag.from,point);
-    const end = target ? boardPortPoint(current(target.id),target.side) || point : point;
-    const arrow = {kind:'arrow',...arrowGeometry(drag.start,end),color:activeColor};
+    const destination = target && current(target.id);
+    const end = destination && boardPortPoint(destination,target.side,target.offset) || point;
+    const arrow = {kind:'arrow',...connectedGeometry(drag.start,end,current(drag.from.id),drag.from.side,destination,target?.side),color:activeColor};
     place(drag.preview,arrow);
-    itemContent(drag.preview,arrow);
+    paintStroke(drag.preview,arrow);
     drag.preview.hidden = false;
     drag.to = target;
   }
 
-  function paintView() {
-    if (!scope) return;
-    const {x,y,zoom} = scope.view;
-    plane.style.transform = `translate(${x}px, ${y}px) scale(${zoom})`;
-    plane.style.setProperty('--board-control-scale', Math.min(1, 1 / zoom));
-    stage.style.backgroundSize = `${24 * zoom}px ${24 * zoom}px`;
-    stage.style.backgroundPosition = `${x}px ${y}px`;
-    get('[data-board-view="reset"]').textContent = Math.round(zoom * 100) + '%';
+  function dismissNodePicker(restoreFocus = false) {
+    if (!pendingNode) return;
+    pendingNode.preview.remove();
+    pendingNode = null;
+    nodePicker.hidden = true;
+    if (restoreFocus) stage.focus({preventScroll:true});
   }
 
-  function world(clientX, clientY) {
+  function openNodePicker(drag, event) {
+    const hit = document.elementFromPoint(event.clientX,event.clientY);
+    if (!stage.contains(hit) || hit.closest('[data-board-id]')) return false;
+    if (items().size + 2 > limits.items) {
+      notify('白板空间不足，添加连接节点需要两个空位。', true);
+      return false;
+    }
+    dismissNodePicker();
+    pendingNode = {scope,revision:visibilityRevision,from:drag.from,
+      point:world(event.clientX,event.clientY),preview:drag.preview};
+    nodePicker.hidden = false;
     const bounds = stage.getBoundingClientRect();
+    nodePicker.style.left = clamp(event.clientX - bounds.left + 9,4,Math.max(4,bounds.width - nodePicker.offsetWidth - 4)) + 'px';
+    nodePicker.style.top = clamp(event.clientY - bounds.top + 7,4,Math.max(4,bounds.height - nodePicker.offsetHeight - 4)) + 'px';
+    nodePicker.querySelector('button').focus({preventScroll:true});
+    return true;
+  }
+
+  function insertConnectedNode(request, patch, asset) {
+    if (!visible || request.scope !== scope || request.revision !== visibilityRevision || !canUseConnections()) return;
+    const {from,point} = request;
+    const board = items();
+    const start = boardPortPoint(board.get(from.id),from.side);
+    if (!start) return;
+    if (board.size + 2 > limits.items) {
+      notify('白板空间不足，添加连接节点需要两个空位。', true);
+      return;
+    }
+    const side = facingBoardPort(start,point);
+    const [portX,portY] = boardPorts[side];
+    const id = crypto.randomUUID();
+    const node = {...patch,x:coordinate(point.x - patch.width * (1 + portX) / 2),
+      y:coordinate(point.y - patch.height * (1 + portY) / 2),color:activeColor};
+    const to = {id,side};
+    const arrow = {kind:'arrow',...arrowGeometry(start,boardPortPoint(node,side)),color:activeColor,connection:{from,to}};
+    if (asset) preparedAssets.set(id,asset);
+    selected = new Set([id]);
+    commit({id,patch:node},{id:crypto.randomUUID(),patch:arrow});
+    if (patch.kind === 'image' || readWhiteboardFile(patch.text)) stage.focus({preventScroll:true});
+    else edit(id);
+  }
+
+  nodePicker.addEventListener('click', event => {
+    const kind = event.target.closest('[data-board-node-kind]')?.dataset.boardNodeKind;
+    if (!pendingNode || !kind) return;
+    const request = pendingNode;
+    dismissNodePicker(true);
+    if (kind === 'image') {
+      pendingNodeImage = request;
+      nodeImage.click();
+    } else {
+      insertConnectedNode(request,{kind,width:kind === 'note' ? 195 : 255,height:kind === 'note' ? 145 : 80,text:''});
+    }
+  });
+  nodePicker.addEventListener('keydown', event => {
+    if (!['Escape','ArrowUp','ArrowDown','Home','End','Enter',' '].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Escape') return dismissNodePicker(true);
+    if (event.key === 'Enter' || event.key === ' ') {
+      if (!event.repeat) event.target.closest('button')?.click();
+      return;
+    }
+    const buttons = [...nodePicker.querySelectorAll('button')];
+    const index = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : (index + buttons.length + (event.key === 'ArrowUp' ? -1 : 1)) % buttons.length;
+    buttons[next].focus({preventScroll:true});
+  });
+  nodePicker.addEventListener('focusout', event => {
+    if (!nodePicker.contains(event.relatedTarget)) dismissNodePicker();
+  });
+  document.addEventListener('pointerdown', event => {
+    if (!nodePicker.contains(event.target)) dismissNodePicker();
+    if (!normalizePanel.hidden && !normalizeTools.contains(event.target)) setNormalizeOpen(false);
+  }, {capture:true});
+  normalizeTools.addEventListener('focusout', event => {
+    if (!normalizePanel.hidden && !normalizeTools.contains(event.relatedTarget)) setNormalizeOpen(false);
+  });
+  normalizeTools.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || (normalizePanel.hidden && !normalizeRequest)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelNormalizeRequest();
+    updateNormalizeControls(items());
+    setNormalizeOpen(false,true);
+  });
+  nodeImage.addEventListener('cancel', () => { pendingNodeImage = null; });
+  nodeImage.addEventListener('change', () => {
+    const request = pendingNodeImage;
+    const file = nodeImage.files[0];
+    pendingNodeImage = null;
+    nodeImage.value = '';
+    if (!request || !file || scope !== request.scope || visibilityRevision !== request.revision) return;
+    insertMedia(async () => {
+      try {
+        if (request.scope.teamId) {
+          const {teamId,workspaceKey} = request.scope;
+          const available = () => visible && scope === request.scope && visibilityRevision === request.revision &&
+            items().has(request.from.id) && items().size + 2 <= limits.items;
+          if (!available() || !importPastedFiles) return;
+          const result = await importPastedFiles({teamId,workspaceKey,files:[file],paths:[],available,limit:1});
+          const reference = result?.files?.[0];
+          if (!available() || !reference) return;
+          const asset = await prepareReferenceMedia(reference.assetId,request.scope);
+          if (!available()) return;
+          if (asset) {
+            const scale = Math.min(1,680 / asset.width,480 / asset.height);
+            insertConnectedNode(request,{kind:'image',assetId:reference.assetId,text:(asset.name || '').slice(0,limits.text),
+              width:length(asset.width * scale),height:length(asset.height * scale)},asset);
+          } else {
+            const text = reference.file?.teamId === teamId && writeWhiteboardFile(reference.file);
+            if (text) insertConnectedNode(request,{kind:'text',text,width:272,height:64});
+          }
+          return;
+        }
+        const {id,width,height} = await media.prepare(request.scope,file);
+        const scale = Math.min(1,680 / width,480 / height);
+        insertConnectedNode(request,{kind:'image',imageId:id,text:file.name.slice(0,limits.text),
+          width:length(width * scale),height:length(height * scale)});
+      } catch (failure) { notify(String(failure?.message || '无法读取这张图片。'),true); }
+    });
+  });
+
+  function paintView() {
+    cancelAnimationFrame(viewFrame);
+    viewFrame = 0;
+    if (!scope) return;
+    const {x,y,zoom} = scope.view;
+    const pitch = 24 * zoom;
+    const offset = value => ((value + 72) % pitch + pitch) % pitch;
+    plane.style.transform = `translate3d(${x}px, ${y}px, 0) scale(${zoom})`;
+    presence.paint(scope.view);
+    grid.style.transform = `translate3d(${offset(x)}px, ${offset(y)}px, 0)`;
+    if (paintedZoom !== zoom) {
+      paintedZoom = zoom;
+      plane.style.setProperty('--board-control-scale', Math.min(1, 1 / zoom));
+      grid.style.backgroundSize = `${pitch}px ${pitch}px`;
+      zoomLabel.textContent = Math.round(zoom * 100) + '%';
+    }
+    positionSelectionTools();
+  }
+
+  function world(clientX, clientY, bounds = stage.getBoundingClientRect()) {
     const {x,y,zoom} = scope.view;
     return {x:(clientX - bounds.left - x) / zoom,y:(clientY - bounds.top - y) / zoom};
   }
@@ -953,46 +1740,104 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     }
   }
 
-  async function insertAssetReferences(references, point) {
+  async function insertExternalFiles({files = [], paths = [], drop = false, readClipboard = false}, point) {
     const target = scope;
+    const revision = visibilityRevision;
+    const available = () => visible && target === scope && revision === visibilityRevision;
+    const handler = drop ? handleDroppedFiles : importPastedFiles;
+    if (!available() || !target) return true;
+    if (target.teamId) {
+      if (handler) {
+        const limit = limits.items - items().size;
+        if (!limit) { notify('白板最多可添加 500 个项目。', true); return true; }
+        try {
+          const result = await handler({teamId:target.teamId, workspaceKey:target.workspaceKey,
+            files,paths,readClipboard,available,limit});
+          if (!available()) return true;
+          if (result != null) {
+            if (result.files?.length) await insertAssetReferences(result,point);
+            return true;
+          }
+        } catch (failure) {
+          if (available()) notify(String(failure?.message || failure || '暂时无法添加这批白板文件。'), true);
+          return true;
+        }
+      }
+      return Boolean(paths.length || files.length);
+    }
+    if (paths.length) await insertImages(nativeImages(paths),point);
+    else if (files.length) await insertImages(files,point);
+    else return false;
+    return true;
+  }
+
+  async function prepareReferenceMedia(assetId, target) {
+    if (!assetId || !canUseAssetReferences()) return null;
+    const asset = await resolveAssetImage(assetId,target.workspaceKey).catch(() => null);
+    if (!asset) return null;
+    const previewImage = new Image();
+    const video = asset.kind === 'video';
+    const source = video ? asset.poster : asset.url;
+    if (source) {
+      previewImage.src = source;
+      try { await previewImage.decode(); } catch {}
+    }
+    return {...asset,previewImage,width:previewImage.naturalWidth || (video ? 480 : 320),
+      height:previewImage.naturalHeight || (video ? 270 : 240)};
+  }
+
+  async function insertAssetReferences(references, point, placement) {
+    const target = scope;
+    const revision = visibilityRevision;
+    const current = () => visible && target === scope && revision === visibilityRevision;
     if (!target || references.workspaceKey !== target.workspaceKey) {
-      notify('请在这组资产所在的库里打开白板后粘贴。', true);
+      notify('请在这组资产所在的库里打开白板后添加引用。', true);
       return;
     }
-    if (!canUseAssetReferences()) {
-      notify('请确认团队白板已联网，并更新团队服务以粘贴资产引用。', true);
+    const sources = [...(references.assetIds || []).map(assetId => ({assetId})), ...(references.files || [])];
+    const canUseAssets = canUseAssetReferences();
+    if (!canUseAssets && sources.every(source => !source.file)) {
+      notify('请确认团队白板已联网，并更新团队服务以添加资产引用。', true);
       return;
     }
     const available = limits.items - items().size;
-    if (references.assetIds.length > available) notify('白板最多可添加 500 个项目。', true);
+    if (sources.length > available) notify('白板最多可添加 500 个项目。', true);
     const entries = [];
     const assets = new Map();
-    for (const assetId of references.assetIds.slice(0, available)) {
-      if (!visible || target !== scope) return;
-      const asset = await resolveAssetImage(assetId,target.workspaceKey).catch(() => null);
-      if (!asset) continue;
-      const image = new Image();
-      const source = asset.kind === 'video' ? asset.poster : asset.url;
-      if (source) {
-        image.src = source;
-        try { await image.decode(); } catch {}
+    let offset = placement ? 32 : 0;
+    for (const {assetId,file} of sources.slice(0, available)) {
+      if (!current()) return;
+      const asset = await prepareReferenceMedia(assetId,target);
+      if (!asset) {
+        const text = file?.teamId === target.teamId && writeWhiteboardFile(file);
+        if (text) {
+          entries.push({kind:'text',text,x:coordinate(point.x + offset),y:coordinate(point.y + offset),
+            width:272,height:64,color:activeColor});
+          offset += 32;
+        }
+        continue;
       }
-      const width = image.naturalWidth || (asset.kind === 'video' ? 480 : 320);
-      const height = image.naturalHeight || (asset.kind === 'video' ? 270 : 240);
-      const scale = Math.min(1,680 / width,480 / height);
-      const offset = entries.length * 32;
+      const {width,height} = asset;
+      const lead = placement?.assetId === assetId;
+      const scale = lead ? Math.min(placement.width / width, placement.height / height) : Math.min(1,680 / width,480 / height);
+      const itemWidth = length(width * scale);
+      const itemHeight = length(height * scale);
+      const x = point.x + (lead ? -itemWidth * placement.gripX : offset);
+      const y = point.y + (lead ? -itemHeight * placement.gripY : offset);
       entries.push({kind:'image',assetId,text:(asset.name || '').slice(0,limits.text),
-        x:coordinate(point.x + offset),y:coordinate(point.y + offset),
-        width:length(width * scale),height:length(height * scale)});
+        x:coordinate(x),y:coordinate(y),width:itemWidth,height:itemHeight});
       assets.set(assetId,asset);
+      if (!lead) offset += 32;
     }
-    if (!visible || target !== scope) return;
-    if (entries.length) insertItems(entries,assets);
-    if (entries.length < Math.min(available,references.assetIds.length)) notify('有些资产引用暂时无法读取。', true);
+    if (!current()) return;
+    if (entries.length < Math.min(available,sources.length)) notify('有些文件引用暂时无法读取。', true);
+    return insertItems(entries,assets);
   }
 
   function duplicateEntries(source, point, sharedImages) {
     let entries = [...fromItems(source).values()].filter(item => {
+      const file = item.kind === 'text' && readWhiteboardFile(item.text);
+      if (file) return sharedImages && file.teamId === scope?.teamId;
       if (item.kind === 'image') return sharedImages &&
         (item.assetId ? canUseAssetReferences() && /^(?:team:)?[a-z0-9_-]{1,128}$/i.test(item.assetId)
           : /^[0-9a-f]{64}$/.test(item.imageId));
@@ -1061,7 +1906,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   function copySelected(data) {
     const entries = selectedItems();
     if (!entries.length) return false;
-    const text = entries.every(item => ['note','text'].includes(item.kind))
+    const text = entries.every(item => ['note','text'].includes(item.kind) && !readWhiteboardFile(item.text))
       ? entries.map(item => item.text).join('\n') : 'Nexus 白板 · ' + entries.length + ' 个元素';
     const content = {workspaceKey:scope.workspaceKey,items:entries};
     localClipboard = {content,text};
@@ -1099,8 +1944,8 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (Array.isArray(content?.items)) {
       const sameWorkspace = target.workspaceKey === content.workspaceKey;
       const copied = [...fromItems(content.items).values()];
-      if (!sameWorkspace && content.items.some(item => item?.kind === 'image')) {
-        notify('图片可在同一个库的项目之间复制。', true);
+      if (!sameWorkspace && content.items.some(item => item?.kind === 'image' || readWhiteboardFile(item?.text))) {
+        notify('文件引用可在同一个库的项目之间复制。', true);
       }
       const references = new Set(Array.from(items().values(), item => item.imageId));
       if (sameWorkspace) {
@@ -1127,6 +1972,15 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       text:value,color:activeColor}]);
   }
 
+  async function pasteClipboardPayload({files,json,text}, point) {
+    const target = scope;
+    const revision = visibilityRevision;
+    if (!json && !parseWhiteboardAssetClipboard(text) && (!text || localClipboard?.text !== text)) {
+      if (await insertMedia(insertExternalFiles,{files,readClipboard:true},point)) return;
+    }
+    if (target === scope && revision === visibilityRevision && visible) await pasteContents(json,text,point);
+  }
+
   async function pasteFromClipboard(point) {
     const target = scope;
     try {
@@ -1142,12 +1996,11 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         if (!text && item.types.includes('text/plain')) text = await (await item.getType('text/plain')).text();
       }
       if (!visible || scope !== target) return;
-      if (files.length) await insertMedia(insertImages, files, point);
-      else await pasteContents(json, text, point);
+      await pasteClipboardPayload({files,json,text},point);
     } catch {
       if (!visible || scope !== target) return;
       if (localClipboard) await pasteContents('', localClipboard.text, point);
-      else notify('请在画布按 Ctrl+V 粘贴。', true);
+      else if (!await insertMedia(insertExternalFiles,{readClipboard:true},point)) notify('请在画布按 Ctrl+V 粘贴。', true);
     }
   }
 
@@ -1159,16 +2012,18 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   document.addEventListener('paste', event => {
     if (!boardClipboardEvent(event) || !event.clipboardData) return;
-    const files = [...event.clipboardData.files].filter(isWhiteboardImage);
+    const files = [...event.clipboardData.files];
     if (!files.length) {
-      const image = [...event.clipboardData.items].find(item => item.kind === 'file' && item.type.startsWith('image/'));
-      const file = image?.getAsFile();
-      if (isWhiteboardImage(file)) files.push(file);
+      for (const item of event.clipboardData.items) {
+        if (item.kind !== 'file') continue;
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
     }
     event.preventDefault();
     const point = insertionPoint();
-    if (files.length) insertMedia(insertImages, files, point);
-    else pasteContents(event.clipboardData.getData(clipboardType), event.clipboardData.getData('text/plain'), point);
+    pasteClipboardPayload({files,json:event.clipboardData.getData(clipboardType),
+      text:event.clipboardData.getData('text/plain')},point);
   });
   for (const action of ['copy','cut']) {
     document.addEventListener(action, event => {
@@ -1189,22 +2044,29 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (!event.dataTransfer?.files.length) return;
     event.preventDefault();
     event.stopPropagation();
-    insertMedia(insertImages, [...event.dataTransfer.files], insertionPoint({x:event.clientX,y:event.clientY}));
+    insertMedia(insertExternalFiles,{files:[...event.dataTransfer.files],drop:true},insertionPoint({x:event.clientX,y:event.clientY}));
   });
+  imagePicker.addEventListener('cancel', () => { pendingContextImage = undefined; });
   imagePicker.addEventListener('change', () => {
-    if (imagePicker.files.length) insertMedia(insertImages, [...imagePicker.files]);
+    const request = pendingContextImage;
+    pendingContextImage = undefined;
+    if (imagePicker.files.length && (!request || request.scope === scope && request.revision === visibilityRevision)) {
+      insertMedia(insertExternalFiles,{files:[...imagePicker.files]},request?.point || insertionPoint());
+    }
     imagePicker.value = '';
   });
 
-  function zoomAt(x, y, value) {
+  function zoomAt(x, y, value, deferPaint = false) {
     if (!scope) return;
     const view = scope.view;
     const zoom = clamp(value, .2, 3);
+    if (zoom === view.zoom) return;
     const scale = zoom / view.zoom;
     view.x = x - (x - view.x) * scale;
     view.y = y - (y - view.y) * scale;
     view.zoom = zoom;
-    paintView();
+    if (!deferPaint) paintView();
+    else if (!viewFrame) viewFrame = requestAnimationFrame(paintView);
   }
 
   function fitView(board = [...items().values()], maxZoom = 1) {
@@ -1222,6 +2084,22 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       scope.view = {x:(w - zoom * (left + right)) / 2,y:(h - zoom * (top + bottom)) / 2,zoom};
     }
     paintView();
+  }
+
+  function optimizeCanvas() {
+    if (!visible || !scope || gesture) return;
+    beforeFocus = focusedImage = undefined;
+    fitView([...items().values()].filter(item => !item.connection));
+    stage.focus({preventScroll:true});
+  }
+
+  function runOptimalArrangement(all = false) {
+    if (!visible || !scope || gesture) return;
+    const ratio = Math.max(1,stage.clientWidth - 160) / Math.max(1,stage.clientHeight - 110);
+    const operations = optimizeArrangement(items(),all ? new Set() : selected,ratio,canTransformImages());
+    commit(...operations);
+    if (all) optimizeCanvas();
+    else stage.focus({preventScroll:true});
   }
 
   function focusImages(entries) {
@@ -1287,6 +2165,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }
 
   function setTool(next) {
+    if (next !== 'select') whiteboardHover.stop();
     if (['stroke','eraser'].includes(next) && next !== tool) {
       if (gesture?.mode === 'marquee') endGesture();
       selected.clear();
@@ -1316,7 +2195,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   function edit(id) {
     const node = nodes.get(id);
     const item = current(id);
-    if (!node || !item || !['note','text','frame'].includes(item.kind)) return;
+    if (!node || !item || node.hasAttribute('data-board-file-card') || !['note','text','frame'].includes(item.kind)) return;
     stopEditing(true);
     selected = new Set([id]);
     renderSelection();
@@ -1332,6 +2211,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     else node.replaceChildren(input);
     input.addEventListener('blur', () => { if (editing?.input === input) stopEditing(true); });
     input.addEventListener('keydown', event => {
+      if (event.isComposing) return;
       if (event.key !== 'Escape' && !(event.key === 'Enter' && (inFrame || event.ctrlKey || event.metaKey))) return;
       event.preventDefault();
       event.stopPropagation();
@@ -1384,6 +2264,11 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     }
   }
 
+  function addTextAt(kind, point) {
+    add({kind,x:coordinate(point.x),y:coordinate(point.y),width:kind === 'note' ? 195 : 255,
+      height:kind === 'note' ? 145 : 80,text:'',color:activeColor});
+  }
+
   function moveOrigins(board) {
     const origins = new Map([...selected].filter(id => !board.get(id)?.connection).map(id => [id, board.get(id)]));
     for (const frame of [...origins.values()]) {
@@ -1399,6 +2284,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       if (!board.get(id).connection) origins.set(id,board.get(id));
     }
     return origins;
+  }
+
+  function translateMove(node,item,position) {
+    node.style.translate = `${position.x - item.x}px ${position.y - item.y}px`;
   }
 
   function previewMove(drag, point, shift) {
@@ -1418,18 +2307,22 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
       else dx = 0;
     }
+    const board = items();
+    let movedGroups;
     for (const [id, origin] of drag.origins) {
       const position = {x:coordinate(origin.x + dx),y:coordinate(origin.y + dy)};
+      const previous = drag.positions.get(id);
+      if (previous?.x === position.x && previous.y === position.y) continue;
       drag.positions.set(id, position);
+      const item = board.get(id);
+      const frame = groupFrames.get(item?.groupId);
+      if (frame && !frame.node.hidden) (movedGroups ??= new Set()).add(frame);
       const node = nodes.get(id);
-      if (node) {
-        node.style.left = position.x + 'px';
-        node.style.top = position.y + 'px';
-      }
+      if (node) translateMove(node,item,position);
     }
-    const board = items();
+    if (movedGroups) for (const frame of movedGroups) paintBounds(frame.node,frame.members);
     if (!groupOutline.hidden) updateGroupOutline(board);
-    renderConnections(board);
+    renderConnections(board,drag.origins);
   }
 
   function eraseStrokes(drag, point) {
@@ -1540,15 +2433,35 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       drag.position = {imageTransform};
     }
     if (node) place(node, {...drag.item,...drag.position});
-    renderConnections(items());
+    const board = items();
+    const frame = groupFrames.get(board.get(drag.id)?.groupId);
+    if (frame && !frame.node.hidden) paintBounds(frame.node,frame.members);
+    if (!groupOutline.hidden) updateGroupOutline(board);
+    renderConnections(board,new Set([drag.id]));
   }
 
-  function endGesture(commitChange = false) {
+  function endGesture(commitChange = false, event) {
     const drag = gesture;
     if (!drag) return;
     gesture = undefined;
+    cancelAnimationFrame(gestureFrame);
+    gestureFrame = 0;
+    gestureEvent = undefined;
     stage.classList.remove('is-panning');
     if (stage.hasPointerCapture(drag.pointer)) stage.releasePointerCapture(drag.pointer);
+    if (drag.mode === 'pan' || drag.mode === 'zoom') return;
+    if (drag.mode === 'endpoint') {
+      delete connectorEndpoints.dataset.dragging;
+      const item = current(drag.id);
+      if (commitChange && item?.connection?.[drag.endpoint]?.id === drag.cardId &&
+          current(drag.cardId) && moveConnectorEndpoint(item,drag.endpoint,drag.edge)) return;
+      if (item?.connection) renderConnector(item,items());
+      return;
+    }
+    if (drag.mode === 'move') {
+      for (const id of drag.positions.keys()) nodes.get(id)?.style.removeProperty('translate');
+    }
+    if (drag.mode === 'link' && commitChange && drag.active && !drag.to && event && openNodePicker(drag,event)) return;
     drag.preview?.remove();
     if (drag.mode === 'link') {
       if (commitChange && drag.to) connectItems(drag.from,drag.to);
@@ -1565,12 +2478,17 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       marquee.hidden = true;
       if (!commitChange || (!drag.active && drag.additive)) selected = drag.before;
       else if (!drag.active) selected.clear();
+      renderSelection();
+      return;
     } else if (commitChange && drag.mode === 'move') {
       if (!drag.active) {
+        clickVideoPreview(drag,event);
         if (!drag.additive) selected = new Set([drag.clicked]);
         else if (drag.wasSelected) {
           for (const id of extendGroupSelection(items(),new Set([drag.clicked]))) selected.delete(id);
         }
+        renderSelection();
+        return;
       }
       const board = items();
       const operations = [];
@@ -1608,18 +2526,27 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     marquee.style.height = (bounds.bottom - bounds.top) * zoom + 'px';
     marquee.hidden = false;
     const board = items();
-    selected = new Set(drag.additive ? drag.before : []);
+    const selection = new Set(drag.additive ? drag.before : []);
     for (const [id, item] of board) {
-      if (intersectsMarquee(item.connection ? visibleConnector(item,board) : item, bounds)) selected.add(id);
+      if (intersectsMarquee(item.connection ? visibleConnector(item,board) : item, bounds)) selection.add(id);
     }
-    renderSelection(board);
+    const next = extendGroupSelection(board,selection);
+    if (next.size !== selected.size || [...next].some(id => !selected.has(id))) {
+      selected = next;
+      renderSelection(board);
+    }
   }
 
   stage.addEventListener('pointerdown', event => {
+    const videoPreview = whiteboardHover.stop();
+    if (normalizeRequest) {
+      cancelNormalizeRequest();
+      updateNormalizeControls(items());
+    }
     if (!scope || gesture || !event.isPrimary || ![0,1].includes(event.button) ||
-        event.target.closest('.whiteboard-editor,[data-board-play-video]')) return;
+        event.target.closest('.whiteboard-editor,.whiteboard-node-picker,[data-board-play-video],[data-board-open-link],[data-board-reveal-file],[data-board-cut-connector]')) return;
+    if (viewFrame) paintView();
     event.preventDefault();
-    alignMenu.open = false;
     stopEditing(true);
     stage.focus({preventScroll:true});
     const point = world(event.clientX, event.clientY);
@@ -1646,6 +2573,19 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       const rotate = event.target.closest('[data-board-rotate]');
       const board = items();
       const item = board.get(id);
+      const endpoint = event.target.closest('[data-board-endpoint]')?.dataset.boardEndpoint;
+      if (endpoint) {
+        const connector = board.get(connectorEndpoints.dataset.connectorId);
+        const binding = connector?.connection?.[endpoint];
+        const card = board.get(binding?.id);
+        const anchor = boardPortPoint(card,binding?.side,readBoardConnectionOffsets(connector?.text)[endpoint]);
+        if (!anchor || !canUseConnections()) return;
+        gesture = {mode:'endpoint',pointer,id:connector.id,endpoint,cardId:card.id,start:point,
+          grab:{x:anchor.x - point.x,y:anchor.y - point.y}};
+        connectorEndpoints.dataset.dragging = endpoint;
+        stage.setPointerCapture(pointer);
+        return;
+      }
       if (port && isBoardConnectable(item) && canUseConnections()) {
         const from = {id,side:port.dataset.boardPort};
         const preview = document.createElement('div');
@@ -1683,7 +2623,8 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         const wasSelected = selected.has(id);
         if (!wasSelected) selected = extendGroupSelection(board,new Set(event.shiftKey ? [...selected,id] : [id]));
         const origins = moveOrigins(board);
-        gesture = {mode:'move',pointer,clicked:id,start:point,origins,positions:new Map(),additive:event.shiftKey,wasSelected};
+        gesture = {mode:'move',pointer,clicked:id,start:point,origins,positions:new Map(),additive:event.shiftKey,wasSelected,
+          videoPreview:videoPreview?.thumb === nodes.get(id) ? videoPreview : null};
         if (focusedImage !== id) beforeFocus = focusedImage = undefined;
         renderSelection(board);
       }
@@ -1693,8 +2634,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       gesture = {mode:'erase',pointer,point,strokes,ids:new Set()};
       eraseStrokes(gesture, point);
     } else if (tool === 'note' || tool === 'text') {
-      add({kind:tool,x:coordinate(point.x),y:coordinate(point.y),width:tool === 'note' ? 195 : 255,
-        height:tool === 'note' ? 145 : 80,text:'',color:activeColor});
+      addTextAt(tool,point);
     } else {
       const preview = document.createElement('div');
       preview.className = 'whiteboard-item whiteboard-preview';
@@ -1708,9 +2648,13 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     }
     if (gesture) stage.setPointerCapture(pointer);
   });
-  stage.addEventListener('pointermove', event => {
+  function paintGesture() {
+    cancelAnimationFrame(gestureFrame);
+    gestureFrame = 0;
+    const event = gestureEvent;
+    gestureEvent = undefined;
     const drag = gesture;
-    if (event.pointerId !== drag?.pointer) return;
+    if (!event || !drag) return;
     if (drag.mode === 'pan') {
       scope.view.x = event.clientX - drag.x;
       scope.view.y = event.clientY - drag.y;
@@ -1721,36 +2665,55 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       zoomAt(drag.x, drag.y, drag.zoom * Math.exp((event.clientX - drag.clientX) / 180));
       return;
     }
-    const point = world(event.clientX, event.clientY);
+    const bounds = stage.getBoundingClientRect();
+    const point = world(event.clientX, event.clientY, bounds);
     if (drag.mode === 'move') {
       previewMove(drag, point, event.shiftKey);
     } else if (drag.mode === 'link') {
       previewConnection(drag,event,point);
+    } else if (drag.mode === 'endpoint') {
+      previewConnectorEndpoint(drag,point);
     } else if (drag.mode === 'marquee') {
       updateMarquee(drag, point);
     } else if (drag.mode === 'erase') {
-      eraseStrokes(drag, point);
+      for (const sample of drag.samples) eraseStrokes(drag, world(sample.clientX,sample.clientY,bounds));
+      drag.samples.length = 0;
     } else if (drag.id) {
       if (drag.position || drag.region || Math.hypot(point.x - drag.start.x, point.y - drag.start.y) * scope.view.zoom >= 2) {
         previewImageGesture(drag, point, event);
       }
     } else if (drag.mode === 'draw') {
       if (drag.kind === 'stroke') {
-        for (const sample of event.getCoalescedEvents?.() || []) sampleStroke(drag,world(sample.clientX,sample.clientY));
-        sampleStroke(drag,point);
+        for (const sample of drag.samples) sampleStroke(drag,world(sample.clientX,sample.clientY,bounds));
+        drag.samples.length = 0;
       }
       drag.item = drawItem(drag, point);
       place(drag.preview, drag.item);
-      if (drag.kind === 'stroke' || drag.kind === 'arrow') itemContent(drag.preview, drag.item);
+      if (drag.kind === 'stroke' || drag.kind === 'arrow') paintStroke(drag.preview, drag.item);
     }
+  }
+
+  stage.addEventListener('pointermove', event => {
+    const drag = gesture;
+    if (event.pointerId !== drag?.pointer) return;
+    if (drag.mode === 'erase' || drag.kind === 'stroke') {
+      drag.samples ??= [];
+      const samples = event.getCoalescedEvents?.();
+      if (samples?.length) drag.samples.push(...samples);
+      else drag.samples.push(event);
+    }
+    gestureEvent = event;
+    if (!gestureFrame) gestureFrame = requestAnimationFrame(paintGesture);
   });
   stage.addEventListener('pointerup', event => {
     if (gesture?.pointer !== event.pointerId) return;
+    if (gestureFrame) paintGesture();
     if (gesture.mode === 'move' && gesture.active) {
       previewMove(gesture, world(event.clientX,event.clientY),event.shiftKey);
     }
     if (gesture.mode === 'erase') eraseStrokes(gesture, world(event.clientX, event.clientY));
     if (gesture.mode === 'link') previewConnection(gesture,event,world(event.clientX,event.clientY));
+    if (gesture.mode === 'endpoint') previewConnectorEndpoint(gesture,world(event.clientX,event.clientY));
     if (gesture.mode === 'draw' && gesture.kind === 'stroke') {
       const point = world(event.clientX,event.clientY);
       sampleStroke(gesture,point,true);
@@ -1759,7 +2722,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (gesture.id && (gesture.position || gesture.region)) {
       previewImageGesture(gesture, world(event.clientX, event.clientY),event);
     }
-    endGesture(true);
+    endGesture(true,event);
   });
   stage.addEventListener('pointercancel', event => { if (gesture?.pointer === event.pointerId) endGesture(); });
   stage.addEventListener('lostpointercapture', event => { if (gesture?.pointer === event.pointerId) endGesture(); });
@@ -1775,25 +2738,36 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     } else setLinkStart(endpoint);
   });
   stage.addEventListener('dblclick', event => {
-    if (tool === 'select' && !event.shiftKey && !event.target.closest('.whiteboard-editor,[data-board-port],[data-board-play-video]')) {
-      const item = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-board-id]');
+    const item = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-board-id]');
+    if (pendingCoverPin?.id === item?.dataset.boardId) finishVideoCoverPin(false);
+    if (tool === 'select' && !event.shiftKey && !event.target.closest('.whiteboard-editor,[data-board-port],[data-board-endpoint],[data-board-play-video],[data-board-open-link],[data-board-reveal-file],[data-board-cut-connector]')) {
       if (!plane.contains(item)) return;
+      whiteboardHover.stop();
       const entry = current(item.dataset.boardId);
       if (entry?.kind === 'image') toggleImageFocus([entry]);
+      else if (item.hasAttribute('data-board-file-card')) item.querySelector('[data-board-reveal-file]')?.click();
       else edit(item.dataset.boardId);
     }
   });
   stage.addEventListener('wheel', event => {
     if (!scope || gesture || event.target.closest('.whiteboard-editor')) return;
     event.preventDefault();
+    whiteboardHover.stop();
+    dismissNodePicker(true);
     const bounds = stage.getBoundingClientRect();
     const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 130 : 1);
-    zoomAt(event.clientX - bounds.left,event.clientY - bounds.top,scope.view.zoom * Math.exp(-clamp(delta,-250,250) * .002));
+    zoomAt(event.clientX - bounds.left,event.clientY - bounds.top,scope.view.zoom * Math.exp(-clamp(delta,-250,250) * .002),true);
   }, {passive:false});
   stage.addEventListener('keydown', event => {
     if (event.defaultPrevented || event.target.closest('.whiteboard-editor')) return;
     const control = event.ctrlKey || event.metaKey;
     const key = event.code.startsWith('Key') ? event.code.slice(3).toLowerCase() : event.key.toLowerCase();
+    if (event.key === 'Escape' && normalizeRequest) {
+      event.preventDefault();
+      cancelNormalizeRequest();
+      updateNormalizeControls(items());
+      return;
+    }
     if (event.key === 'Escape' && linkStart) {
       event.preventDefault();
       setLinkStart(null);
@@ -1805,6 +2779,20 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       changeHistory(event.shiftKey ? 'redo' : 'undo');
       return;
     }
+    const endpoint = event.target.closest('[data-board-endpoint]')?.dataset.boardEndpoint;
+    if (endpoint && !control && !event.altKey && /^Arrow(Left|Right|Up|Down)$/.test(event.key)) {
+      const connector = current(connectorEndpoints.dataset.connectorId);
+      const binding = connector?.connection?.[endpoint];
+      const card = current(binding?.id);
+      const anchor = boardPortPoint(card,binding?.side,readBoardConnectionOffsets(connector?.text)[endpoint]);
+      if (!anchor || !canUseConnections()) return;
+      event.preventDefault();
+      const step = (event.shiftKey ? 12 : 2) / scope.view.zoom;
+      const x = anchor.x + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0);
+      const y = anchor.y + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0);
+      moveConnectorEndpoint(connector,endpoint,nearestBoardEdge(card,{x,y},binding.side));
+      return;
+    }
     if (event.target !== stage) return;
     if (!control && event.altKey && event.shiftKey && (key === 'h' || key === 'v')) {
       event.preventDefault();
@@ -1812,12 +2800,30 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       return;
     }
     if (control) {
-      if (!event.altKey && key === 'g') {
+      if (!event.altKey && !event.shiftKey && key === 'o') {
+        event.preventDefault();
+        if (!event.repeat) optimizeCanvas();
+      } else if (!event.shiftKey && key === 'p') {
+        event.preventDefault();
+        if (!event.repeat) runOptimalArrangement(event.altKey);
+      } else if (!event.altKey && key === 'g') {
         event.preventDefault();
         if (!event.repeat) arrangeSelection(event.shiftKey ? 'ungroup' : 'group');
       } else if (!event.altKey && !event.shiftKey && Object.hasOwn(alignKeys,event.key)) {
         event.preventDefault();
         arrangeSelection(alignKeys[event.key]);
+      } else if (event.altKey && event.shiftKey && Object.hasOwn(distributeKeys,event.key)) {
+        event.preventDefault();
+        if (!event.repeat) arrangeSelection(distributeKeys[event.key]);
+      } else if (event.altKey && !event.shiftKey && Object.hasOwn(normalizeKeys,event.key)) {
+        const action = normalizeKeys[event.key];
+        if (canNormalizeSelection(items(),selected,action)) {
+          event.preventDefault();
+          if (!event.repeat) void runNormalize(action);
+        }
+      } else if (event.altKey && !event.shiftKey && key === 's') {
+        event.preventDefault();
+        if (!event.repeat) arrangeSelection('stack');
       } else if (event.shiftKey && key === 'c') {
         event.preventDefault();
         if (!event.repeat) doImageAction(event.altKey ? 'crop' : 'resetCrop');
@@ -1866,7 +2872,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       else if (!gesture && !event.repeat && !event.shiftKey) toggleImageFocus(selectedItems().filter(item => item.kind === 'image'));
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      const cancelCrop = cropMode || cropKey || gesture?.mode === 'crop' || gesture?.mode === 'link';
+      const cancelCrop = cropMode || cropKey || ['crop','link','endpoint'].includes(gesture?.mode);
       endGesture();
       cropMode = false;
       cropKey = false;
@@ -1904,7 +2910,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   });
   window.addEventListener('blur', () => {
     if (!visible) return;
+    cancelNormalizeRequest();
+    setNormalizeOpen(false);
     endGesture();
+    dismissNodePicker();
     setLinkStart(null);
     cropKey = cropAdjustKey = false;
     zoomKey = spaceDown = false;
@@ -1913,8 +2922,26 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   panel.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
-    const {boardTool,boardColor,boardView,boardHistory,boardImageAction,boardArrange} = button.dataset;
-    if (boardHistory) { changeHistory(boardHistory); stage.focus({preventScroll:true}); }
+    const {boardTool,boardColor,boardView,boardHistory,boardImageAction,boardArrange,boardNormalize,boardNormalizeSource} = button.dataset;
+    if (button === connectorCut) {
+      const connector = current(connectorEndpoints.dataset.connectorId);
+      if (connector?.connection && !connectorEndpoints.hidden) {
+        commit({id:connector.id,delete:true});
+        stage.focus({preventScroll:true});
+      }
+    } else if (button === stackPreferencesButton) stackSettings.open();
+    else if (button === normalizeToggle) {
+      if (!normalizeRequest) {
+        const open = normalizePanel.hidden;
+        setNormalizeOpen(open);
+        if (!open) stage.focus({preventScroll:true});
+      }
+    } else if (boardNormalizeSource) setNormalizeSource(boardNormalizeSource);
+    else if (boardNormalize) {
+      setNormalizeOpen(false);
+      stage.focus({preventScroll:true});
+      void runNormalize(boardNormalize);
+    } else if (boardHistory) { changeHistory(boardHistory); stage.focus({preventScroll:true}); }
     else if (boardArrange) arrangeSelection(boardArrange);
     else if (boardImageAction) doImageAction(boardImageAction);
     else if (boardTool) { setTool(boardTool); stage.focus({preventScroll:true}); }
@@ -1923,7 +2950,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       if (selected.size) commit(...[...selected].map(id => ({id,patch:{color:boardColor}})));
       else renderSelection();
     } else if (boardView && scope) {
-      if (boardView === 'fit') fitView();
+      if (boardView === 'fit') optimizeCanvas();
       else {
         const value = boardView === 'reset' ? 1 : scope.view.zoom * (boardView === 'in' ? 1.22 : 1/1.22);
         zoomAt(stage.clientWidth / 2,stage.clientHeight / 2,value);
@@ -1938,89 +2965,202 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }, 3000);
   setTool('select');
 
+  function retryMissingAssetReferences() {
+    for (const node of nodes.values()) {
+      if (node.whiteboardAssetReference && node.querySelector('.whiteboard-reference-missing')) {
+        node.whiteboardContent = null;
+      }
+    }
+  }
+
   function show() {
     if (!scope.view) fitView();
     else paintView();
+    retryMissingAssetReferences();
     render();
     sync();
   }
 
   return {
     busyForUpdate() {
-      return Boolean(gesture || editing || pendingMedia ||
+      return Boolean(gesture || editing || pendingMedia || pendingNode || pendingNodeImage || pendingCoverPin || normalizeRequest || stackSettings.isOpen() ||
         [...states.values()].some(state => state.storageError && (!state.teamId || state.queue.length)) ||
         [...stage.querySelectorAll('video')].some(video => !video.paused && !video.ended));
     },
     refresh() {
       if (!visible) return;
-      for (const [id,item] of items()) {
-        const node = nodes.get(id);
-        if (item.assetId && node?.querySelector('.whiteboard-reference-missing')) node.whiteboardContent = null;
-      }
+      retryMissingAssetReferences();
       render();
       sync();
     },
     dropNativeImages(paths, position) {
       if (!visible || !scope) return false;
       const point = position ? {x:position.x / window.devicePixelRatio,y:position.y / window.devicePixelRatio} : undefined;
-      insertMedia(insertImages, nativeImages(paths), insertionPoint(point));
+      insertMedia(insertExternalFiles,{paths,drop:true},insertionPoint(point));
       return true;
     },
+    dropAssetReferences(references, offset) {
+      if (!visible || !scope?.view) return false;
+      const {left,top} = stage.getBoundingClientRect();
+      const zoom = scope.view.zoom;
+      const placement = offset.media && {...offset.media, width:offset.media.width / zoom, height:offset.media.height / zoom};
+      return insertMedia(insertAssetReferences, references, world(left + offset.x, top + offset.y), placement);
+    },
+    dropLink(text, offset) {
+      if (!visible || !scope?.view) return false;
+      const {left,top} = stage.getBoundingClientRect();
+      const point = world(left + offset.x, top + offset.y);
+      const patch = whiteboardLinkPatch(text, {x:coordinate(point.x), y:coordinate(point.y)});
+      return patch ? insertItems([patch]) : false;
+    },
     contextMenu(event) {
-      if (!visible || !stage.contains(event.target)) return null;
+      if (!visible || !scope || !stage.contains(event.target)) return null;
+      if (!normalizePanel.hidden) setNormalizeOpen(false);
       const clicked = event.target.closest('[data-board-id]')?.dataset.boardId;
       if (clicked && !selected.has(clicked)) {
         selected = new Set([clicked]);
         setTool('select');
         renderSelection();
       }
+      const board = items();
+      const selection = selectedItems();
+      const images = selection.filter(item => item.kind === 'image');
       const point = insertionPoint(event.type === 'contextmenu' ? {x:event.clientX,y:event.clientY} : undefined);
-      const actions = [
-        ['stack', '粘贴', () => pasteFromClipboard(point)],
-        ['picture', '添加图片…', () => imagePicker.click()],
+      const revision = visibilityRevision;
+      const target = scope;
+      const available = () => visible && scope === target && revision === visibilityRevision;
+      const editActions = [['notes', '粘贴', () => pasteFromClipboard(point), 'Ctrl+V']];
+      const createActions = [
+        ['notes', '新建便签', () => addTextAt('note',point)],
+        ['list', '新建文字', () => addTextAt('text',point)],
+        ['picture', '添加图片…', () => { pendingContextImage = {scope,revision,point}; imagePicker.click(); }, 'Ctrl+I'],
+        ['edit', '画笔工具', () => setTool('stroke'), 'P'],
       ];
-      if (selected.size) actions.unshift(
-        ['stack', '复制', () => copySelected()],
-        ['edit', '剪切', () => { if (copySelected()) deleteSelected(); }],
-        ['plus', '复制一份', duplicateSelected],
-        ['trash', '删除选中项', deleteSelected],
+      const item = clicked && current(clicked);
+      const link = item?.kind === 'text' && readWhiteboardLink(item.text);
+      const file = item?.kind === 'text' && readWhiteboardFile(item.text);
+      if (selection.length) editActions.unshift(
+        ['copy', '复制', () => copySelected(), 'Ctrl+C'],
+        ['edit', '剪切', () => { if (copySelected()) deleteSelected(); }, 'Ctrl+X'],
       );
-      if (canTransformImages() && selectedItems().some(item => item.kind === 'image')) {
-        const transforms = Object.entries(imageActions).filter(([name]) =>
-          name !== 'crop' || selected.size === 1);
-        actions.unshift(...transforms.map(([name,[label,glyph]]) => [glyph,label,() => doImageAction(name)]));
+      if (link && openLink) editActions.unshift(['drag-out', '在浏览器打开', () => openLink(link.url)]);
+      if (file && revealPastedFile && file.teamId === target.teamId) {
+        editActions.unshift(['folder',file.isFolder ? '打开共享文件夹' : '在共享文件夹中定位', () => {
+          if (available() && current(clicked)?.text === item.text) return revealPastedFile(file);
+        }]);
       }
+      if (item?.kind === 'image' && item.assetId && locateAsset) {
+        editActions.unshift(['locate', '在资产库中定位', () => locateAsset(item.assetId,
+          () => available() && current(clicked)?.assetId === item.assetId)]);
+      }
+
+      const canAlign = canAlignSelection(board,selected);
+      const canDock = !canAlign && canDockSelection(board,selected);
+      const canOptimize = canOptimizeArrangement(board,selected);
+      const arrange = Object.entries(alignActions).filter(([id]) => id === 'optimal' ? canOptimize
+        : canAlign || (canDock && directionalAlignActions.has(id)))
+        .map(([id,[label,,,glyph,shortcut]]) => [glyph,label,() => arrangeSelection(id),shortcut]);
+      arrange.push(['sliders',stackSettingsLabel,() => stackSettings.open()]);
+      const groupActions = [];
       if (canUseGroups()) {
-        const board = items();
-        if (canAlignSelection(board,selected)) actions.unshift(['stack','成组',()=>arrangeSelection('group')]);
-        if (selectedItems().some(item => item.groupId)) actions.unshift(['stack','解组',()=>arrangeSelection('ungroup')]);
+        if (canAlign) groupActions.push(['stack','成组',() => arrangeSelection('group'),'Ctrl+G']);
+        if (selection.some(item => item.groupId)) {
+          groupActions.push(['stack','解组',() => arrangeSelection('ungroup'),'Ctrl+Shift+G']);
+        }
       }
-      return {anchor:stage,actions,label:'白板操作'};
+      const transforms = images.length && canTransformImages() ? Object.entries(imageActions)
+        .filter(([id]) => id !== 'crop' || images.length === 1)
+        .map(([id,[label,glyph,shortcut]]) => [glyph,label,() => doImageAction(id),shortcut]) : [];
+      const normalization = canNormalizeSelection(board,selected) ? [
+        ...Object.entries(normalizeModes).map(([id,label]) =>
+          [normalizeSource === id ? 'check' : 'locate',label,() => setNormalizeSource(id)]),
+        ...Object.entries(normalizeActions).map(([id,[label,glyph,shortcut]]) =>
+          [glyph,label,() => runNormalize(id),shortcut,!canNormalizeSelection(board,selected,id)]),
+      ] : [];
+      const view = [
+        ['locate', '全选', () => { selected = new Set(items().keys()); setTool('select'); }, 'Ctrl+A', !board.size],
+        ['expand', '优化画布', optimizeCanvas, 'Ctrl+O', !board.size],
+        ['grid', '全部优化排列并适应画布', () => runOptimalArrangement(true), 'Ctrl+Alt+P', !canOptimizeArrangement(board,new Set())],
+        ['picture', '实际大小', () => zoomAt(stage.clientWidth / 2,stage.clientHeight / 2,1), 'Ctrl+0'],
+      ];
+      if (images.length) view.push(['locate','聚焦所选图片',() => toggleImageFocus(images),'Space']);
+
+      const tools = [['plus','添加元素','create'], ['whiteboard','画布与选择','view']];
+      if (arrange.length) tools.push(['stack','对齐与排列','arrange']);
+      if (normalization.length) tools.push(['expand','缩放对齐','normalize']);
+      if (transforms.length) tools.push(['sliders','图片变换','transform']);
+      const selectedActions = selection.length ? [
+        ...groupActions,
+        ['plus', '复制一份', duplicateSelected, 'Ctrl+D'],
+        ['trash', '删除选中项', deleteSelected, 'Delete'],
+      ] : [];
+      return {anchor:stage,label:'白板操作',actions:{
+        available,
+        context:{name:selection.length ? `已选 ${selection.length} 个元素` : '白板画布', detail:'', glyph:'whiteboard'},
+        sections:[['编辑',editActions], ['画布',tools], ['所选元素',selectedActions]],
+        submenus:{create:['添加元素',createActions],view:['画布与选择',view],arrange:['对齐与排列',arrange],
+          normalize:['缩放对齐',normalization],transform:['图片变换',transforms]},
+      }};
     },
     setVisible(value) {
       if (visible === value) return;
       if (!value) {
+        stackSettings.close();
+        cancelNormalizeRequest();
+        setNormalizeOpen(false);
+        presence.setContext(scope,false);
+        finishVideoCoverPin(true);
+      }
+      visibilityRevision++;
+      if (!value) {
+        whiteboardHover.stop();
+        cancelAnimationFrame(viewFrame);
+        viewFrame = 0;
+        dismissNodePicker();
+        pendingNodeImage = null;
         stopEditing(true);
         endGesture();
         setLinkStart(null);
-        alignMenu.open = false;
         cropMode = cropKey = cropAdjustKey = zoomKey = spaceDown = false;
         for (const node of nodes.values()) {
-          if (!node.whiteboardAssetReference) continue;
-          releaseImage(node);
-          node.whiteboardContent = null;
+          const reference = videoReferences.get(node);
+          if (!reference) continue;
+          const {video,image,coverKey} = reference;
+          video.pause();
+          if (video.hasAttribute('src')) {
+            video.removeAttribute('src');
+            video.load();
+          }
+          video.hidden = true;
+          image.hidden = !image.hasAttribute('src');
+          reference.coverAbort.abort();
+          if (coverKey && !pinnedVideoFrames.has(coverKey)) {
+            reference.coverAbort = new AbortController();
+            videoCoverObserver.observe(node);
+          }
         }
         setTool(tool);
       }
       visible = value;
-      if (value && scope) show();
+      filePreviews?.setVisible(value);
+      if (value && scope) {
+        show();
+        presence.setContext(scope,true);
+      }
     },
     setScope({key,teamId,projectId,workspaceKey = key}) {
       if (!key || scope?.key === key) return;
+      stackSettings.close();
+      cancelNormalizeRequest();
+      setNormalizeOpen(false);
+      presence.setContext(scope,false);
+      finishVideoCoverPin(true);
+      whiteboardHover.stop();
+      dismissNodePicker();
+      pendingNodeImage = null;
       stopEditing(true);
       endGesture();
       setLinkStart(null);
-      alignMenu.open = false;
       selected.clear();
       cropMode = cropKey = cropAdjustKey = zoomKey = spaceDown = false;
       beforeFocus = focusedImage = undefined;
@@ -2034,8 +3174,13 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         node.remove();
       }
       nodes.clear();
-      if (visible) show();
-      else sync();
+      groupFrames.clear();
+      groupFrameLayer.replaceChildren();
+      outlinedGroup = undefined;
+      if (visible) {
+        show();
+        presence.setContext(scope,true);
+      } else sync();
     },
   };
 }

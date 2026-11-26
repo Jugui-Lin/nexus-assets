@@ -1476,6 +1476,7 @@ fn as_asset(shared: &SharedAsset, path: Option<&str>, favorite: bool) -> Asset {
         rating: shared.rating,
         workflow: shared.workflow,
         favorite,
+        favorite_at: None,
         thumbnail: None,
         demo: false,
         subtitle: None,

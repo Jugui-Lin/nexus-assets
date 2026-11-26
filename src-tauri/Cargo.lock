@@ -2653,7 +2653,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nexus-assets"
-version = "0.10.51"
+version = "0.10.52"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2677,6 +2677,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "ufbx",
  "url",
  "uuid",
  "walkdir",
@@ -4988,6 +4989,15 @@ dependencies = [
  "memoffset",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ufbx"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "260522f1eb74139f0e78b29dd82a58e5437d728c5498024a39e5af7282694240"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

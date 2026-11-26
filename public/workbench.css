@@ -181,6 +181,11 @@
 .about-updates[hidden] { display: none; }
 .about-update-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-inline-start: auto; }
 .about-update-actions .button[hidden] { display: none; }
+.about-release-notes { margin-top: 12px; }
+.about-release-notes[hidden] { display: none; }
+.nexus-release-version { margin: 9px 0 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.nexus-release-list { display: grid; gap: 8px; margin: 0; padding-inline-start: 18px; line-height: 1.5; }
+.nexus-release-list li::marker { color: var(--accent); }
 :is(.top-tools > summary, #about-button, .version-link).has-nexus-update { position: relative; }
 :is(.top-tools > summary, #about-button, .version-link).has-nexus-update::after {
   content: ""; position: absolute; width: 7px; height: 7px; pointer-events: none;
@@ -336,6 +341,29 @@
 .asset-card:hover { border-color: #799b94; }
 .asset-card.selected { border-color: #8ed0c4; }
 .asset-card.checked { border-color: #a0e1d4; background: #2a4541; }
+.asset-card:is(.selected, .checked) {
+  --asset-selection-color: var(--dotin-focus, var(--accent));
+  --asset-selection-background: color-mix(in srgb, var(--asset-selection-color) 23%, var(--card));
+}
+.asset-card.checked {
+  --asset-selection-background: color-mix(in srgb, var(--asset-selection-color) 34%, var(--card));
+}
+.asset-card:is(.selected, .checked)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border: 2px solid var(--asset-selection-color);
+  border-radius: inherit;
+  pointer-events: none;
+}
+.asset-card:is(.selected, .checked) .card-info {
+  color: var(--text);
+}
+.asset-grid:not(.list-mode) .asset-card:is(.selected, .checked) .card-info {
+  background: var(--asset-selection-background);
+}
+.asset-grid .asset-card:is(.selected, .checked) .card-name { font-weight: 650; }
 .card-thumb { background: radial-gradient(ellipse at 50% 32%, #444c4d, #2c3234); }
 .card-thumb img { background: #2b3031; }
 .job-info { min-width: 0; overflow-wrap: anywhere; }
@@ -624,7 +652,9 @@ dialog.modal::backdrop { backdrop-filter: none; background: #080b0dae; }
 .c4d-import-cache-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
 .c4d-import-cache-actions .team-check { min-width: 0; margin: 0; }
 .c4d-import-cache-actions input, .c4d-import-cache-actions button { flex: none; }
-.c4d-import-cache-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; max-width: 100%; margin-inline-start: auto; }
+.c4d-import-cache-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-width: 0; max-width: 100%; margin-inline-start: auto; }
+.c4d-import-cache-threshold { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.c4d-import-cache-threshold .text-field { width: 70px; font-variant-numeric: tabular-nums; }
 #c4d-import-cache-size { min-width: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: end; overflow-wrap: anywhere; }
 #c4d-import-cache-size[data-error] { color: #f7aa99; }
 .c4d-import-preference-fields #c4d-import-cache-status[data-error] { color: #f7aa99; }

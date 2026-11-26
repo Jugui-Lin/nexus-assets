@@ -487,6 +487,15 @@ fn project_not_found() -> ApiError {
     error(StatusCode::NOT_FOUND, "找不到白板项目")
 }
 
+pub(super) fn require_project(conn: &Connection, id: &str) -> Result<(), ApiError> {
+    if let Board::Project(id) = Board::from_id(id)? {
+        if !project_exists(conn, id)? {
+            return Err(project_not_found());
+        }
+    }
+    Ok(())
+}
+
 fn read_projects(conn: &Connection) -> Result<WhiteboardProjectsSnapshot, ApiError> {
     let mut query = conn
         .prepare("SELECT id,name FROM whiteboard_projects ORDER BY id=?1 DESC, rowid")

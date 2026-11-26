@@ -34,8 +34,10 @@ import {initBrowserSites} from './browser-sites.js';
 import {initWhiteboardProjects} from './whiteboard-projects.js';
 import {encodeWhiteboardAssetClipboard} from './whiteboard-asset-clipboard.js';
 import {initNexusUpdater} from './nexus-updater.js';
+import {initNexusReleaseNotes} from './nexus-release-notes.js';
 import {initBrowserCapture} from './browser-capture.js';
 import {initWorkspaceTabs} from './workspace-tabs.js';
+import {initAssetMasonry} from './asset-masonry.js';
 import {initQuickImagePreview} from './quick-image-preview.js';
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const native=Boolean(window.__TAURI__?.core),invoke=window.__TAURI__?.core.invoke;
@@ -64,6 +66,14 @@ const api=async(command,args={})=>{
   }
 };
 const gridZoomKey = 'nexus-grid-zoom-width';
+const assetLayoutKey = 'nexus-asset-layout';
+const assetViewButtons = {grid:'#grid-view', masonry:'#masonry-view', list:'#list-view'};
+const assetMasonry = initAssetMasonry($('#asset-grid'));
+function preferredAssetLayout(preferences) {
+  const layout = preferences.getItem(assetLayoutKey);
+  if (Object.hasOwn(assetViewButtons, layout)) return layout;
+  return preferences.getItem('nexus-list-mode') === 'true' ? 'list' : 'grid';
+}
 const gridZoomLimits = {min: 88, max: 560};
 const savedGridZoom = Number(localStorage.getItem(gridZoomKey));
 const storedDensity = localStorage.getItem('nexus-grid-density');
@@ -74,7 +84,7 @@ const state = {
   formatIncludes: [], formatExcludes: [], tagIncludes: [], tagExcludes: [],
   rating: 0, workflow: '', quickFilters: [], fileNameQuery: '',
   assetWindowAnchor: null,
-  limit: 60, list: localStorage.getItem('nexus-list-mode') === 'true',
+  limit: 60, layout: preferredAssetLayout(localStorage),
   density: ['compact', 'normal', 'large'].includes(storedDensity) ? storedDensity : 'normal',
   gridZoom: savedGridZoom >= gridZoomLimits.min && savedGridZoom <= gridZoomLimits.max ? savedGridZoom : 0,
 };
@@ -84,6 +94,26 @@ const workspaceHome = $('#workspace-home');
 const assetSearchInput = $('#search');
 const assetSearchToggle = $('#asset-search-toggle');
 const assetSearchField = $('#asset-search-field');
+const assetSort = $('#sort');
+const favoriteSort = 'favoriteAt';
+
+function sortPreferenceKey(view) {
+  return view === 'favorites' ? 'nexus-favorites-sort' : 'nexus-asset-sort';
+}
+
+function defaultAssetSort(view) {
+  const isFavorites = view === 'favorites';
+  const saved = libraryPreferences.getItem(sortPreferenceKey(view)) ?? libraryPreferences.getItem(sortPreferenceKey('all'));
+  const allowed = [...assetSort.options].some(option => option.value === saved && (isFavorites || saved !== favoriteSort));
+  return allowed ? saved : 'added';
+}
+
+function renderAssetSort() {
+  const isFavorites = state.view === 'favorites';
+  assetSort.querySelector('[value="favoriteAt"]').hidden = !isFavorites;
+  if (!isFavorites && state.sort === favoriteSort) state.sort = defaultAssetSort(state.view);
+  assetSort.value = state.sort;
+}
 
 function syncAssetSearchToggle() {
   const expanded = assetSearchToggle.getAttribute('aria-expanded') === 'true';
@@ -276,6 +306,7 @@ const quickRenderer=new MeshPreview($('#quick-preview-canvas'));
 const thumbnailRenderer = new MeshPreview(document.createElement('canvas'), {width:320,height:234});
 const thumbCache=new Map();
 const thumbnailSizeKey = 'nexus-thumbnail-pixels';
+const rasterBrowseSizeLimit = 192 * 1024 * 1024;
 let thumbnailSize = Number(localStorage.getItem(thumbnailSizeKey)) || 256;
 if (!Number.isInteger(thumbnailSize) || thumbnailSize < 128 || thumbnailSize > 1024) thumbnailSize = 256;
 function toast(message,error=false){const t=$('#toast');t.textContent=String(message);t.classList.remove('hidden');t.classList.toggle('error',error);clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.add('hidden'),error?6500:3500);}
@@ -349,6 +380,8 @@ function assetView(base, omit = null) {
   if (state.sort === 'name') rows.sort((a,b) => assetNameOrder.compare(a.name, b.name));
   else if (state.sort === 'size') rows.sort((a,b) => b.size - a.size);
   else if (state.sort === 'rating') rows.sort((a,b) => (b.rating || 0) - (a.rating || 0) || timestamp(b.added) - timestamp(a.added));
+  else if (state.sort === favoriteSort) rows.sort((a,b) => timestamp(b.favoriteAt) - timestamp(a.favoriteAt) ||
+    timestamp(b.added) - timestamp(a.added) || assetNameOrder.compare(a.name, b.name) || a.id.localeCompare(b.id));
   else rows.sort((a,b) => timestamp(b[state.sort]) - timestamp(a[state.sort]));
   return summary;
 }
@@ -360,7 +393,7 @@ function folderThumbnailRank(asset) {
   if (asset.thumbnail || customCovers.has(asset.id)) return 3;
   if (asset.kind === 'texture') return 2;
   return Number((native && (asset.kind === 'video' || asset.ext === 'c4d')) ||
-    (meshCapable(asset) && asset.size <= 750_000));
+    modelThumbnailCapable(asset));
 }
 function refreshFolderTrees() {
   assetsById = new Map();
@@ -556,7 +589,7 @@ function renderSubfolders() {
   const hasChildren = Boolean(folder?.children.length);
   $('#subfolder-section').classList.toggle('hidden', !hasChildren);
   $('#folder-assets-heading').classList.toggle('hidden', !hasChildren);
-  grid.toggleAttribute('data-list', state.list);
+  grid.toggleAttribute('data-list', state.layout === 'list');
   if (folder === displayedSubfolder) return;
   displayedSubfolder = folder;
   grid.innerHTML = (folder?.children || []).map(child => {
@@ -600,6 +633,7 @@ $('#subfolder-grid').addEventListener('click', event => {
 });
 function renderAssets(){
   videoHover?.stop();
+  renderAssetSort();
   assetTypePreferences.reload(libraryScope());
   if (!assetTypePreferences.categoryEnabled(state.kind)) state.kind = 'all';
   const home = state.view === 'home';
@@ -619,9 +653,8 @@ function renderAssets(){
   creativeSubscriptions.setVisible(subscriptions);
   siteNavigation.setScope(libraryScope());
   whiteboard.setContext({key:collectionScope(), teamId:team.active ? team.info.team.id : null, visible:board});
-  for (const selector of ['.library-toolbar','.asset-quick-filters','.filter-bar','.results-line','#asset-grid']) {
-    $(selector).classList.toggle('hidden', !isAssetView());
-  }
+  $('#workspace-asset-controls').hidden = !isAssetView();
+  $('#asset-grid').classList.toggle('hidden', !isAssetView());
   renderLocation();
   renderSubfolders();
   workspaceNavigation?.render();
@@ -641,20 +674,27 @@ function renderAssets(){
   displayedAssetRows = rows;
   $('#result-count').textContent=rows.length;$('#active-filter').innerHTML=state.tag?`<button class="active-filter-chip">${escape(state.tag)} ×</button>`:'';
   $('#check-files').classList.toggle('hidden', !native || !rows.length);
-  const grid=$('#asset-grid');grid.classList.toggle('list-mode',state.list);$('#grid-view').classList.toggle('active',!state.list);$('#list-view').classList.toggle('active',state.list);
-  if (state.list) grid.setAttribute('role', 'table');
+  const grid = $('#asset-grid');
+  const list = state.layout === 'list';
+  grid.classList.toggle('list-mode', list);
+  grid.classList.toggle('masonry-mode', state.layout === 'masonry');
+  for (const [layout, selector] of Object.entries(assetViewButtons)) {
+    const active = layout === state.layout;
+    const button = $(selector);
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+  if (list) grid.setAttribute('role', 'table');
   else grid.removeAttribute('role');
-  $('#grid-view').setAttribute('aria-pressed', String(!state.list));
-  $('#list-view').setAttribute('aria-pressed', String(state.list));
-  renderGridSize();
   $('#select-visible').disabled = !rows.length;
   const anchorIndex = state.assetWindowAnchor ? rows.findIndex(asset => asset.id === state.assetWindowAnchor) : -1;
   const offset = anchorIndex >= 60 ? Math.floor(anchorIndex / 60) * 60 : 0;
   const visible = rows.slice(offset, offset + state.limit);
-  const libraries = state.list ? new Map(state.libraries.map(library => [library.id, library])) : null;
+  const libraries = list ? new Map(state.libraries.map(library => [library.id, library])) : null;
   const focusedCard = document.activeElement?.matches('#asset-grid .asset-card') ? document.activeElement.dataset.id : null;
-  grid.innerHTML = (state.list && visible.length ? assetListHeadings : '') +
+  grid.innerHTML = (list && visible.length ? assetListHeadings : '') +
     visible.map(asset => renderAssetCard(asset, libraries?.get(asset.libraryId))).join('');
+  renderGridSize();
   videoCardDurations?.refresh();
   if (focusedCard) grid.querySelector(`.asset-card[data-id="${CSS.escape(focusedCard)}"]`)?.focus({preventScroll:true});
   const emptyCollection = currentCollection() && !base.length;
@@ -728,7 +768,12 @@ function renderAssetListDetails(asset, library) {
     listCell('notes', escape(notes.replace(/\s+/g, ' ')), notes);
 }
 
+function masonryAspectKey(asset) {
+  return JSON.stringify([libraryScope(), asset.id, asset.size, asset.modified, Boolean(asset.thumbnail), customCovers.has(asset.id)]);
+}
+
 function renderAssetCard(asset, library) {
+  const list = state.layout === 'list';
   const id = escape(asset.id);
   const title = escape(asset.name);
   const marked = markedAssets.has(asset.id);
@@ -738,21 +783,21 @@ function renderAssetCard(asset, library) {
   const nameHeading = `<h3 class="card-name" title="${title}">${title}</h3>`;
   const format = escape(asset.ext.toUpperCase());
   const placeholder = icon(kindIcons[assetTypePreferences.effectiveKind(asset)] || 'box', 'placeholder-icon');
-  const thumbnailFallback = state.list ? placeholder : `<span class="card-thumb-placeholder" aria-hidden="true">
+  const thumbnailFallback = list ? placeholder : `<span class="card-thumb-placeholder" aria-hidden="true">
     ${placeholder}${format ? `<span class="card-thumb-format">${format}</span>` : ''}</span>`;
-  return `<article class="asset-card ${focused ? 'selected' : ''} ${marked ? 'checked' : ''}" data-id="${id}" ${asset.kind === 'video' ? 'data-video-hover' : ''} tabindex="0" aria-label="${title}" aria-haspopup="menu" ${focused ? 'aria-current="true"' : ''}${state.list ? ' role="row"' : ''}>
-    <div class="card-thumb"${state.list ? ' role="cell"' : ''}>
+  return `<article class="asset-card ${focused ? 'selected' : ''} ${marked ? 'checked' : ''}" data-id="${id}" data-masonry-aspect-key="${escape(masonryAspectKey(asset))}" ${asset.kind === 'video' ? 'data-video-hover' : ''} tabindex="0" aria-label="${title}" aria-haspopup="menu" ${focused ? 'aria-current="true"' : ''}${list ? ' role="row"' : ''}>
+    <div class="card-thumb"${list ? ' role="cell"' : ''}>
       ${thumbnailFallback}
       <img data-thumb="${id}" alt="" draggable="false" class="hidden">
-      ${state.list ? '' : `<span class="format-badge">${format}</span>`}
-      ${fileWarning && !state.list ? '<span class="file-state">' + fileWarning + '</span>' : ''}
+      ${list ? '' : `<span class="format-badge">${format}</span>`}
+      ${fileWarning && !list ? '<span class="file-state">' + fileWarning + '</span>' : ''}
       <button class="icon-button card-favorite ${asset.favorite ? 'is-favorite' : ''}" data-favorite="${id}" title="${asset.favorite ? '取消收藏' : '收藏资产'}">${icon('star')}</button>
-      ${native && !state.list && asset.kind === 'video' && !fileWarning ? `<span class="card-video-duration hidden" data-video-duration="${id}"></span>` : ''}
+      ${native && !list && asset.kind === 'video' && !fileWarning ? `<span class="card-video-duration hidden" data-video-duration="${id}"></span>` : ''}
       <button class="card-check" data-mark="${id}" aria-label="选择 ${title}" aria-pressed="${marked}">${icon('check')}</button>
       ${nativeDragOut ? '<button type="button" class="card-native-drag" data-native-drag title="拖到其他桌面软件" aria-label="拖到其他桌面软件">' + icon('drag-out') + '</button>' : ''}
     </div>
-    <div class="card-info"${state.list ? ' role="presentation"' : ''}>
-      ${state.list ? `<div class="asset-list-name" role="cell">${nameHeading}
+    <div class="card-info"${list ? ' role="presentation"' : ''}>
+      ${list ? `<div class="asset-list-name" role="cell">${nameHeading}
         ${fileWarning || asset.subtitle ? `<small${fileWarning ? ' class="asset-list-file-warning"' : ''} title="${escape(fileWarning || asset.subtitle)}">${escape(fileWarning || asset.subtitle)}</small>` : ''}
       </div>${renderAssetListDetails(asset, library)}` : nameHeading}
     </div>
@@ -997,7 +1042,7 @@ async function readThumbnail(asset, size, cacheOnly) {
   const sharedOnly = cacheOnly && native && isTeamAsset(asset) && asset.teamMounted && asset.kind !== 'video';
   const customCover = customCovers.has(asset.id);
   const readImage = async mode => (await api('read_preview', {id:asset.id,mode,size}).catch(() => null))?.url;
-  if (native && asset.ext === 'max') {
+  if (native && ['max', 'ies'].includes(asset.ext)) {
     const local = customCover ? null : await readImage('thumbnail_cached');
     return local || readImage('thumbnail');
   }
@@ -1005,6 +1050,11 @@ async function readThumbnail(asset, size, cacheOnly) {
   if (customCover) cacheOnly = false;
   const existing = await readImage(cacheOnly ? 'thumbnail_cached' : 'thumbnail');
   if (existing) return existing;
+  if (cacheOnly && asset.kind === 'texture' && asset.size <= rasterBrowseSizeLimit &&
+      (!isTeamAsset(asset) || asset.teamMounted)) {
+    // The native route looks for a NAS thumbnail before decoding the source.
+    return readImage('thumbnail');
+  }
   if (native && asset.kind === 'video') {
     if (cacheOnly) {
       const located = await readImage('thumbnail');
@@ -1012,9 +1062,15 @@ async function readThumbnail(asset, size, cacheOnly) {
     }
     return (await renderVideoThumbnail(asset, size)).url;
   }
-  if (sharedOnly) return readImage('thumbnail_shared');
-  if (cacheOnly) return null;
-  if (!meshCapable(asset) || asset.size > 750_000) return null;
+  if (sharedOnly) {
+    const shared = await readImage('thumbnail_shared');
+    if (shared) return shared;
+  }
+  if (!modelThumbnailCapable(asset) || (cacheOnly && !isNativeMeshFile(asset))) return null;
+  if (cacheOnly && !sharedOnly) {
+    const cover = await readImage('thumbnail');
+    if (cover) return cover;
+  }
   return renderModelThumbnail(asset, size);
 }
 
@@ -1047,7 +1103,12 @@ async function resolveWhiteboardAssetMedia(id, workspaceKey) {
   const url = preview?.url || thumbCache.get(id) || await readThumbnail(asset, thumbnailSize, cacheOnly);
   if (!sameWorkspace()) throw Error('资产库已切换。');
   if (!url) throw Error('图片源文件暂不可用。');
-  return {kind:'image',name:asset.name,url};
+  const dimensions = native && !cacheOnly ? async () => {
+    if (!sameWorkspace()) return null;
+    const size = await api('read_preview', {id,mode:'dimensions'}).catch(() => null);
+    return sameWorkspace() ? size : null;
+  } : null;
+  return {kind:'image',name:asset.name,url,dimensions};
 }
 
 function pumpThumbs() {
@@ -1230,11 +1291,20 @@ async function selectAsset(id) {
   }
   await renderInspector(true);
 }
-function meshCapable(asset) { return ['obj', 'stl', 'ply', 'glb', 'gltf'].includes(asset.ext); }
+function isNativeMeshFile(asset) {
+  return native && (asset.ext === 'obj' || asset.ext === 'fbx');
+}
+function meshCapable(asset) {
+  return isNativeMeshFile(asset) || ['obj', 'stl', 'ply', 'glb', 'gltf'].includes(asset.ext);
+}
+function modelThumbnailCapable(asset) {
+  const maximum = isNativeMeshFile(asset) ? 128 * 1024 * 1024 : 750_000;
+  return meshCapable(asset) && asset.size <= maximum;
+}
 function loadMesh(renderer, payload, asset) {
-  return asset.ext !== 'obj'
-    ? renderer.loadBinary(payload.base64, asset.ext, asset.color)
-    : renderer.load(payload.text, asset.color);
+  return typeof payload.text === 'string'
+    ? renderer.load(payload.text, asset.color)
+    : renderer.loadBinary(payload.base64, asset.ext, asset.color);
 }
 async function renderInspector(loadPreview=true){
   const a=selected();$('#inspector-empty').classList.toggle('hidden',Boolean(a));$('#inspector-content').classList.toggle('hidden',!a);if(!a){previewSerial++;return;}
@@ -1350,8 +1420,8 @@ function drawAvatar(container, url, fallback) {
   container.replaceChildren(image);
 }
 
-function loadTeamAvatar(member, chip) {
-  if (!member.avatarRevision || chip.querySelector('img')) return;
+function fetchTeamAvatar(member) {
+  if (!member.avatarRevision) return Promise.resolve(null);
   const epoch = team.epoch;
   let entry = teamAvatars.get(member.id);
   if (entry?.revision !== member.avatarRevision) {
@@ -1363,8 +1433,13 @@ function loadTeamAvatar(member, chip) {
       })};
     teamAvatars.set(member.id, entry);
   }
-  entry.request.then(url => {
-    if (team.epoch === epoch && chip.isConnected && isAvatarUrl(url)) drawAvatar(chip, url, member.letters);
+  return entry.request.then(url => team.epoch === epoch && isAvatarUrl(url) ? url : null);
+}
+
+function loadTeamAvatar(member, chip) {
+  if (chip.querySelector('img')) return;
+  fetchTeamAvatar(member).then(url => {
+    if (chip.isConnected && url) drawAvatar(chip, url, member.letters);
   });
 }
 
@@ -1494,6 +1569,243 @@ async function jumpToIndexedAsset(id, stillOpen = () => true, beforeOpen = null)
   await preview;
 }
 
+async function locateWhiteboardAsset(id, stillOpen) {
+  if (!stillOpen()) return;
+  if (!indexedAssetFolder(assetsById.get(id))) throw Error('当前资产库找不到这项素材，可能已被移除');
+  const otherPane = $('.workspace-pane:not([data-pane-focused]) > .workspace-pane-asset-preview')?.parentElement;
+  if (!otherPane) return jumpToIndexedAsset(id, stillOpen);
+
+  const scope = collectionScope();
+  const tabId = otherPane.getAttribute('aria-labelledby');
+  if (tabId && await workbenchTabs.focusPane(otherPane, tabId)) {
+    await jumpToIndexedAsset(id, () => collectionScope() === scope && workbenchTabs.activeId() === tabId);
+  }
+}
+
+const whiteboardFileBatch = 64;
+const whiteboardPasteBytes = 16 * 1024 * 1024;
+
+function activeWhiteboardTeam(request) {
+  return native && team.active && team.info.team.id === request.teamId &&
+    (!request.workspaceKey || collectionScope() === request.workspaceKey) &&
+    (!request.available || request.available());
+}
+
+function whiteboardFileLibraries() {
+  return state.libraries.filter(library => library.watching && library.path);
+}
+
+function getWhiteboardFileFolders({key,teamId}) {
+  if (!activeWhiteboardTeam({workspaceKey:key,teamId})) return [];
+  return whiteboardFileLibraries().map(({id,name}) => {
+    const folders = [];
+    const queue = [...(folderTrees.get(id)?.children || [])];
+    for (let index = 0; index < queue.length; index++) {
+      const node = queue[index];
+      folders.push(node.path);
+      queue.push(...node.children);
+    }
+    return {id,name,folders};
+  });
+}
+
+function whiteboardCopyLibrary(location) {
+  const library = whiteboardFileLibraries().find(item => item.id === location?.libraryId);
+  return library && findFolder(folderTrees.get(library.id),location.folder) ? library : null;
+}
+
+function clipboardFileName(file) {
+  if (file.name) return file.name;
+  const extension = ({'image/png':'png','image/jpeg':'jpg','image/gif':'gif','image/webp':'webp'})[file.type];
+  return extension ? '剪贴板图片.' + extension : '剪贴板文件.bin';
+}
+
+async function whiteboardFileBytes(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const chunks = [];
+  for (let offset = 0; offset < bytes.length; offset += 32768) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset,offset + 32768)));
+  }
+  return {name:clipboardFileName(file),base64:btoa(chunks.join(''))};
+}
+
+function whiteboardFileResult(request, report, library) {
+  if (report.failed) toast(report.errors?.[0] || `有 ${report.failed} 项未能添加到白板`, true);
+  const assets = new Map();
+  if (library) {
+    const paths = new Set(report.files.map(file => file.path));
+    for (const asset of assetsByLibrary.get(library.id) || []) {
+      if (!isWhiteboardReferenceMedia(asset)) continue;
+      const relative = relativeAssetPath(asset,library);
+      if (paths.has(relative)) assets.set(relative,asset.id);
+    }
+  }
+  return {workspaceKey:request.workspaceKey,files:report.files.map(row => ({
+    assetId:assets.get(row.path),
+    file:row.unc ? {teamId:request.teamId,unc:row.unc,name:row.name,isFolder:row.isFolder}
+      : {teamId:request.teamId,libraryId:row.libraryId || library?.id,path:row.path,name:row.name,isFolder:row.isFolder},
+  }))};
+}
+
+async function classifyWhiteboardFiles(request) {
+  const limit = Math.min(whiteboardFileBatch,request.limit);
+  const paths = request.paths.slice(0,limit);
+  const files = request.files.slice(0,limit - paths.length);
+  if (paths.length + files.length < request.paths.length + request.files.length) {
+    toast(`这次只添加前 ${limit} 项。`, true);
+  }
+  if (!paths.length) return {...request,paths,files,nasPaths:[]};
+  const selection = await api('classify_team_drop',{paths});
+  if (!activeWhiteboardTeam(request)) return null;
+  if (selection.errors?.length) toast(selection.errors[0],true);
+  const local = new Set(selection.localPaths);
+  if (selection.folders.some(path => local.has(path))) toast('本地文件夹无法建立团队引用。',true);
+  const nasPaths = [...selection.files,...selection.folders].filter(path => !local.has(path));
+  return {...request,paths:selection.files.filter(path => local.has(path)),files,nasPaths};
+}
+
+async function referenceWhiteboardFiles(request, paths) {
+  if (!paths.length || !activeWhiteboardTeam(request)) return [];
+  const report = await api('team_reference_whiteboard_files',{teamId:request.teamId,paths});
+  return activeWhiteboardTeam(request) ? whiteboardFileResult(request,report).files : [];
+}
+
+async function copyWhiteboardFiles(request, location) {
+  const library = whiteboardCopyLibrary(location);
+  if (!library) throw Error('请选择当前团队资产库中的有效存放目录。');
+  const {paths,files:blobs} = request;
+  if (blobs.reduce((bytes,file) => bytes + file.size,0) > whiteboardPasteBytes) {
+    throw Error('剪贴板文件合计不能超过 16 MB。较大的文件可先保存，再从资源管理器拖入。');
+  }
+  if (ingestBusy) throw Error('正在导入素材，请等本次导入完成。');
+  ingestBusy = true;
+  try {
+    const files = [];
+    for (const blob of blobs) {
+      if (!activeWhiteboardTeam(request)) return {files:[]};
+      files.push(await whiteboardFileBytes(blob));
+    }
+    if (!activeWhiteboardTeam(request)) return {files:[]};
+    const report = await api('team_import_whiteboard_files', {
+      teamId:request.teamId,libraryId:location.libraryId,folder:location.folder,paths,files,
+    });
+    if (!activeWhiteboardTeam(request)) return {files:[]};
+    if (report.files.length && !report.indexPending) {
+      await team.pending?.catch(() => {});
+      if (!activeWhiteboardTeam(request)) return {files:[]};
+      await refreshTeam().catch(() => {});
+    }
+    return activeWhiteboardTeam(request) ? whiteboardFileResult(request,report,library) : {files:[]};
+  } finally {
+    ingestBusy = false;
+  }
+}
+
+const whiteboardFileFolderHint = '请先在「白板缓存」设置文件存放目录。';
+
+async function addWhiteboardFileReferences(request) {
+  if (!activeWhiteboardTeam(request)) return null;
+  request = await classifyWhiteboardFiles(request);
+  if (!request) return {files:[]};
+  const {workspaceKey,nasPaths} = request;
+  const files = await referenceWhiteboardFiles(request,nasPaths).catch(failure => {
+    if (activeWhiteboardTeam(request)) toast(String(failure?.message || failure),true);
+    return [];
+  });
+  if (activeWhiteboardTeam(request) && (request.paths.length || request.files.length)) {
+    const location = whiteboard.fileFolder();
+    if (!whiteboardCopyLibrary(location)) toast(whiteboardFileFolderHint,true);
+    else {
+      try {
+        files.push(...(await copyWhiteboardFiles(request,location)).files);
+      } catch (failure) {
+        if (activeWhiteboardTeam(request)) toast(String(failure?.message || failure),true);
+      }
+    }
+  }
+  return {workspaceKey,files};
+}
+
+async function copyCachedWhiteboardImages(request) {
+  const location = whiteboard.fileFolder();
+  if (!whiteboardCopyLibrary(location)) throw Error(whiteboardFileFolderHint);
+  const files = request.files.slice(0,request.limit);
+  let copied = 0;
+  for (let start = 0; start < files.length && activeWhiteboardTeam(request);) {
+    let end = start + 1;
+    let bytes = files[start].size;
+    while (end < files.length && end - start < whiteboardFileBatch && bytes + files[end].size <= whiteboardPasteBytes) {
+      bytes += files[end++].size;
+    }
+    const result = await copyWhiteboardFiles({...request,paths:[],files:files.slice(start,end)},location).catch(failure => {
+      if (!copied) throw failure;
+      return {files:[]};
+    });
+    copied += result.files.length;
+    if (result.files.length < end - start) break;
+    start = end;
+  }
+  return {copied};
+}
+
+async function importPastedWhiteboardFiles(request) {
+  if (!activeWhiteboardTeam(request)) return null;
+  if (request.readClipboard) {
+    const paths = await api('read_whiteboard_clipboard_files').catch(() => []);
+    if (!activeWhiteboardTeam(request)) return {files:[]};
+    if (paths.length) request = {...request,paths,files:[]};
+  }
+  if (!request.paths.length && !request.files.length) return null;
+  return addWhiteboardFileReferences(request);
+}
+
+function revealWhiteboardFile(file) {
+  if (!activeWhiteboardTeam(file)) throw Error('请在文件所属的团队白板中定位。');
+  const {teamId,libraryId,path,unc,isFolder} = file;
+  return api('team_reveal_whiteboard_file',{teamId,libraryId,path,unc,isFolder});
+}
+
+const whiteboardFileAssets = new WeakMap();
+
+function indexedWhiteboardFile(file) {
+  const library = whiteboardFileLibraries().find(item => item.id === file.libraryId);
+  const assets = library && assetsByLibrary.get(library.id);
+  if (!assets || !file.path) return null;
+  let byPath = whiteboardFileAssets.get(assets);
+  if (!byPath) {
+    byPath = new Map();
+    for (const asset of assets) {
+      const path = relativeAssetPath(asset,library);
+      if (path) byPath.set(path,asset);
+    }
+    whiteboardFileAssets.set(assets,byPath);
+  }
+  return byPath.get(file.path);
+}
+
+function whiteboardPreviewImage(url) {
+  return typeof url === 'string' && url.length <= 768_000 &&
+    /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$/.test(url) ? url : null;
+}
+
+async function loadWhiteboardFilePreview(file, {signal} = {}) {
+  const workspaceKey = collectionScope();
+  const active = () => !signal?.aborted && activeWhiteboardTeam({...file,workspaceKey});
+  if (file.isFolder || !active()) return null;
+  const asset = indexedWhiteboardFile(file);
+  if (asset) {
+    const cached = whiteboardPreviewImage(thumbCache.get(asset.id));
+    if (cached) return cached;
+    const result = await api('read_preview',{id:asset.id,mode:'thumbnail_cached',size:256}).catch(() => null);
+    if (!active()) return null;
+    const url = whiteboardPreviewImage(result?.url);
+    if (url) return url;
+  }
+  const {teamId,libraryId,path,unc} = file;
+  const url = await api('team_preview_whiteboard_file',{teamId,libraryId,path,unc}).catch(() => null);
+  return active() ? whiteboardPreviewImage(url) : null;
+}
+
 const teamAssetMessages = initTeamAssetMessages({
   api,
   context() {
@@ -1580,11 +1892,10 @@ async function favorite(id, value) {
 async function setFavorite(a, value) {
   if (isTeamAsset(a)) {
     await teamOrganization.setFavorite(a.id, value);
-    const current = assetsById.get(a.id);
-    if (current) current.favorite = value;
   } else {
     const result = await api('patch_asset', {id: a.id, patch: {favorite: value}});
     Object.assign(a, result);
+    if (!a.favorite) delete a.favoriteAt;
   }
   navSummary = null;
 }
@@ -1603,6 +1914,7 @@ function resetFilters(restoreFolder = false, assetWindowAnchor = null) {
   return renderAssets();
 }
 function enterLocation(view, library = null, folder = '', collection = null, assetId = null) {
+  if ((view === 'favorites') !== (state.view === 'favorites')) state.sort = defaultAssetSort(view);
   Object.assign(state, {view, library, folder, collection});
   markedAssets.clear();
   markedAnchor = null;
@@ -1618,10 +1930,11 @@ function setView(view) {
 function captureWorkbenchPage() {
   const {view, library, folder, collection, recursive, kind, tag, search, sort, selected, limit,
     formatIncludes, formatExcludes, tagIncludes, tagExcludes, rating, workflow, quickFilters,
-    fileNameQuery, assetWindowAnchor} = state;
+    fileNameQuery, assetWindowAnchor, layout, density, gridZoom} = state;
   return {
     criteria:structuredClone({view, library, folder, collection, recursive, kind, tag, search, sort, selected, limit,
-      formatIncludes, formatExcludes, tagIncludes, tagExcludes, rating, workflow, quickFilters, fileNameQuery, assetWindowAnchor}),
+      formatIncludes, formatExcludes, tagIncludes, tagExcludes, rating, workflow, quickFilters,
+      fileNameQuery, assetWindowAnchor, layout, density, gridZoom}),
     text:assetSearchInput.value,
     searchExpanded:assetSearchToggle.getAttribute('aria-expanded') === 'true',
     marked:[...markedAssets],
@@ -1709,6 +2022,11 @@ function updateMarks() {
     card.querySelector('[data-mark]').setAttribute('aria-pressed', String(marked));
   }
   renderBulkBar();
+}
+function clearMarkedAssets() {
+  markedAssets.clear();
+  markedAnchor = null;
+  updateMarks();
 }
 function toggleMark(id, range = false) {
   if (range && markedAnchor) {
@@ -1863,9 +2181,11 @@ const assetFilterToolbar = initAssetFilterToolbar({
   onError: error,
 });
 $('#search').addEventListener('input',e=>{state.search=e.target.value.trim().toLowerCase().replaceAll('\\','/');state.limit=60;if(!isAssetView())state.view='all';renderNav();renderAssets();});
-$('#sort').addEventListener('change', event => {
-  state.sort = event.target.value;
-  libraryPreferences.setItem('nexus-asset-sort', state.sort);
+assetSort.addEventListener('change', () => {
+  state.sort = assetSort.value;
+  libraryPreferences.setItem(sortPreferenceKey(state.view), state.sort);
+  state.assetWindowAnchor = null;
+  $('#browser-scroll').scrollTop = 0;
   renderAssets();
 });
 $('#rating-filter').addEventListener('change', event => {
@@ -1883,8 +2203,8 @@ function clearAssetModeHighlight() {
   assetModeHighlight?.classList.remove('asset-view-located');
   assetModeHighlight = null;
 }
-function selectMode(list) {
-  if (state.list === list || !isAssetView()) return;
+function selectMode(layout) {
+  if (state.layout === layout || !isAssetView()) return;
   clearAssetModeHighlight();
   const id = state.selected;
   const grid = $('#asset-grid');
@@ -1892,8 +2212,8 @@ function selectMode(list) {
   if (cardSelector && !grid.querySelector(cardSelector) && displayedAssetRows.some(asset => asset.id === id)) {
     state.assetWindowAnchor = id;
   }
-  state.list = list;
-  libraryPreferences.setItem('nexus-list-mode', String(list));
+  state.layout = layout;
+  libraryPreferences.setItem(assetLayoutKey, layout);
   renderAssets();
   const card = cardSelector && grid.querySelector(cardSelector);
   if (!card) return;
@@ -1905,9 +2225,10 @@ function selectMode(list) {
   card.classList.add('asset-view-located');
   assetModeHighlightTimer = setTimeout(clearAssetModeHighlight, 1600);
 }
-$('#grid-view').addEventListener('click', () => selectMode(false));
-$('#list-view').addEventListener('click', () => selectMode(true));
-function renderGridSize() {
+for (const [layout, selector] of Object.entries(assetViewButtons)) {
+  $(selector).addEventListener('click', () => selectMode(layout));
+}
+function renderGridSize(options) {
   const grid = $('#asset-grid');
   const control = $('#view-density');
   const custom = control.querySelector('[value="custom"]');
@@ -1916,7 +2237,8 @@ function renderGridSize() {
   grid.style.setProperty('--grid-zoom-width', state.gridZoom ? `${state.gridZoom}px` : '');
   custom.textContent = state.gridZoom ? `自定 · ${Math.round(state.gridZoom)} px` : '自定';
   control.value = state.gridZoom ? 'custom' : state.density;
-  control.disabled = state.list;
+  control.disabled = state.layout === 'list';
+  assetMasonry.sync(options);
 }
 $('#view-density').addEventListener('change', event => {
   if (event.target.value === 'custom') return;
@@ -1927,7 +2249,7 @@ $('#view-density').addEventListener('change', event => {
   renderGridSize();
 });
 $('#browser-scroll').addEventListener('wheel', event => {
-  if ((!event.ctrlKey && !event.metaKey) || state.list || !isAssetView()) return;
+  if ((!event.ctrlKey && !event.metaKey) || state.layout === 'list' || !isAssetView()) return;
   event.preventDefault();
   if (!event.deltaY) return;
   const scroll = event.currentTarget;
@@ -1941,7 +2263,7 @@ $('#browser-scroll').addEventListener('wheel', event => {
   if (width === state.gridZoom) return;
   const anchor = card?.getBoundingClientRect();
   state.gridZoom = width;
-  renderGridSize();
+  renderGridSize({preserveAnchor:!anchor});
   if (anchor) scroll.scrollTop += card.getBoundingClientRect().top - anchor.top;
   libraryPreferences.setItem(gridZoomKey, String(width));
 }, {passive: false});
@@ -1977,11 +2299,7 @@ $('#select-visible').addEventListener('click', () => {
   for (const card of $$('#asset-grid .asset-card')) markedAssets.add(card.dataset.id);
   updateMarks();
 });
-$('#clear-selection').addEventListener('click', () => {
-  markedAssets.clear();
-  markedAnchor = null;
-  updateMarks();
-});
+$('#clear-selection').addEventListener('click', clearMarkedAssets);
 $('#detail-favorite').addEventListener('click',()=>favorite(state.selected).catch(error));$('#clear-filters').addEventListener('click',()=>resetFilters());$('#load-more').addEventListener('click',()=>{state.limit+=60;renderAssets();});
 for (const id of ['#asset-name', '#asset-tag-input', '#asset-notes', '#asset-rating', '#asset-workflow']) {
   $(id).addEventListener('input', () => { editor.dirty = true; });
@@ -2166,13 +2484,15 @@ for (const selector of ['#settings', '#connection-summary']) {
     dccConnections.show();
   });
 }
+const releaseNotes = initNexusReleaseNotes({dialog:$('#nexus-release-notes'),button:$('#about-release-notes')});
 const nexusUpdater = initNexusUpdater({
   api, enabled:native, panel:$('#nexus-updater'),
   indicators:[topTools.querySelector('summary'), $('#about-button'), $('#sidebar-version')],
+  rememberReleaseNotes:releaseNotes.remember,
   canRestart() {
     return !pendingNativeRequests && !editor.dirty && !editor.saving &&
       !folderScan && !ingestBusy && !publishing &&
-      !whiteboard.busyForUpdate() &&
+      !whiteboard.busyForUpdate() && !workbenchTabs.busy() &&
       !$('dialog[open]:not(#about-dialog), .asset-menu:not(.hidden), #files-drop-overlay:not(.hidden), .dragging-assets, .marquee-selecting');
   },
 });
@@ -2226,11 +2546,12 @@ async function showClientVersion() {
     const number = await window.__TAURI__.app.getVersion();
     version.textContent = number;
     $('#sidebar-version').textContent = '版本 ' + number;
+    return number;
   } catch {
     version.textContent = '无法读取版本号';
   }
 }
-showClientVersion();
+const clientVersion = showClientVersion();
 for (const selector of ['#import-button', '#add-library-small']) {
   $(selector).addEventListener('click', () => showAssetImport());
 }
@@ -2873,12 +3194,11 @@ function loadLibraryPreferences() {
   workbenchTabs.resetScope();
   const zoom = Number(libraryPreferences.getItem(gridZoomKey));
   const density = libraryPreferences.getItem('nexus-grid-density');
-  const sort = libraryPreferences.getItem('nexus-asset-sort');
   const resolution = Number(libraryPreferences.getItem(thumbnailSizeKey));
-  state.list = libraryPreferences.getItem('nexus-list-mode') === 'true';
+  state.layout = preferredAssetLayout(libraryPreferences);
   state.density = ['compact', 'normal', 'large'].includes(density) ? density : 'normal';
   state.gridZoom = zoom >= gridZoomLimits.min && zoom <= gridZoomLimits.max ? zoom : 0;
-  state.sort = [...$('#sort').options].some(option => option.value === sort) ? sort : 'added';
+  state.sort = defaultAssetSort(state.view);
   state.recursive = libraryPreferences.getItem('nexus-include-descendants') !== 'false';
   $('#sort').value = state.sort;
   $('#include-descendants').checked = state.recursive;
@@ -3140,6 +3460,8 @@ function previewChanged(before, after) {
 }
 
 function invalidateCover(id) {
+  const asset = assetsById.get(id);
+  if (asset) assetMasonry.forgetAspect(masonryAspectKey(asset));
   coverRevisions.set(id, (coverRevisions.get(id) || 0) + 1);
   thumbCacheBytes -= thumbCache.get(id)?.length || 0;
   thumbCache.delete(id);
@@ -3912,8 +4234,39 @@ async function addAssetTag(asset, tag) {
   await writeMetadata(asset, {tags: [...asset.tags, tag]});
 }
 
-async function dropAssets(target, ids, scope) {
+function passiveWhiteboardStage(hit, x, y) {
+  const stage = hit?.closest('.workspace-pane-preview')?.querySelector('[data-whiteboard-project] .whiteboard-stage');
+  if (!stage) return null;
+  const {left, top, right, bottom} = stage.getBoundingClientRect();
+  return x >= left && x < right && y >= top && y < bottom ? stage : null;
+}
+
+async function withWhiteboardDrop(stage, scope, position, insert) {
+  const sourcePane = $('#browser-scroll').closest('.workspace-pane');
+  const sourceTab = workbenchTabs.activeId();
+  const targetPane = stage.closest('.workspace-pane');
+  const targetTab = targetPane.getAttribute('aria-labelledby');
+  const projectId = stage.closest('[data-whiteboard-project]').dataset.whiteboardProject;
+  const {left, top} = stage.getBoundingClientRect();
+  const offset = {x:position.x - left, y:position.y - top, media:position.media};
+  if (!await workbenchTabs.focusPane(targetPane, targetTab) || scope !== collectionScope()) return;
+  try {
+    return await insert(projectId, offset);
+  } finally {
+    if (scope === collectionScope() && workbenchTabs.activeId() === targetTab &&
+        whiteboard.captureProject() === projectId && !whiteboard.busyForUpdate() && !$('dialog[open]')) {
+      await workbenchTabs.focusPane(sourcePane, sourceTab);
+    }
+  }
+}
+
+async function dropAssets(target, ids, scope, position) {
   if (!ids.length) return;
+  if (target.matches('.whiteboard-stage')) {
+    const assetIds = whiteboardMediaIds(ids);
+    return withWhiteboardDrop(target, scope, position, (projectId, offset) =>
+      whiteboard.dropAssetReferences(projectId, {workspaceKey:scope, assetIds}, offset));
+  }
   if (target.dataset.teamMessageRecipient || target.hasAttribute('data-team-message-overflow')) {
     const member = team.active && team.online.find(item => item.id === target.dataset.teamMessageRecipient && !item.self);
     if (member) await teamAssetMessages.send(member, ids);
@@ -3982,6 +4335,19 @@ const c4dDropImport = initC4dDropImport({
 
 const workspaceDrag = initWorkspaceDrag({
   dropSelector: '#collections [data-collection], #new-collection, #main-nav [data-view="favorites"], #sidebar-tags [data-tag], [data-drop-session], [data-team-message-recipient], [data-team-message-overflow]',
+  canvasMediaId(ids, grabbedId) {
+    if (!$('.workspace-pane-preview [data-whiteboard-project] .whiteboard-stage')) return null;
+    const mediaIds = whiteboardMediaIds(ids);
+    return mediaIds.includes(grabbedId) ? grabbedId : mediaIds[0];
+  },
+  async loadCanvasPreview(id, scope) {
+    const media = await resolveWhiteboardAssetMedia(id, scope);
+    return media.kind === 'video' ? media.poster : media.url;
+  },
+  canvasDropTarget(hit, x, y, ids) {
+    const stage = passiveWhiteboardStage(hit, x, y);
+    return stage && ids.some(id => isWhiteboardReferenceMedia(assetsById.get(id))) ? stage : null;
+  },
   scope: collectionScope,
   allowExternalDrag: nativeDragOut,
   waitForExternalDrag: () => api('wait_asset_drag_exit'),
@@ -4125,9 +4491,10 @@ function renderAssetMenuRows() {
   }
   const rows = groups.map(([name, entries]) =>
     `<div class="asset-menu-group" role="group"${name ? ` aria-label="${escape(name)}"` : ''}>${
-      entries.map(([action, glyph, text, shortcut]) =>
+      entries.map(([action, glyph, text, shortcut, disabled]) =>
         `<button type="button" role="menuitem" tabindex="-1" data-action="${escape(action)}" title="${escape(text)}"${
-          shortcut ? ` aria-keyshortcuts="${escape(shortcut)}"` : ''}>${
+          shortcut ? ` aria-keyshortcuts="${escape(shortcut)}"` : ''}${disabled ? ' disabled' : ''}${
+          action.startsWith('group:') ? ' aria-haspopup="menu"' : ''}>${
           icon(glyph)}<span class="asset-menu-label">${escape(text)}</span>${
           shortcut ? `<kbd aria-hidden="true">${escape(shortcut)}</kbd>`
             : action.startsWith('group:') ? icon('chevron', 'asset-menu-chevron') : ''}</button>`).join('')
@@ -4156,7 +4523,7 @@ function renderAssetMenuRows() {
 }
 
 function focusAssetMenuItem(action) {
-  const items = [...assetMenu.querySelectorAll('[role="menuitem"]')];
+  const items = [...assetMenu.querySelectorAll('[role="menuitem"]:not(:disabled)')];
   (items.find(item => item.dataset.action === action) || items[0])?.focus({preventScroll:true});
 }
 
@@ -4177,8 +4544,19 @@ function showAssetMenu(sections, x, y, label, context) {
 
 function showWorkspaceActions(actions, x, y, label) {
   const scope = collectionScope();
-  workspaceMenuActions = actions.map(([, , run]) => () => { if (scope === collectionScope()) return run(); });
-  showAssetMenu([['', actions.map(([glyph, name], index) => [`workspace-action:${index}`, glyph, name])]], x, y, label);
+  const {sections, context, submenus, available} = Array.isArray(actions) ? {sections:[['', actions]]} : actions;
+  workspaceMenuActions = [];
+  const rows = entries => entries.map(([glyph, name, run, shortcut, disabled]) => {
+    if (typeof run === 'string') return ['group:' + run, glyph, name];
+    const index = workspaceMenuActions.push(() => {
+      if (scope === collectionScope() && (!available || available())) return run();
+    }) - 1;
+    return ['workspace-action:' + index, glyph, name, shortcut, disabled];
+  });
+  const menuContext = context && {...context, submenus:Object.fromEntries(Object.entries(submenus || {}).map(
+    ([id, [title, entries]]) => [id, {title, section:[title, rows(entries)]}]
+  ))};
+  showAssetMenu(sections.map(([name, entries]) => [name, rows(entries)]), x, y, label, menuContext);
 }
 
 function showOrganizeMenu(event) {
@@ -4788,7 +5166,7 @@ async function onFileDrop({payload}) {
   if (state.view === 'whiteboard') {
     filesOverlay.classList.add('hidden');
     if (type === 'drop' && paths?.length && !whiteboard.dropNativeImages(paths, payload.position)) {
-      toast('双击打开一个白板项目后，再拖入图片。');
+      toast('双击打开一个白板项目后，再拖入文件。');
     }
     return;
   }
@@ -4851,7 +5229,7 @@ const teamOrganization = initTeamOrganization({
   onChange(snapshot) {
     if (!team.active) return;
     const key = collectionScope();
-    const favorites = JSON.stringify(snapshot.favoriteIds);
+    const favorites = JSON.stringify([snapshot.favoriteIds, snapshot.favoriteTimes]);
     const collections = JSON.stringify(snapshot.collections);
     const favoritesChanged = priorTeamOrganization?.key !== key || priorTeamOrganization.favorites !== favorites;
     const collectionsChanged = priorTeamOrganization?.key !== key || priorTeamOrganization.collections !== collections;
@@ -4878,6 +5256,13 @@ const creativeSubscriptions = initCreativeSubscriptions({
   personalScope: () => personalWorkspace.id,
   preferences: libraryPreferences,
   openWeb: openWebsite,
+  whiteboardLinkDrop: {
+    scope: collectionScope,
+    available: () => Boolean($('#workspace-pane-deck .workspace-pane-preview [data-whiteboard-project] .whiteboard-stage')),
+    targetAt: (x,y) => passiveWhiteboardStage(document.elementFromPoint(x,y), x, y),
+    drop: (stage, text, scope, position) => withWhiteboardDrop(stage, scope, position,
+      (projectId, offset) => whiteboard.dropLink(projectId, text, offset)),
+  },
 });
 const siteNavigation = initBrowserSites({
   navigate: openWebsite,
@@ -4923,7 +5308,12 @@ initBrowserCapture({
     else if (target.kind === 'personal' && !team.active && personalWorkspace.id === target.workspaceId) await refresh().catch(error);
   },
 });
-const whiteboard = initWhiteboardProjects({panel:$('#workspace-whiteboard'), api, notify:toast, resolveAssetImage:resolveWhiteboardAssetMedia});
+const whiteboard = initWhiteboardProjects({panel:$('#workspace-whiteboard'), api, notify:toast,
+  resolveAssetImage:resolveWhiteboardAssetMedia, openLink:openWebsite, locateAsset:locateWhiteboardAsset,
+  loadPresenceAvatar:member => fetchTeamAvatar({id:member.memberId,avatarRevision:member.avatarRevision}),
+  getFileFolders:native ? getWhiteboardFileFolders : undefined,
+  importPastedFiles:importPastedWhiteboardFiles, handleDroppedFiles:addWhiteboardFileReferences,
+  copyCachedImages:copyCachedWhiteboardImages, revealPastedFile:revealWhiteboardFile, loadFilePreview:loadWhiteboardFilePreview});
 const workspacePicker = initWorkspacePicker({
   api,
   native,
@@ -5120,6 +5510,18 @@ const workbenchTabs = initWorkspaceTabs({
   getScope: collectionScope,
   capture: captureWorkbenchPage,
   restore: restoreWorkbenchPage,
+  onPaneLayout: context => workspaceLayout?.setInspectorContext(context),
+  async thumbnail(id) {
+    const cached = thumbCache.get(id);
+    if (cached !== undefined) return cached;
+    const asset = assetsById.get(id);
+    if (!asset) return null;
+    const generation = thumbGeneration;
+    const revision = coverRevisions.get(id);
+    const result = await api('read_preview', {id, mode:'thumbnail_cached', size:thumbnailSize}).catch(() => null);
+    if (generation !== thumbGeneration || coverRevisions.get(id) !== revision || previewChanged(asset, assetsById.get(id))) return null;
+    return result?.url;
+  },
   beforeSwitch() {
     if (editor.saving) {
       toast('资产信息正在保存，请稍后切换标签页');
@@ -5546,7 +5948,18 @@ document.addEventListener('keydown', event => {
     else focusAssetSearch();
   }
   if (!isAssetView()) return;
-  if (event.key === 'Escape') clearAssetModeHighlight();
+  if (event.key === 'Escape') {
+    if (workspaceDrag.cancelActive()) {
+      event.preventDefault();
+      return;
+    }
+    clearAssetModeHighlight();
+    if (!event.repeat && markedAssets.size && assetMenu.classList.contains('hidden')) {
+      event.preventDefault();
+      clearMarkedAssets();
+    }
+    return;
+  }
   if (event.key === ' ' && !active?.matches('button, a') && selected()) {
     event.preventDefault();
     showQuickPreview(state.selected);
@@ -5556,11 +5969,13 @@ document.addEventListener('keydown', event => {
     const index = cards.findIndex(card => card.dataset.id === state.selected);
     const vertical = event.key === 'ArrowUp' || event.key === 'ArrowDown';
     const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
-    const rowSize = state.list || !cards.length ? 1
+    const rowSize = state.layout !== 'grid' || !cards.length ? 1
       : cards.filter(card => card.offsetTop === cards[0].offsetTop).length;
     const offset = (forward ? 1 : -1) * (vertical ? rowSize : 1);
-    const next = cards[Math.max(0,Math.min(cards.length - 1, index + offset))];
-    if (next && !active?.closest('.inspector, .sidebar, .workspace-divider')) {
+    const next = state.layout === 'masonry' && cards[index]
+      ? assetMasonry.cardAtDirection(cards[index], event.key)
+      : cards[Math.max(0,Math.min(cards.length - 1, index + offset))];
+    if (next && !active?.closest('.inspector, .sidebar, .workspace-divider, .workspace-pane-divider')) {
       event.preventDefault();
       selectAsset(next.dataset.id).catch(error);
       next.focus();
@@ -5652,4 +6067,5 @@ try {
   $('#app').classList.remove('app-starting');
   $('#startup-status').classList.add('hidden');
 }
+void clientVersion.then(version => { if (version) releaseNotes.activate(version); });
 void dccConnections.refresh();

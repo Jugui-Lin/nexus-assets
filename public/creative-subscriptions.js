@@ -1,3 +1,6 @@
+import {bindWhiteboardLinkDrag, whiteboardLinkText} from './whiteboard-links.js';
+import {initCreativeVideoReferences} from './creative-video-references.js';
+
 const subscriptionKey = 'nexus-creative-subscriptions-v1';
 const workLayoutKey = 'nexus-creator-work-layout';
 const creatorOrderKey = 'nexus-creator-card-order';
@@ -182,7 +185,7 @@ function normalizedWorks(items, {preserveOrder = false} = {}) {
 }
 
 export function initCreativeSubscriptions({api, native, icon, escape, openWeb, log, notify = () => {},
-  subscriptionScope = () => null, personalScope = () => 'personal', preferences = localStorage}) {
+  subscriptionScope = () => null, personalScope = () => 'personal', preferences = localStorage, whiteboardLinkDrop}) {
   const get = id => document.getElementById(id);
   const section = get('creative-subscriptions');
   const overview = get('creator-overview');
@@ -262,6 +265,51 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
   const errorMessage = failure => String(failure?.message || failure || '团队订阅同步失败').slice(0, 200);
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const creatorMoveEasing = 'cubic-bezier(.2, .8, .2, 1)';
+  const videoReferences = initCreativeVideoReferences({
+    panel:get('creator-video-references'), preferences, describe:describeVideoReference, play:playWork, openWeb:openUrl,
+    icon, escape, notify, whiteboardLinkDrop,
+    readMetadata: native ? async entry => {
+      if (entry.platform === '哔哩哔哩') {
+        const metadata = await api('creative_video_reference_metadata',{url:entry.url});
+        return {title:publicName(metadata?.title),coverUrl:mediaUrl(metadata?.coverUrl)};
+      }
+      const metadata = await api('browser_site_metadata',{url:entry.url});
+      const title = publicName(metadata?.name);
+      const generic = [entry.platform,entry.host,entry.host.replace(/^www\./,'')];
+      return {title:generic.some(value => value.toLowerCase() === title.toLowerCase()) ? '' : title};
+    } : null,
+  });
+
+  function describeVideoReference(value, title, savedCover) {
+    const url = typeof value === 'string' ? creatorUrl(value) : null;
+    if (!url) return null;
+    const youtube = youtubePlayerUrl(url.href);
+    const videoId = youtube ? new URL(youtube).pathname.split('/').at(-1) : '';
+    const bilibili = bilibiliPlayerUrl(url.href);
+    const article = xinpianchangArticleId(url.href);
+    const platform = platformFor(url.href);
+    const source = platform === '其他平台' ? url.hostname : platform;
+    const last = videoId || url.pathname.split('/').filter(Boolean).at(-1);
+    let name = last;
+    try { if (last) name = decodeURIComponent(last); } catch {}
+    const defaultTitle = publicName(name ? source + ' · ' + name : source);
+    const label = publicName(title) || defaultTitle;
+    const coverUrl = mediaUrl(savedCover) || (videoId ? 'https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg' : '');
+    let displayCover = coverUrl;
+    if (bilibili && coverUrl) {
+      const preview = new URL(coverUrl);
+      if (preview.hostname.endsWith('.hdslb.com') && /^\/bfs\/archive\/[\w-]+\.(?:png|jpe?g|webp)$/i.test(preview.pathname)) {
+        preview.pathname += '@480w.webp';
+        displayCover = preview.href;
+      }
+    }
+    if (!whiteboardLinkText({title:label,url:url.href})) return null;
+    return {
+      key: youtube || bilibili || (article ? 'xinpianchang:' + article : url.href),
+      url:url.href, title:label, host:url.host, platform, embedded:Boolean(youtube || bilibili || (native && article)),
+      coverUrl, displayCover, needsMetadata:label === defaultTitle || Boolean(bilibili && !coverUrl),
+    };
+  }
 
   function readWorkLayout() {
     try { return preferences.getItem(workLayoutKey) === 'list' ? 'list' : 'cards'; }
@@ -481,6 +529,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     finishCreatorDrop();
     workspaceEpoch++;
     personalKey = nextPersonalKey;
+    videoReferences.reload();
     creatorOrder = readCreatorOrder();
     workLayout = readWorkLayout();
     updateWorkLayout();
@@ -853,6 +902,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     if (!active) return;
     renderLibraryStatus();
     const creator = find(selected);
+    videoReferences.setVisible(!creator);
     overview.classList.toggle('hidden', Boolean(creator));
     detail.classList.toggle('hidden', !creator);
     if (creator) renderDetail(creator);
@@ -1212,6 +1262,15 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     else render();
   });
 
+  if (whiteboardLinkDrop) bindWhiteboardLinkDrag(cards, {
+    ...whiteboardLinkDrop,
+    icon, notify,
+    resolve(card) {
+      const creator = find(card.dataset.creatorId);
+      return creator && {title:label(creator), url:creator.url};
+    },
+  });
+
   cards.addEventListener('click', event => {
     const action = event.target.closest('[data-creator-action]')?.dataset.creatorAction;
     const id = event.target.closest('[data-creator-id]')?.dataset.creatorId;
@@ -1399,6 +1458,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     setVisible(visible, keepSelection = false) {
       setWorkspace();
       if (!visible) {
+        videoReferences.setVisible(false);
         endCreatorDrag();
         finishCreatorDrop();
       }

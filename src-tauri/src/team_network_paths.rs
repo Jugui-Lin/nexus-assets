@@ -56,7 +56,7 @@ impl UncDirectory {
     }
 
     pub(super) fn relative_to(&self, root: &Self) -> Option<String> {
-        if !self.host.eq_ignore_ascii_case(&root.host)
+        if !self.same_host(root)
             || self.components.len() < root.components.len()
             || !self
                 .components
@@ -71,6 +71,21 @@ impl UncDirectory {
 
     pub(super) fn text(&self) -> String {
         format!("\\\\{}\\{}", self.host, self.components.join("\\"))
+    }
+
+    pub(super) fn same_host(&self, other: &Self) -> bool {
+        self.host.eq_ignore_ascii_case(&other.host)
+    }
+
+    pub(super) fn relative_to_share(&self) -> (String, String) {
+        (
+            format!("\\\\{}\\{}", self.host, self.components[0]),
+            self.components[1..].join("/"),
+        )
+    }
+
+    pub(super) fn basename(&self) -> &str {
+        &self.components[self.components.len() - 1]
     }
 
     pub(super) fn trusted(
@@ -164,15 +179,29 @@ mod tests {
 
     #[test]
     fn recognizes_ordinary_unc_ancestry_and_explicit_nas_host_trust() {
-        let root = UncDirectory::parse(r"\\192.0.2.10\StudioShare\Assets").unwrap();
+        let root = UncDirectory::parse(r"\\192.168.0.106\Dotin_Work\_Dotin_Asset").unwrap();
         let child =
-            UncDirectory::parse(r"\\?\UNC\192.0.2.10\studioshare\assets\预览图").unwrap();
+            UncDirectory::parse(r"\\?\UNC\192.168.0.106\dotin_work\_dotin_asset\预览图").unwrap();
         assert_eq!(child.relative_to(&root).as_deref(), Some("预览图"));
-        assert!(child.trusted("http://192.0.2.10:47822", std::iter::empty::<&str>()));
+        assert!(child.trusted("http://192.168.0.106:47822", std::iter::empty::<&str>()));
         assert!(child.trusted("https://workspace.example", [root.text()]));
         assert!(!child.trusted("https://workspace.example", [r"\\192.168.0.107\team"]));
-        assert!(UncDirectory::parse(r"\\192.0.2.10\StudioShare\..\private").is_none());
-        assert!(UncDirectory::parse(r"\\192.0.2.10\ADMIN$\config").is_none());
-        assert!(UncDirectory::parse(r"\\192.0.2.10\StudioShare\.nexus").is_none());
+        let attachment =
+            UncDirectory::parse(r"\\192.168.0.106\other-share\原稿\文档.docx").unwrap();
+        assert!(attachment.same_host(&root));
+        assert!(attachment.relative_to(&root).is_none());
+        assert_eq!(
+            attachment.relative_to_share(),
+            (
+                r"\\192.168.0.106\other-share".into(),
+                "原稿/文档.docx".into(),
+            )
+        );
+        let share = UncDirectory::parse(r"\\192.168.0.106\other-share").unwrap();
+        assert_eq!(share.relative_to_share().1, "");
+        assert_eq!(share.basename(), "other-share");
+        assert!(UncDirectory::parse(r"\\192.168.0.106\Dotin_Work\..\private").is_none());
+        assert!(UncDirectory::parse(r"\\192.168.0.106\ADMIN$\config").is_none());
+        assert!(UncDirectory::parse(r"\\192.168.0.106\Dotin_Work\.nexus").is_none());
     }
 }

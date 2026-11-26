@@ -1,19 +1,65 @@
 use crate::asset_files::stage_copy;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use nexus_core::{
     clean_path,
     team::{asset_format, relative_path, MAX_FILES},
     FileFingerprint,
 };
 use same_file::Handle;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, Metadata},
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
 use walkdir::WalkDir;
+
+pub(crate) const MAX_WHITEBOARD_FILES: usize = 64;
+pub(crate) const MAX_WHITEBOARD_FILE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WhiteboardFileBytes {
+    pub(crate) name: String,
+    pub(crate) base64: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WhiteboardFileReference {
+    pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) is_folder: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) library_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unc: Option<String>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WhiteboardFileReport {
+    pub(crate) files: Vec<WhiteboardFileReference>,
+    pub(crate) failed: usize,
+    pub(crate) errors: Vec<String>,
+    pub(crate) index_pending: bool,
+}
+
+impl WhiteboardFileReport {
+    pub(crate) fn add(&mut self, source: &Path, result: Result<WhiteboardFileReference, String>) {
+        match result {
+            Ok(file) => self.files.push(file),
+            Err(error) => {
+                self.failed += 1;
+                record_issue(&mut self.errors, source, error);
+            }
+        }
+    }
+}
 
 fn path_key(path: &Path) -> PathBuf {
     if cfg!(windows) {
@@ -77,6 +123,35 @@ pub(crate) fn team_destination(mount: &Path, folder: &str) -> Result<(PathBuf, P
     share_path(&relative)?;
     check_directory(&root.join(&relative))?;
     Ok((root, relative))
+}
+
+pub(crate) fn team_attachment_path(mount: &Path, path: &str) -> Result<(PathBuf, bool), String> {
+    let relative = if path.is_empty() {
+        PathBuf::new()
+    } else {
+        relative_path(path).ok_or("附件路径无效")?
+    };
+    share_path(&relative)?;
+    let mut full = fs::canonicalize(mount).map_err(|_| "无法访问附件所在 NAS 目录")?;
+    if !full.is_dir() {
+        return Err("无法访问附件所在 NAS 目录".into());
+    }
+    let mut is_folder = true;
+    let mut parts = relative.iter().peekable();
+    while let Some(part) = parts.next() {
+        full.push(part);
+        let metadata =
+            fs::symlink_metadata(&full).map_err(|_| "找不到附件，请检查 NAS 挂载或文件位置")?;
+        is_folder = metadata.is_dir();
+        if !ordinary_entry(&metadata) || (parts.peek().is_some() && !is_folder) {
+            return Err("附件必须是 NAS 目录内的实际文件或文件夹".into());
+        }
+    }
+    let actual = fs::canonicalize(&full).map_err(|_| "找不到附件，请检查 NAS 挂载或文件位置")?;
+    if path_key(&actual) != path_key(&full) {
+        return Err("附件必须是 NAS 目录内的实际文件或文件夹".into());
+    }
+    Ok((actual, is_folder))
 }
 
 pub(crate) fn mounted_folder(mount: &Path, canonical_folder: &Path) -> Option<PathBuf> {
@@ -386,6 +461,107 @@ impl CopyTarget<'_> {
     }
 }
 
+pub(crate) fn whiteboard_file_batch_size(count: usize) -> Result<(), String> {
+    if !(1..=MAX_WHITEBOARD_FILES).contains(&count) {
+        return Err(format!("每次请选择 1 到 {MAX_WHITEBOARD_FILES} 个附件文件"));
+    }
+    Ok(())
+}
+
+fn publish_whiteboard_file(
+    target: &mut CopyTarget<'_>,
+    folder: &Path,
+    source: &Path,
+    name: &str,
+) -> Result<WhiteboardFileReference, String> {
+    let valid_name = relative_path(name).filter(|path| path.components().count() == 1);
+    if valid_name.is_none() || name.starts_with('.') || name.encode_utf16().count() > 240 {
+        return Err("附件名称无效或过长".into());
+    }
+    let filename = Path::new(name);
+    let stem = filename
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(name);
+    let extension = filename.extension().and_then(|value| value.to_str());
+    for number in 1..=1000 {
+        let candidate = if number == 1 {
+            name.to_owned()
+        } else if let Some(extension) = extension {
+            format!("{stem} ({number}).{extension}")
+        } else {
+            format!("{stem} ({number})")
+        };
+        let relative = share_path(&folder.join(&candidate))?;
+        let destination = target.destination.join(&candidate);
+        let mut result = TeamImportReport::default();
+        let published = target.publish_file(source, &destination, false, &mut result)?;
+        if published || result.duplicates != 0 {
+            return Ok(WhiteboardFileReference {
+                name: candidate,
+                is_folder: None,
+                library_id: None,
+                path: Some(relative),
+                unc: None,
+            });
+        }
+    }
+    Err("目标位置存在过多同名附件".into())
+}
+
+pub(crate) fn import_whiteboard_files(
+    mount: &Path,
+    folder: &str,
+    paths: Vec<String>,
+    files: Vec<WhiteboardFileBytes>,
+) -> Result<WhiteboardFileReport, String> {
+    whiteboard_file_batch_size(paths.len() + files.len())?;
+    let (root, relative) = team_destination(mount, folder)?;
+    let destination = root.join(&relative);
+    let mut target = CopyTarget {
+        destination: &destination,
+        staging: None,
+        candidates: ContentCandidates::default(),
+    };
+    let mut report = WhiteboardFileReport::default();
+    for path in paths {
+        let source = Path::new(&path);
+        let result = selected_path(source).and_then(|selected| {
+            if selected.directory {
+                return Err("请选择文件作为白板附件".into());
+            }
+            let name = source
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or("无法识别附件名称")?;
+            publish_whiteboard_file(&mut target, &relative, &selected.path, name)
+        });
+        report.add(source, result);
+    }
+    let mut remaining = MAX_WHITEBOARD_FILE_BYTES;
+    for file in files {
+        let result = (|| {
+            if file.base64.len() > remaining.div_ceil(3) * 4 {
+                return Err("浏览器附件单次最多 16 MB".into());
+            }
+            let decoded = STANDARD
+                .decode(&file.base64)
+                .map_err(|_| "无法读取浏览器附件")?;
+            remaining = remaining
+                .checked_sub(decoded.len())
+                .ok_or("浏览器附件单次最多 16 MB")?;
+            let mut source = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+            source
+                .write_all(&decoded)
+                .map_err(|error| error.to_string())?;
+            let source = source.into_temp_path();
+            publish_whiteboard_file(&mut target, &relative, &source, &file.name)
+        })();
+        report.add(Path::new(&file.name), result);
+    }
+    Ok(report)
+}
+
 pub(crate) fn import_team_paths(
     mount: &Path,
     destination: &str,
@@ -574,6 +750,57 @@ pub(crate) fn import_team_paths(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn whiteboard_import_keeps_unindexed_files_and_avoids_name_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        let mount = root.path().join("nas");
+        let inbox = mount.join("白板附件");
+        fs::create_dir_all(&inbox).unwrap();
+        let input = root.path().join("报告.docx");
+        fs::write(&input, b"Explorer file").unwrap();
+        let browser_file = |name: &str, content: &[u8]| WhiteboardFileBytes {
+            name: name.into(),
+            base64: STANDARD.encode(content),
+        };
+        let report = import_whiteboard_files(
+            &mount,
+            "白板附件",
+            vec![clean_path(&input)],
+            vec![
+                browser_file("报告.docx", b"Browser file"),
+                browser_file("报告.docx", b"Explorer file"),
+                browser_file("../outside.txt", b"outside"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(report.failed, 1, "{:?}", report.errors);
+        assert_eq!(report.files.len(), 3);
+        assert_eq!(report.files[0].path.as_deref(), Some("白板附件/报告.docx"));
+        assert_eq!(
+            report.files[1].path.as_deref(),
+            Some("白板附件/报告 (2).docx")
+        );
+        assert_eq!(report.files[2].path, report.files[0].path);
+        assert_eq!(fs::read(inbox.join("报告.docx")).unwrap(), b"Explorer file");
+        assert_eq!(
+            fs::read(inbox.join("报告 (2).docx")).unwrap(),
+            b"Browser file"
+        );
+        assert_eq!(fs::read(&input).unwrap(), b"Explorer file");
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 2);
+        let (file, is_folder) = team_attachment_path(&mount, "白板附件/报告 (2).docx").unwrap();
+        assert!(!is_folder);
+        assert!(same_file::is_same_file(file, inbox.join("报告 (2).docx")).unwrap());
+        assert!(team_attachment_path(&mount, "../报告.docx").is_err());
+        assert!(team_attachment_path(&mount, "白板附件/报告.docx/child").is_err());
+        let (selected, is_folder) = team_attachment_path(&mount, "白板附件").unwrap();
+        assert!(is_folder);
+        assert!(same_file::is_same_file(selected, inbox).unwrap());
+        let (root, is_folder) = team_attachment_path(&mount, "").unwrap();
+        assert!(is_folder);
+        assert!(same_file::is_same_file(root, mount).unwrap());
+    }
+
     use super::*;
 
     fn paths(items: &[&Path]) -> Vec<String> {

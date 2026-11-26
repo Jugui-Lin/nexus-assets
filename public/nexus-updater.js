@@ -3,7 +3,7 @@ const idlePeriod = 5 * minute;
 const checkPeriod = 60 * minute;
 const retryPeriod = 5 * minute;
 
-export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) {
+export function initNexusUpdater({api, enabled, panel, indicators, canRestart, rememberReleaseNotes}) {
   if (!enabled) return {opened() {}};
   panel.hidden = false;
   const button = panel.querySelector('button');
@@ -70,6 +70,7 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart}) 
       try {
         const previousVersion = availableVersion();
         update = await api('check_nexus_update');
+        if (update?.available) rememberReleaseNotes?.(update.version,update.notes);
         if (availableVersion() !== previousVersion) {
           preparedVersion = undefined;
           retryAt = 0;

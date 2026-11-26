@@ -66,6 +66,7 @@ def load_module(name):
 
 class SmartImporter:
     scoped_preferences = True
+    max_texture_bindings = True
 
     def __init__(self, c4d, app_root):
         self.c4d = c4d
@@ -158,8 +159,9 @@ class SmartImporter:
                             plan["max_material_settings"] = scene_settings["materials"]
                         if scene_settings.get("lights"):
                             plan["max_light_settings"] = scene_settings["lights"]
-                    restore_textures = scene_import is None or scene_import["materials"] and scene_import["textures"]
-                    if mode == "direct" and not export and restore_textures:
+                    restore = scene_import is None or scene_import["materials"] and scene_import["textures"]
+                    if mode == "direct" and not export and restore:
+                        plan["restore_scene_textures"] = True
                         bindings = self.max_decode.texture_bindings(plan["path"], source)
                         if bindings:
                             plan["scene_material_maps"] = bindings
@@ -284,7 +286,7 @@ class SmartImporter:
                                  and self.materials.wants_octane(c4d, doc, plan.get("renderer", "auto")))
             if options is not None:
                 link_maps = link_maps and options["materials"] and options["textures"] and options["objects"]
-            if options is not None or convert_materials:
+            if options is not None or convert_materials or plan.get("restore_scene_textures"):
                 imported, details = self._merge_filtered(doc, path, options, plan, convert_materials)
             else:
                 link_maps = link_maps and Path(path).suffix.lower() != ".c4d"
@@ -364,6 +366,11 @@ class SmartImporter:
                         conversions.append(self.materials.convert_octane_lights(c4d, doc, imported, plan))
                     except Exception as error:
                         conversions.append("Octane 灯光转换失败：" + (str(error) or type(error).__name__))
+            elif materials and plan.get("restore_scene_textures"):
+                try:
+                    conversion = self.materials.restore_standard_textures(c4d, doc, materials, plan)
+                except Exception as error:
+                    conversion = "标准材质贴图恢复失败：" + (str(error) or type(error).__name__)
             if not doc.StartUndo():
                 raise RuntimeError("无法开启 Cinema 4D 撤销记录。")
             try:

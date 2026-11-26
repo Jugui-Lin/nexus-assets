@@ -427,6 +427,7 @@ fn usable_feed_address(url: &Url, address: IpAddr) -> bool {
             || public_bilibili_profile(url).as_ref() == Some(url)
             || xinpianchang::editor_source(url).as_ref() == Some(url)
             || xinpianchang::work_id(url).is_some()
+            || bilibili::official_video_metadata_route(url)
             || bilibili::playlist_id(url).is_some())
             && matches!(address, IpAddr::V4(ip) if matches!(ip.octets(), [198, 18 | 19, ..])))
 }
@@ -440,6 +441,17 @@ pub(crate) async fn subscription_feed(url: String) -> Result<Feed, String> {
 #[tauri::command]
 pub(crate) async fn xinpianchang_player(input: String) -> Result<Option<String>, String> {
     xinpianchang::player_for_work(&source_url(&input)?).await
+}
+
+#[tauri::command]
+pub(crate) async fn creative_video_reference_metadata(
+    url: String,
+) -> Option<bilibili::VideoReferenceMetadata> {
+    let page = source_url(&url).ok()?;
+    tokio::time::timeout(Duration::from_secs(6), bilibili::video_reference_metadata(&page))
+        .await
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]

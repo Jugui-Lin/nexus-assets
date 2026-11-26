@@ -569,7 +569,7 @@ test('team favorites and collections synchronize independent member edits', {tim
     let request = teamRequest(running.address);
     assert.equal((await request('GET', route)).status, 401);
     assert.deepEqual((await request('GET', route, first)).json, {
-      available:true, revision:0, favoriteIds:[], collections:[],
+      available:true, revision:0, favoriteIds:[], favoriteTimes:{}, collections:[],
     });
 
     const library = {id:randomUUID(), name:'参考资料', watching:false};
@@ -580,9 +580,11 @@ test('team favorites and collections synchronize independent member edits', {tim
     const favorite = id => `${route}/favorites/${id}`;
     const favoriteResults = await Promise.all([[first,firstAsset],[second,secondAsset]].map(([member, id]) =>
       request('PATCH', favorite(id), member, {favorite:true})));
-    assert.ok(favoriteResults.every(result => result.status === 200 && result.json.favorite));
+    assert.ok(favoriteResults.every(result => result.status === 200 && result.json.favorite && result.json.favoriteAt > 0));
     assert.equal((await request('PATCH', favorite(randomUUID()), first, {favorite:true})).status, 404);
-    assert.equal((await request('PATCH', favorite(firstAsset), second, {favorite:true})).json.revision, 2);
+    const repeatFavorite = (await request('PATCH', favorite(firstAsset), second, {favorite:true})).json;
+    assert.equal(repeatFavorite.revision, 2);
+    assert.equal(repeatFavorite.favoriteAt, favoriteResults[0].json.favoriteAt);
 
     const created = await request('POST', `${route}/collections`, first, {name:'References'});
     assert.equal(created.status, 200);
@@ -594,6 +596,9 @@ test('team favorites and collections synchronize independent member edits', {tim
     assert.equal((await request('PATCH', collection+'/members', first, {assetIds:[thirdAsset,randomUUID()],include:true})).status, 404);
     const shared = (await request('GET', route, second)).json;
     assert.deepEqual(shared.favoriteIds.sort(), [firstAsset,secondAsset].sort());
+    assert.deepEqual(shared.favoriteTimes, {
+      [firstAsset]:favoriteResults[0].json.favoriteAt, [secondAsset]:favoriteResults[1].json.favoriteAt,
+    });
     assert.deepEqual(shared.collections[0].assetIds.sort(), [firstAsset,secondAsset].sort());
     assert.equal(shared.revision, 5);
     assert.equal((await request('GET', 'catalog/full', second)).json.revision, catalog.revision);
@@ -606,10 +611,12 @@ test('team favorites and collections synchronize independent member edits', {tim
     request = teamRequest(running.address);
     const restarted = (await request('GET', route, first)).json;
     assert.deepEqual(restarted.collections, [renamed.json]);
+    assert.deepEqual(restarted.favoriteTimes, shared.favoriteTimes);
     assert.equal((await request('PATCH', favorite(firstAsset), first, {favorite:false})).json.favorite, false);
     assert.deepEqual((await request('DELETE', collection, second)).json, {removed:true});
     const final = (await request('GET', route, first)).json;
     assert.deepEqual(final.favoriteIds, [secondAsset]);
+    assert.deepEqual(final.favoriteTimes, {[secondAsset]:favoriteResults[1].json.favoriteAt});
     assert.deepEqual(final.collections, []);
     assert.equal(final.revision, 8);
   } finally {
@@ -633,7 +640,7 @@ test('members link independent directories within configured NAS sources and reu
     {file:'配乐.wav', ext:'wav', kind:'audio', contents:'mock WAVE payload'},
     {file:'工具.py', ext:'py', kind:'script', contents:"from pathlib import Path\nPath(__file__).with_name('index-script-ran.marker').write_text('unexpected')\n"},
   ];
-  const unc = '\\\\192.0.2.10\\StudioShare\\Assets';
+  const unc = '\\\\192.168.0.106\\Dotin_Work\\_Dotin_Asset';
   const environment = {NEXUS_TEAM_SOURCE_ROOTS: JSON.stringify([{id:'assets', path:allowed, unc}])};
   const cli = async (...args) => (await exec(binary, ['--data', database, ...args], {
     windowsHide: true, encoding: 'utf8',

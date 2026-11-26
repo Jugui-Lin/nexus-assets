@@ -4,7 +4,7 @@ const cacheEntries = 4;
 const collectionWrites = new Set(['create_collection', 'rename_collection', 'delete_collection', 'set_collection_membership']);
 
 function emptySnapshot() {
-  return {revision:0, favoriteIds:[], collections:[]};
+  return {revision:0, favoriteIds:[], favoriteTimes:{}, collections:[]};
 }
 
 function assetIds(ids) {
@@ -16,9 +16,19 @@ function collection(input) {
     ? {id:input.id, name:input.name, assetIds:assetIds(input.assetIds)} : null;
 }
 
-function normalized(snapshot) {
+function favoriteTime(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function normalized(snapshot, previousTimes = {}) {
+  const favoriteIds = assetIds(snapshot?.favoriteIds);
+  const favoriteTimes = {};
+  for (const id of favoriteIds) {
+    const time = favoriteTime(snapshot?.favoriteTimes?.[id]) ?? favoriteTime(previousTimes[id]);
+    if (time) favoriteTimes[id] = time;
+  }
   return {revision:Number.isSafeInteger(snapshot?.revision) ? snapshot.revision : 0,
-    favoriteIds:assetIds(snapshot?.favoriteIds),
+    favoriteIds, favoriteTimes,
     collections:(Array.isArray(snapshot?.collections) ? snapshot.collections : []).map(collection).filter(Boolean)};
 }
 
@@ -106,6 +116,13 @@ export function initTeamOrganization({api, context, onChange, notify}) {
     state.favorites = new Set(snapshot.favoriteIds);
   }
 
+  function persist(state) {
+    const signature = JSON.stringify(state.snapshot);
+    if (signature === state.lastCached) return;
+    state.lastCached = signature;
+    storeCache(state.identity, state.snapshot);
+  }
+
   function refresh() {
     const state = selectWorkspace();
     if (!state) return Promise.resolve(null);
@@ -123,13 +140,9 @@ export function initTeamOrganization({api, context, onChange, notify}) {
           if (result?.available !== true || !Array.isArray(result.favoriteIds) || !Array.isArray(result.collections)) {
             throw Error('团队服务未返回收藏和合集。');
           }
-          const snapshot = normalized(result);
-          const signature = JSON.stringify(snapshot);
-          if (signature !== state.lastCached) {
-            state.lastCached = signature;
-            storeCache(state.identity, snapshot);
-          }
+          const snapshot = normalized(result, state.snapshot.favoriteTimes);
           replace(state, snapshot);
+          persist(state);
           state.cached = true;
           state.phase = 'ready';
           state.message = '';
@@ -213,8 +226,16 @@ export function initTeamOrganization({api, context, onChange, notify}) {
   async function saveFavorite(state, id, favorite) {
     const result = await send(state, 'team_set_favorite', {id, favorite});
     if (typeof result?.favorite !== 'boolean') throw Error('团队服务未确认收藏修改。');
-    if (result.favorite) state.favorites.add(id);
-    else state.favorites.delete(id);
+    const times = state.snapshot.favoriteTimes;
+    if (result.favorite) {
+      const time = favoriteTime(result.favoriteAt) ?? times[id] ?? (state.favorites.has(id) ? undefined : Date.now());
+      if (time) times[id] = time;
+      state.favorites.add(id);
+    } else {
+      delete times[id];
+      state.favorites.delete(id);
+    }
+    state.snapshot = {...state.snapshot, favoriteIds:[...state.favorites]};
     return result;
   }
 
@@ -223,7 +244,7 @@ export function initTeamOrganization({api, context, onChange, notify}) {
     if (!state) throw Error('请先进入团队工作空间。');
     return write(state, async () => {
       const result = await saveFavorite(state, id, favorite);
-      state.snapshot = {...state.snapshot, favoriteIds:[...state.favorites]};
+      persist(state);
       return result;
     });
   }
@@ -233,7 +254,10 @@ export function initTeamOrganization({api, context, onChange, notify}) {
     if (!state) return assets;
     state.assets = assets;
     for (const asset of assets) {
-      if (asset.id.startsWith('team:')) asset.favorite = state.favorites.has(asset.id);
+      if (asset.id.startsWith('team:')) {
+        asset.favorite = state.favorites.has(asset.id);
+        asset.favoriteAt = state.snapshot.favoriteTimes[asset.id];
+      }
     }
     return assets;
   }
@@ -290,7 +314,7 @@ export function initTeamOrganization({api, context, onChange, notify}) {
           }
         } finally {
           state.notice = '';
-          state.snapshot = {...state.snapshot, favoriteIds:[...state.favorites]};
+          persist(state);
         }
       });
       notify(`已新增 ${favorites} 项团队收藏，合并 ${collections} 个合集${skipped ? `，跳过 ${skipped} 个不可用引用` : ''}`);

@@ -1,4 +1,8 @@
-const cacheReminderThreshold = 5 * 1024 ** 3;
+const defaultCacheReminderGb = 1;
+const bytesPerGb = 1024 ** 3;
+const validReminderGb = value => Number.isFinite(value) && value > 0 && value <= Number.MAX_SAFE_INTEGER / bytesPerGb;
+const reminderGb = value => validReminderGb(value) ? value : defaultCacheReminderGb;
+const cacheReminderKey = (workspace, directory, gb) => JSON.stringify([workspace, directory || '', gb]);
 
 function formatCacheBytes(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
@@ -22,6 +26,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
   const effective = get('c4d-import-effective-directory');
   const directory = get('c4d-import-temp-directory');
   const startup = get('c4d-import-cleanup-on-startup');
+  const threshold = get('c4d-import-cache-reminder-gb');
   const clearCache = get('c4d-import-clear-cache');
   const cacheStatus = get('c4d-import-cache-status');
   const cacheSize = get('c4d-import-cache-size');
@@ -78,6 +83,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
     return {
       directory:directory.value.trim() || null,
       cleanupOnStartup:startup.checked,
+      cacheReminderGb:threshold.valueAsNumber,
       blenderExecutable:blender.value.trim() || null,
       maxBatchExecutable:max.value.trim() || null,
       maxMode:mode.value,
@@ -87,6 +93,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
   function render(preferences) {
     directory.value = preferences?.directory || '';
     startup.checked = preferences?.cleanupOnStartup === true;
+    threshold.value = String(reminderGb(preferences?.cacheReminderGb));
     blender.value = preferences?.blenderExecutable || '';
     max.value = preferences?.maxBatchExecutable || '';
     mode.value = preferences?.maxMode === 'direct' ? 'direct' : 'application';
@@ -126,9 +133,11 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
     const result = await api('c4d_import_cache_size', {workspace});
     if (!Number.isSafeInteger(result?.bytes) || result.bytes < 0) throw Error('缓存大小数据无效');
     if (request === reminderMeasurement && workspace === scope()) {
-      reminderKey = JSON.stringify([workspace, result.effectiveDirectory || '']);
-      if (result.bytes < cacheReminderThreshold) dismissedReminders.delete(reminderKey);
-      reminder.hidden = result.bytes < cacheReminderThreshold || dismissedReminders.has(reminderKey);
+      const gb = reminderGb(result.cacheReminderGb);
+      const reached = result.bytes >= gb * bytesPerGb;
+      reminderKey = cacheReminderKey(workspace, result.effectiveDirectory, gb);
+      if (!reached) dismissedReminders.delete(reminderKey);
+      reminder.hidden = !reached || dismissedReminders.has(reminderKey);
       if (!reminder.hidden) {
         const message = `Cinema 4D 导入缓存已达 ${formatCacheBytes(result.bytes)}，建议清理。`;
         if (reminderMessage.textContent !== message) reminderMessage.textContent = message;
@@ -262,12 +271,20 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
       if (busy) throw Error('导入设置正在读取或选择，请稍候。');
       if (!baseline) return;
       const preferences = read();
+      if (!validReminderGb(preferences.cacheReminderGb)) {
+        showSection('general');
+        throw Error('请输入有效的缓存提醒阈值（GB）。');
+      }
       if (Object.keys(preferences).every(key => preferences[key] === baseline[key])) return;
       const workspace = openedWorkspace;
       const token = generation;
+      const changedThreshold = baseline.cacheReminderGb !== preferences.cacheReminderGb;
       if (workspace !== scope()) throw Error('资产库已切换，请重新打开导入设置。');
       const saved = await api('set_c4d_import_preferences', {workspace, preferences});
       if (!current(token, workspace)) return;
+      if (changedThreshold) {
+        dismissedReminders.delete(cacheReminderKey(workspace, saved.effectiveDirectory, reminderGb(saved.cacheReminderGb)));
+      }
       render(saved);
       baseline = read();
       status.textContent = '';

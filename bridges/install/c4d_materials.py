@@ -165,10 +165,8 @@ def _retain_classic_bitmap(c4d, owner, key, path):
     shader.SetName(_unconnected_name(key))
 
 
-def _classic_material(c4d, name, channels):
-    mat = _created(c4d.Material(), "标准材质")
-    mat.SetName(name)
-    slots = {
+def _classic_texture_slots(c4d):
+    return {
         "base_color": (c4d.MATERIAL_USE_COLOR, c4d.MATERIAL_COLOR_SHADER),
         "ao": (c4d.MATERIAL_USE_DIFFUSION, c4d.MATERIAL_DIFFUSION_SHADER),
         "bump": (c4d.MATERIAL_USE_BUMP, c4d.MATERIAL_BUMP_SHADER),
@@ -177,6 +175,12 @@ def _classic_material(c4d, name, channels):
         "opacity": (c4d.MATERIAL_USE_ALPHA, c4d.MATERIAL_ALPHA_SHADER),
         "emission": (c4d.MATERIAL_USE_LUMINANCE, c4d.MATERIAL_LUMINANCE_SHADER),
     }
+
+
+def _classic_material(c4d, name, channels):
+    mat = _created(c4d.Material(), "标准材质")
+    mat.SetName(name)
+    slots = _classic_texture_slots(c4d)
     for key in channels.keys() & slots.keys():
         enabled, parameter = slots[key]
         mat[enabled] = True
@@ -614,7 +618,7 @@ def _approved_texture_directories(candidates):
     return directories
 
 
-def _texture_resolver(fbx, source, project_directory=""):
+def _texture_resolver(fbx, source, project_directory="", *, allow_basename=True):
     embedded_names = (fbx.with_suffix(".fbm").name, fbx.stem + "_fbm")
     embedded_keys = {name.casefold() for name in embedded_names}
     local = {fbx.parent: False, fbx.parent / "tex": True}
@@ -634,7 +638,7 @@ def _texture_resolver(fbx, source, project_directory=""):
         matches = set()
         for root in directories:
             candidates = [root / reference]
-            if root.name.casefold() in embedded_keys and root.name.casefold() == reference.parts[0].casefold():
+            if root.name.casefold() in embedded_keys and reference.parts[0].casefold() in embedded_keys:
                 candidates.append(root.joinpath(*reference.parts[1:]))
             for candidate in candidates:
                 if match := _existing_texture(candidate, root):
@@ -650,11 +654,13 @@ def _texture_resolver(fbx, source, project_directory=""):
             actual = _existing_texture(reference)
             if actual:
                 return str(actual)
-        elif len(reference.parts) > 1:
+        elif len(reference.parts) > 1 or not allow_basename:
             for directories in tiers:
                 exact = exact_matches(reference, directories)
                 if exact:
                     return str(next(iter(exact))) if len(exact) == 1 else None
+        if not allow_basename:
+            return None
         for index, directories in enumerate(tiers):
             if index not in indexes:
                 indexes[index] = _texture_name_index(directories)
@@ -686,15 +692,6 @@ def _bitmap_references(c4d, shader):
 
 
 def _imported_standard_channels(c4d, material, resolve_texture):
-    slots = (
-        ("base_color", c4d.MATERIAL_USE_COLOR, c4d.MATERIAL_COLOR_SHADER),
-        ("ao", c4d.MATERIAL_USE_DIFFUSION, c4d.MATERIAL_DIFFUSION_SHADER),
-        ("bump", c4d.MATERIAL_USE_BUMP, c4d.MATERIAL_BUMP_SHADER),
-        ("normal", c4d.MATERIAL_USE_NORMAL, c4d.MATERIAL_NORMAL_SHADER),
-        ("opacity", c4d.MATERIAL_USE_ALPHA, c4d.MATERIAL_ALPHA_SHADER),
-        ("emission", c4d.MATERIAL_USE_LUMINANCE, c4d.MATERIAL_LUMINANCE_SHADER),
-        ("displacement", c4d.MATERIAL_USE_DISPLACEMENT, c4d.MATERIAL_DISPLACEMENT_SHADER),
-    )
     channels = {}
     unlinked = 0
     checked = set()
@@ -709,7 +706,7 @@ def _imported_standard_channels(c4d, material, resolve_texture):
         else:
             unlinked += 1
 
-    for key, enabled, parameter in slots:
+    for key, (enabled, parameter) in _classic_texture_slots(c4d).items():
         shader = material[parameter] if material[enabled] else None
         if shader is not None:
             resolve_channel(key, shader)
@@ -727,6 +724,7 @@ def _imported_standard_channels(c4d, material, resolve_texture):
             for key, parameter in (
                 ("roughness", c4d.REFLECTION_LAYER_MAIN_SHADER_ROUGHNESS),
                 ("specular", c4d.REFLECTION_LAYER_MAIN_SHADER_SPECULAR),
+                ("metallic", c4d.REFLECTION_LAYER_MAIN_SHADER_REFLECTION),
             ):
                 shader = material[offset + parameter]
                 if shader is not None and key not in channels:

@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Nexus · 资产工作台</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/team.css"><link rel="stylesheet" href="/studio.css"><link rel="stylesheet" href="/workspace-layout.css"><link rel="stylesheet" href="/workspace-drag.css"><link rel="stylesheet" href="/workspace-navigation.css"><link rel="stylesheet" href="/asset-compare.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/dcc-connections.css"><link rel="stylesheet" href="/quick-filters.css"><link rel="stylesheet" href="/sidebar-zones.css"><link rel="stylesheet" href="/folder-address.css"><link rel="stylesheet" href="/creative-subscriptions.css"><link rel="stylesheet" href="/browser-sites.css"><link rel="stylesheet" href="/asset-recycle.css"><link rel="stylesheet" href="/asset-filter-toolbar.css"><link rel="stylesheet" href="/workspace-tabs.css"><link rel="stylesheet" href="/workspace-home.css"><link rel="stylesheet" href="/whiteboard.css"><link rel="stylesheet" href="/whiteboard-projects.css"><link rel="stylesheet" href="/asset-type-preferences.css"><link rel="stylesheet" href="/asset-ai.css"><link rel="stylesheet" href="/dotin-themes.css"><script src="/appearance.js"></script></head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Nexus · 资产工作台</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/team.css"><link rel="stylesheet" href="/studio.css"><link rel="stylesheet" href="/workspace-layout.css"><link rel="stylesheet" href="/workspace-drag.css"><link rel="stylesheet" href="/workspace-navigation.css"><link rel="stylesheet" href="/asset-compare.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/asset-masonry.css"><link rel="stylesheet" href="/dcc-connections.css"><link rel="stylesheet" href="/quick-filters.css"><link rel="stylesheet" href="/sidebar-zones.css"><link rel="stylesheet" href="/folder-address.css"><link rel="stylesheet" href="/creative-subscriptions.css"><link rel="stylesheet" href="/browser-sites.css"><link rel="stylesheet" href="/asset-recycle.css"><link rel="stylesheet" href="/asset-filter-toolbar.css"><link rel="stylesheet" href="/workspace-tabs.css"><link rel="stylesheet" href="/workspace-home.css"><link rel="stylesheet" href="/whiteboard.css"><link rel="stylesheet" href="/whiteboard-projects.css"><link rel="stylesheet" href="/asset-type-preferences.css"><link rel="stylesheet" href="/asset-ai.css"><link rel="stylesheet" href="/dotin-themes.css"><script src="/appearance.js"></script></head>
 <body>
 <svg class="icon-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
 <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+<symbol id="i-masonry" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="11" rx="1.5"/><rect x="14" y="3" width="7" height="6" rx="1.5"/><rect x="3" y="18" width="7" height="3" rx="1.5"/><rect x="14" y="13" width="7" height="8" rx="1.5"/></symbol>
 <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7M5 9v11h14V9m-9 11v-6h4v6"/></symbol>
 <symbol id="i-whiteboard" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m8 21 2-3m6 3-2-3M7 13l4-4 3 3 3-3"/></symbol>
 <symbol id="i-rss" viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></symbol>
@@ -13,6 +14,7 @@
 <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5a1 1 0 0 1 1-1h6l2 3h8a1 1 0 0 1 1 1v11H3V7Z"/></symbol>
 <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
 <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v6m4-6v6"/></symbol>
+<symbol id="i-scissors" viewBox="0 0 24 24"><circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.5 8.5 12 11m-12-4 12-11"/></symbol>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
 <symbol id="i-pin" viewBox="0 0 24 24"><path d="m13 4 7 7-3 1-3 4v3l-9-9h3l4-3ZM9 15l-5 5"/></symbol>
 <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
@@ -32,6 +34,14 @@
 <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></symbol>
 <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
 <symbol id="i-stack" viewBox="0 0 24 24"><path d="m12 3 9 4.5-9 4.5-9-4.5L12 3Zm9 9-9 4.5L3 12m18 4.5L12 21l-9-4.5"/></symbol>
+<symbol id="i-align-left" viewBox="0 0 24 24"><path d="M3 3v18"/><rect x="6" y="5" width="14" height="5" rx="1"/><rect x="6" y="14" width="9" height="5" rx="1"/></symbol>
+<symbol id="i-align-right" viewBox="0 0 24 24"><path d="M21 3v18"/><rect x="4" y="5" width="14" height="5" rx="1"/><rect x="9" y="14" width="9" height="5" rx="1"/></symbol>
+<symbol id="i-align-top" viewBox="0 0 24 24"><path d="M3 3h18"/><rect x="5" y="6" width="5" height="14" rx="1"/><rect x="14" y="6" width="5" height="9" rx="1"/></symbol>
+<symbol id="i-align-bottom" viewBox="0 0 24 24"><path d="M3 21h18"/><rect x="5" y="4" width="5" height="14" rx="1"/><rect x="14" y="9" width="5" height="9" rx="1"/></symbol>
+<symbol id="i-align-center-horizontal" viewBox="0 0 24 24"><path d="M12 3v2m0 5v4m0 5v2"/><rect x="4" y="5" width="16" height="5" rx="1"/><rect x="7" y="14" width="10" height="5" rx="1"/></symbol>
+<symbol id="i-align-center-vertical" viewBox="0 0 24 24"><path d="M3 12h2m5 0h4m5 0h2"/><rect x="5" y="4" width="5" height="16" rx="1"/><rect x="14" y="7" width="5" height="10" rx="1"/></symbol>
+<symbol id="i-distribute-horizontal" viewBox="0 0 24 24"><path d="M3 3v18m18-18v18"/><rect x="6" y="6" width="4" height="12" rx="1"/><rect x="14" y="6" width="4" height="12" rx="1"/></symbol>
+<symbol id="i-distribute-vertical" viewBox="0 0 24 24"><path d="M3 3h18M3 21h18"/><rect x="6" y="6" width="12" height="4" rx="1"/><rect x="6" y="14" width="12" height="4" rx="1"/></symbol>
 <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
 <symbol id="i-drag-out" viewBox="0 0 24 24"><path d="M13 5h6v6m0-6-8 8m-2-8H5v14h14v-4"/></symbol>
 <symbol id="i-tag" viewBox="0 0 24 24"><path d="M4 5h8l8 8-7 7-8-8Z"/><circle cx="8.5" cy="8.5" r="1"/></symbol>
@@ -156,7 +166,9 @@
       <div class="page-heading workspace-tab-heading">
         <h1 id="page-title" tabindex="-1">全部资产</h1>
         <div id="workspace-tab-list" class="workspace-tab-list" role="tablist" aria-label="工作台标签页"></div>
+        <div id="workspace-split-tabs" class="workspace-tab-list" role="tablist" aria-label="分屏标签页" hidden></div>
         <button id="workspace-tab-add" class="workspace-tab-add" type="button" aria-label="复制当前页面为新标签页" title="复制当前页面为新标签页"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
+        <button id="workspace-pane-join" class="workspace-tab-add" type="button" aria-label="合并分屏" title="合并分屏" hidden><svg aria-hidden="true"><use href="#i-compare"/></svg></button>
       </div>
       <div class="page-heading-controls">
         <button id="edit-collection" class="button subtle hidden">管理合集</button>
@@ -191,11 +203,19 @@
         <button id="c4d-cache-reminder-dismiss" class="icon-button" type="button" aria-label="关闭缓存提醒"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
       </div>
     </section>
+    <div id="workspace-asset-controls" class="workspace-asset-controls">
     <section id="asset-filter-toolbar" class="library-toolbar" aria-label="资产筛选和显示">
       <div class="filter-bar asset-filter-strip">
         <div id="asset-pinned-filters" role="group" aria-label="已固定的筛选项"></div>
         <button id="asset-filter-more-toggle" type="button" class="asset-filter-trigger" aria-controls="asset-filter-more-panel" aria-expanded="false" aria-label="管理筛选项" title="管理筛选项"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
-        <div class="view-controls"><select id="view-density" aria-label="缩略图尺寸" title="按 Ctrl 滚动鼠标滚轮可连续调节"><option value="compact">小缩略图</option><option value="normal">标准缩略图</option><option value="large">大缩略图</option><option value="custom" hidden>自定</option></select><div class="view-switch"><button id="grid-view" class="icon-button active" title="网格视图"><svg><use href="#i-grid"/></svg></button><button id="list-view" class="icon-button" title="列表视图"><svg><use href="#i-list"/></svg></button></div></div>
+        <div class="view-controls">
+          <select id="view-density" aria-label="缩略图尺寸" title="按 Ctrl 滚动鼠标滚轮可连续调节"><option value="compact">小缩略图</option><option value="normal">标准缩略图</option><option value="large">大缩略图</option><option value="custom" hidden>自定</option></select>
+          <div class="view-switch" role="group" aria-label="资产显示方式">
+            <button id="grid-view" type="button" class="icon-button active" aria-label="网格视图" title="网格视图" aria-pressed="true"><svg aria-hidden="true"><use href="#i-grid"/></svg></button>
+            <button id="masonry-view" type="button" class="icon-button" aria-label="瀑布流" title="瀑布流" aria-pressed="false"><svg aria-hidden="true"><use href="#i-masonry"/></svg></button>
+            <button id="list-view" type="button" class="icon-button" aria-label="列表视图" title="列表视图" aria-pressed="false"><svg aria-hidden="true"><use href="#i-list"/></svg></button>
+          </div>
+        </div>
         <div class="toolbar-connection"><button id="connection-summary" type="button" aria-label="DCC 连接中心，0 个创作工具实例在线" title="DCC 连接中心，0 个创作工具实例在线"><svg aria-hidden="true"><use href="#i-link"/></svg><span id="connection-count" aria-hidden="true">0</span></button></div>
       </div>
       <div id="asset-type-panel" class="asset-filter-panel" hidden>
@@ -218,7 +238,7 @@
       </div>
       <div hidden>
         <select id="rating-filter" aria-label="最低评分"><option value="0">所有评分</option><option value="1">★ 1 及以上</option><option value="2">★ 2 及以上</option><option value="3">★ 3 及以上</option><option value="4">★ 4 及以上</option><option value="5">★ 5</option></select>
-        <select id="sort" aria-label="排序"><option value="added">最近入库</option><option value="modified">最近修改</option><option value="name">名称 A–Z</option><option value="size">文件大小</option><option value="rating">评分优先</option></select>
+        <select id="sort" aria-label="排序"><option value="favoriteAt" hidden>收藏时间</option><option value="added">最近入库</option><option value="modified">最近修改</option><option value="name">名称 A–Z</option><option value="size">文件大小</option><option value="rating">评分优先</option></select>
         <select id="workflow-filter" aria-label="筛选工作流状态"><option value="">所有状态</option><option value="unset">未设置状态</option><option value="wip">制作中</option><option value="review">待审核</option><option value="approved">已审核</option><option value="archived">已归档</option></select>
       </div>
       <div id="asset-filter-more-panel" class="asset-filter-panel" aria-label="管理筛选项" hidden>
@@ -255,6 +275,9 @@
       <button id="remove-from-collection" class="button subtle hidden">移出当前合集</button>
       <button id="clear-selection" class="text-button">清除选择</button>
     </div>
+    </div>
+    <div id="workspace-pane-deck" class="workspace-pane-deck">
+    <section id="workspace-pane-primary" class="workspace-pane" data-workspace-pane="primary" role="tabpanel" aria-label="主工作区">
     <div class="browser-scroll" id="browser-scroll">
     <section id="workspace-home" class="hidden" aria-label="工作台主页">
       <div class="workspace-home-cards">
@@ -302,6 +325,17 @@
         </div>
         <div id="creator-cards" class="creator-cards" aria-label="已订阅的创作者"></div>
         <p id="creator-list-empty" class="creative-empty hidden"></p>
+        <section id="creator-video-references" aria-labelledby="creator-video-reference-heading">
+          <div class="creator-reference-toolbar">
+            <h2 id="creator-video-reference-heading">疑难杂点</h2>
+            <form class="creator-reference-form">
+              <label class="search creative-search"><svg aria-hidden="true"><use href="#i-link"/></svg><input type="text" inputmode="url" maxlength="2048" placeholder="粘贴视频网址…" aria-label="视频网址" aria-describedby="creator-video-reference-status" autocomplete="off" spellcheck="false"></label>
+              <button type="submit" class="button subtle"><svg aria-hidden="true"><use href="#i-plus"/></svg>添加视频</button>
+            </form>
+          </div>
+          <p id="creator-video-reference-status" role="status"></p>
+          <ul class="creator-reference-list" aria-label="已引用的网页视频" hidden></ul>
+        </section>
       </div>
       <section id="creator-detail" class="hidden" aria-labelledby="creator-detail-title">
         <button id="creator-back" type="button" class="text-button"><svg aria-hidden="true"><use href="#i-chevron"/></svg>返回创作者</button>
@@ -331,13 +365,20 @@
       <div class="browser-home-actions">
         <label class="search"><svg aria-hidden="true"><use href="#i-search"/></svg><input id="browser-site-filter" type="search" autocomplete="off" placeholder="筛选站点…" aria-label="筛选站点"></label>
         <button id="browser-capture-open" class="button subtle" type="button" aria-haspopup="dialog" aria-controls="browser-capture-dialog" hidden><svg aria-hidden="true"><use href="#i-download"/></svg>网页采集</button>
-        <button id="browser-add-site" class="button subtle" type="button"><svg aria-hidden="true"><use href="#i-plus"/></svg>添加站点</button>
+        <form id="browser-site-quick-form" class="browser-site-quick-form">
+          <label class="search browser-site-quick-add"><svg aria-hidden="true"><use href="#i-link"/></svg><input id="browser-site-quick-url" type="text" inputmode="url" maxlength="2048" placeholder="粘贴网址创建" aria-label="粘贴网址创建站点，输入网址后按 Enter" aria-describedby="browser-site-quick-status" autocomplete="off" spellcheck="false"></label>
+          <p id="browser-site-quick-status" role="status"></p>
+        </form>
       </div>
       <div id="browser-sites"></div>
       <p id="browser-empty" hidden>没有匹配的站点。</p>
     </section>
     <section id="workspace-whiteboard" class="hidden" aria-label="白板"></section>
     <section id="jobs-view" class="hidden"><div class="section-heading"><h2>导入记录</h2><span>只有 DCC 返回成功，任务才标记为完成</span></div><div id="job-list"></div></section>
+    </div>
+    </section>
+    <div id="workspace-pane-divider" class="workspace-pane-divider" role="separator" aria-label="调整分屏宽度" aria-orientation="vertical" aria-valuemin="25" aria-valuemax="75" aria-valuenow="50" tabindex="0" hidden></div>
+    <section id="workspace-pane-secondary" class="workspace-pane" data-workspace-pane="secondary" role="tabpanel" aria-label="分屏工作区" hidden></section>
     </div>
     <div id="dcc-drop-dock" class="dcc-drop-dock hidden" aria-label="拖到已连接的 DCC"></div>
   </main>
@@ -626,6 +667,7 @@
       <button id="nexus-install-now" type="button" class="button primary" hidden>立即安装并重启</button>
     </div>
   </section>
+  <button id="about-release-notes" type="button" class="button subtle about-release-notes" aria-haspopup="dialog" aria-controls="nexus-release-notes" hidden>更新日志</button>
   <details id="about-guide" class="about-guide">
     <summary>使用指南</summary>
     <div class="help-content">
@@ -652,6 +694,17 @@
       </section>
     </div>
   </details>
+</dialog>
+<dialog id="nexus-release-notes" class="modal compact-dialog" aria-labelledby="nexus-release-notes-heading">
+  <form method="dialog">
+    <div class="modal-header">
+      <h2 id="nexus-release-notes-heading">更新日志</h2>
+      <button type="submit" class="icon-button" aria-label="关闭"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+    <p class="nexus-release-version" data-release-version></p>
+    <ul class="nexus-release-list"></ul>
+    <div class="modal-footer"><button type="submit" class="button primary" autofocus>完成</button></div>
+  </form>
 </dialog>
 <dialog id="c4d-drop-dialog" class="modal c4d-drop-dialog" aria-labelledby="c4d-drop-title">
   <form id="c4d-drop-form">
@@ -736,6 +789,7 @@
         <div class="c4d-import-cache-actions">
           <label class="team-check"><input id="c4d-import-cleanup-on-startup" type="checkbox">启动 Cinema 4D 时清理导入缓存</label>
           <div class="c4d-import-cache-controls">
+            <label class="c4d-import-cache-threshold">提醒阈值 <input id="c4d-import-cache-reminder-gb" class="text-field" type="number" step="any" value="1" required aria-label="缓存提醒阈值（GB）" title="缓存达到此大小时提醒"> GB</label>
             <span id="c4d-import-cache-size" role="status" aria-atomic="true"></span>
             <button id="c4d-import-clear-cache" type="button" class="button subtle" aria-describedby="c4d-import-cache-help">立即清理缓存</button>
           </div>

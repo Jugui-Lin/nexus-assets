@@ -131,6 +131,7 @@ class Bridge:
                         "projectExport": bool(getattr(self.smart_import, "project_export", None)),
                         "sceneImportOptions": bool(getattr(self.smart_import, "import_progress", None)),
                         "scopedC4dPreferences": bool(getattr(self.smart_import, "scoped_preferences", False)),
+                        "maxTextureBindings": bool(getattr(self.smart_import, "max_texture_bindings", False)),
                     })
                     self.session = result["id"]
                 self.request("/bridge/heartbeat", {"sessionId": self.session, "label": self.label})

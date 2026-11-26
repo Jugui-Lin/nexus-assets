@@ -251,6 +251,25 @@ class SmartImportTests(TestCase):
         self.assertEqual(self.converted, [])
         self.assertEqual(message, "已合并模型或工程")
 
+    def test_direct_max_restores_textures_on_only_new_standard_materials_without_overrides(self):
+        existing = Node("material", self.doc.materials)
+        supplied = []
+
+        def restore(c4d, doc, materials, plan):
+            supplied.append(plan)
+            self.assertIs(c4d, self.importer.c4d)
+            self.assertIs(doc, self.doc)
+            self.assertEqual(materials, self.doc.materials[1:])
+            self.assertNotIn(existing, materials)
+            return "标准材质已补接 1 个贴图通道"
+
+        self.importer.materials.restore_standard_textures = restore
+        plan = {"path": "scene.fbx", "kind": "scene", "source_path": "scene.max", "restore_scene_textures": True,
+                "scene_material_maps": {"material": {"base_color": "map.png"}}}
+        self.assertIn("标准材质已补接 1 个贴图通道", self.importer._apply(self.doc, plan))
+        self.assertEqual(supplied, [plan])
+        self.assertNotIn((1, existing), self.doc.undo)
+
     def test_native_c4d_materials_and_standard_fbx_bypass_octane(self):
         self.apply(path="source.c4d", renderer="octane", maps={})
         self.apply(renderer="standard", maps={})
@@ -273,18 +292,18 @@ class SmartImportTests(TestCase):
         importer.cache = Path("fixtures/cache")
         importer.cache_warning = None
         baked = {"c0001": {"base_color": "maps_baked/mat_C0001_diffuse.png"}}
-        authored = {"Surface": {"roughness": "maps/surface-rough.png"}}
         importer.preparation = SimpleNamespace(
             prepare=lambda _host, path, *_options: {"kind": "scene", "path": path},
             collect_baked_scene_maps=lambda *_: baked,
         )
         importer.cache_settings = SimpleNamespace(read_preferences=lambda _: {"maxMode": "application"})
+        bindings = {"Material": {"base_color": "texture.png"}}
         importer.max_decode = SimpleNamespace(
             texture_warning=lambda _: "MAX 转出贴图连接 0 项，有 1 项贴图未找到",
             scene_object_warning=lambda *_: "MAX 直接解析：2 盏灯使用通用光源",
             render_settings=lambda _: {"materials": {"Surface": {"normal_strength": 0.4}},
                                        "lights": {"Sun": {"intensity": 0.3}}},
-            texture_bindings=lambda *_: authored,
+            texture_bindings=lambda output, source: bindings if (output, source) == ("prepared.fbx", "source.MAX") else {},
         )
         requests = []
 
@@ -303,18 +322,13 @@ class SmartImportTests(TestCase):
             "MAX 直接解析：2 盏灯使用通用光源",
         ])
         self.assertEqual(plan["baked_material_maps"], baked)
-        self.assertEqual(plan["scene_material_maps"], authored)
         self.assertEqual(plan["max_material_settings"], {"Surface": {"normal_strength": 0.4}})
         self.assertEqual(plan["max_light_settings"], {"Sun": {"intensity": 0.3}})
+        self.assertTrue(plan["restore_scene_textures"])
+        self.assertEqual(plan["scene_material_maps"], bindings)
         self.assertEqual(requests, [("source.MAX", "direct")])
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "preparing"})
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "direct-max"})
-        importer._prepare({"id": "drop", "path": "source.MAX", "options": {"max_mode": "direct",
-            "scene_import": {"objects":True, "materials":True, "textures":False}}}, 2)
-        _, _, plan, failure = importer.results.get_nowait()
-        self.assertIsNone(failure)
-        self.assertNotIn("scene_material_maps", plan)
-        self.assertNotIn("baked_material_maps", plan)
 
     def test_status_feedback_tracks_only_the_active_job_and_clears_when_cancelled(self):
         importer = self.importer

@@ -11,6 +11,7 @@ use std::{
 };
 
 pub const MAX_MESH_SOURCE_BYTES: u64 = 750_000;
+pub const MAX_NATIVE_MESH_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_SIZE: u32 = 256;
 const MAX_SIZE: u32 = 1024;
 const MAX_CACHED_BYTES: u64 = 8 * 1024 * 1024;
@@ -124,8 +125,16 @@ fn extension(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+pub fn mesh_source_limit(extension: &str) -> Option<u64> {
+    match extension {
+        "obj" | "fbx" => Some(MAX_NATIVE_MESH_SOURCE_BYTES),
+        "stl" | "ply" | "glb" | "gltf" => Some(MAX_MESH_SOURCE_BYTES),
+        _ => None,
+    }
+}
+
 fn source(asset: &Asset, size: u32) -> Result<Option<Source<'_>>, String> {
-    let visual = if asset.kind == "texture" {
+    let visual = if asset.kind == "texture" && asset.ext != "ies" {
         Some((Path::new(&asset.path), "texture"))
     } else {
         asset.thumbnail.as_deref().map(|path| {
@@ -160,14 +169,18 @@ fn source(asset: &Asset, size: u32) -> Result<Option<Source<'_>>, String> {
         ext if asset.kind == "video" && video_mime(ext).is_some() => {
             ("video", ThumbnailFormat::Video)
         }
-        "obj" | "stl" | "ply" | "glb" | "gltf" => ("mesh", ThumbnailFormat::Mesh),
+        ext if mesh_source_limit(ext).is_some() => ("mesh", ThumbnailFormat::Mesh),
         "c4d" => ("c4d-preview", ThumbnailFormat::Png),
+        "ies" => ("ies-preview", ThumbnailFormat::Png),
         "max" => ("max-preview", ThumbnailFormat::Png),
         _ => return Ok(None),
     };
     let path = Path::new(&asset.path);
     let meta = fs::metadata(path).map_err(|error| format!("无法读取预览来源：{error}"))?;
-    if !meta.is_file() || format == ThumbnailFormat::Mesh && meta.len() > MAX_MESH_SOURCE_BYTES {
+    if !meta.is_file()
+        || mesh_source_limit(&asset.ext).is_some_and(|limit| meta.len() > limit)
+        || asset.ext == "ies" && meta.len() > crate::ies_preview::MAX_FILE_BYTES
+    {
         return Ok(None);
     }
     make_source(asset, path, role, asset.ext.clone(), size, format, &meta).map(Some)
@@ -279,8 +292,9 @@ pub fn read_team_original_from_index(asset: &Asset, dir: &Path, size: u32) -> Re
     let (role, format) = match asset.ext.as_str() {
         ext if asset.kind == "texture" && preview_image_format(ext) => ("texture", ThumbnailFormat::Png),
         ext if asset.kind == "video" && video_mime(ext).is_some() => ("video", ThumbnailFormat::Video),
-        "obj" | "stl" | "ply" | "glb" | "gltf" => ("mesh", ThumbnailFormat::Mesh),
+        ext if mesh_source_limit(ext).is_some() => ("mesh", ThumbnailFormat::Mesh),
         "c4d" => ("c4d-preview", ThumbnailFormat::Png),
+        "ies" => ("ies-preview", ThumbnailFormat::Png),
         "max" => ("max-preview", ThumbnailFormat::Png),
         _ => return Ok(None),
     };

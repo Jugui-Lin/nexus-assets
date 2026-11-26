@@ -1,0 +1,87 @@
+:root[data-workspace-tab-dragging] .workspace-tab[data-tab-id] {
+  transform: translateX(var(--workspace-tab-drag-shift, 0));
+  transition: transform 175ms cubic-bezier(.2, .82, .25, 1.06);
+}
+
+.workspace-tab[data-tab-id] .workspace-tab-trigger {
+  touch-action: none;
+  user-select: none;
+}
+
+:root[data-workspace-tab-dragging],
+:root[data-workspace-tab-dragging] * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
+.workspace-tab[data-workspace-tab-source] { opacity: 0; }
+
+.workspace-tab-list[data-workspace-tab-strip-incoming]::after {
+  content: "";
+  flex: 0 0 var(--workspace-tab-drag-space);
+}
+
+.workspace-tab-drag-ghost {
+  position: fixed;
+  z-index: 122;
+  top: 0;
+  left: 0;
+  display: grid;
+  align-items: center;
+  padding: 0 11px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 54%, var(--line));
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 6px 24px #0005;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.workspace-tab-drag-ghost[data-workspace-tab-snapped] {
+  border-color: var(--accent);
+  background: var(--accent-dark);
+  color: var(--accent);
+}
+
+.workspace-tab-drop-preview {
+  position: fixed;
+  z-index: 121;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 72%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 17%, transparent);
+  opacity: 0;
+  transform: scale(.975);
+  transition: opacity 140ms ease, transform 190ms cubic-bezier(.2, .9, .25, 1.1);
+  pointer-events: none;
+}
+
+.workspace-tab-drop-preview[data-workspace-tab-drop-edge] {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.workspace-tab-drop-preview span {
+  padding: 6px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 43%, var(--line));
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--accent);
+  box-shadow: 0 3px 14px #0003;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-workspace-tab-dragging] .workspace-tab[data-tab-id],
+  .workspace-tab-drop-preview { transition: none; }
+}

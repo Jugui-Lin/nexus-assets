@@ -4,7 +4,7 @@ const limits = {
   sidebar: { max: 380, defaultWidth: 226 },
   inspector: { min: 224, max: 540, defaultWidth: 307 },
 };
-const panelNames = { sidebar: '左侧导航', inspector: '右侧资产详情' };
+const panelNames = { sidebar: '左侧导航', inspector: '资产详情' };
 
 function readLayout(preferences) {
   let saved;
@@ -56,7 +56,7 @@ function createPanelToggle(panel, key) {
   const icon = document.createElementNS(svgNamespace, 'svg');
   const chevron = document.createElementNS(svgNamespace, 'use');
   icon.setAttribute('aria-hidden', 'true');
-  chevron.setAttribute('href', '#i-chevron');
+  chevron.setAttribute('href', key === 'inspector' ? '#i-info' : '#i-chevron');
   icon.append(chevron);
   button.append(icon);
   return button;
@@ -69,8 +69,8 @@ export function initWorkspaceLayout(preferences = localStorage) {
   const inspector = app?.querySelector('.inspector');
   const topbar = app?.querySelector('.topbar');
   const navigation = topbar?.querySelector('#workspace-tools-nav');
-  const topActions = topbar?.querySelector('.top-actions');
-  if (!sidebar || !workArea || !inspector || !navigation || !topActions || app.querySelector('.workspace-divider')) return;
+  const viewControls = workArea?.querySelector('.asset-filter-strip .view-controls');
+  if (!sidebar || !workArea || !inspector || !navigation || !viewControls || app.querySelector('.workspace-divider')) return;
 
   sidebar.id ||= 'workspace-sidebar';
   inspector.id ||= 'workspace-inspector';
@@ -91,7 +91,7 @@ export function initWorkspaceLayout(preferences = localStorage) {
   leading.className = 'workspace-toolbar-leading';
   navigation.before(leading);
   leading.append(toggles.sidebar, navigation);
-  topActions.append(toggles.inspector);
+  viewControls.append(toggles.inspector);
 
   const preferred = readLayout(preferences);
   const { collapsed } = preferred;
@@ -99,6 +99,13 @@ export function initWorkspaceLayout(preferences = localStorage) {
   let geometry;
   let widths;
   let drag = null;
+  let context = {assetView:true, split:false, pane:null, tabId:null};
+  let overlayOpen = false;
+  let overlayPane = null;
+
+  const inspectorAvailable = () => geometry.hasInspector && context.assetView;
+  const inspectorExpanded = () => inspectorAvailable() && (context.split ? overlayOpen : !collapsed.inspector);
+  const reservedDetailWidth = () => geometry.hasInspector && !collapsed.inspector ? limits.inspector.min : 0;
 
   function readGeometry() {
     const viewport = window.innerWidth;
@@ -121,7 +128,7 @@ export function initWorkspaceLayout(preferences = localStorage) {
     if (key === 'sidebar') {
       return {
         min: geometry.sideMin,
-        max: Math.max(geometry.sideMin, maxWidth(key, widths.inspector)),
+        max: Math.max(geometry.sideMin, maxWidth(key, Math.max(widths.inspector, reservedDetailWidth()))),
       };
     }
     return {
@@ -131,17 +138,21 @@ export function initWorkspaceLayout(preferences = localStorage) {
   }
 
   function renderWidths() {
-    const inspectorVisible = geometry.hasInspector && !collapsed.inspector;
+    const inspectorDocked = !context.split && inspectorExpanded();
     const sidebarWidth = collapsed.sidebar
       ? 0
       : clamp(preferred.sidebar ?? defaults.sidebar, geometry.sideMin,
-        maxWidth('sidebar', inspectorVisible ? limits.inspector.min : 0));
-    const inspectorWidth = inspectorVisible
+        maxWidth('sidebar', reservedDetailWidth()));
+    const inspectorWidth = inspectorDocked
       ? clamp(preferred.inspector ?? defaults.inspector, limits.inspector.min, maxWidth('inspector', sidebarWidth))
       : 0;
     widths = { sidebar: sidebarWidth, inspector: inspectorWidth };
     app.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
     app.style.setProperty('--detail-width', `${inspectorWidth}px`);
+    if (overlayPane) {
+      const overlayWidth = clamp(preferred.inspector ?? defaults.inspector, limits.inspector.min, limits.inspector.max);
+      inspector.style.setProperty('--inspector-overlay-width', `${overlayWidth}px`);
+    }
     for (const key of Object.keys(dividers)) {
       const divider = dividers[key];
       if (divider.hidden) continue;
@@ -156,19 +167,33 @@ export function initWorkspaceLayout(preferences = localStorage) {
   function renderPanels() {
     for (const key of Object.keys(panels)) {
       const { activeElement } = document;
-      const available = key === 'sidebar' || geometry.hasInspector;
-      const expanded = available && !collapsed[key];
+      const sidebarPanel = key === 'sidebar';
+      const available = sidebarPanel || inspectorAvailable();
+      const expanded = sidebarPanel ? !collapsed.sidebar : inspectorExpanded();
+      const docked = expanded && (sidebarPanel || !context.split);
       const focusInPanel = panels[key].contains(activeElement) || dividers[key] === activeElement;
-      if ((!expanded && focusInPanel) || (!available && toggles[key] === activeElement)) {
+      if ((!expanded && focusInPanel) || (!available && toggles[key] === activeElement) ||
+          (!docked && dividers[key] === activeElement)) {
         toggles[available ? key : 'sidebar'].focus({ preventScroll: true });
       }
       panels[key].hidden = !expanded;
-      dividers[key].hidden = !expanded;
+      dividers[key].hidden = !docked;
       toggles[key].hidden = !available;
       toggles[key].setAttribute('aria-expanded', String(expanded));
       const label = `${expanded ? '收起' : '展开'}${panelNames[key]}`;
       toggles[key].setAttribute('aria-label', label);
       toggles[key].title = label;
+    }
+    const nextPane = context.split && inspectorExpanded() ? context.pane : null;
+    if (overlayPane !== nextPane) {
+      overlayPane?.removeAttribute('data-pane-inspector');
+      if (nextPane) {
+        nextPane.setAttribute('data-pane-inspector', '');
+        nextPane.append(inspector);
+      } else if (overlayPane) {
+        dividers.inspector.after(inspector);
+      }
+      overlayPane = nextPane;
     }
     renderWidths();
   }
@@ -209,6 +234,11 @@ export function initWorkspaceLayout(preferences = localStorage) {
   for (const key of Object.keys(dividers)) {
     toggles[key].addEventListener('click', () => {
       if (drag) endDrag(true);
+      if (key === 'inspector' && context.split) {
+        overlayOpen = !overlayOpen;
+        renderPanels();
+        return;
+      }
       collapsed[key] = !collapsed[key];
       renderPanels();
       writeLayout(preferred, preferences);
@@ -273,6 +303,14 @@ export function initWorkspaceLayout(preferences = localStorage) {
   window.addEventListener('resize', onResize);
   onResize();
   return {
+    setInspectorContext(next) {
+      if (next.assetView === context.assetView && next.split === context.split &&
+          next.pane === context.pane && next.tabId === context.tabId) return;
+      if (drag?.key === 'inspector') endDrag(true);
+      context = next;
+      overlayOpen = false;
+      renderPanels();
+    },
     reload() {
       if (drag) endDrag(true);
       const saved = readLayout(preferences);

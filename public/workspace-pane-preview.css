@@ -1,0 +1,55 @@
+.workspace-pane-preview {
+  overscroll-behavior: contain;
+}
+
+.workspace-pane-preview [inert] { user-select: none; }
+.workspace-pane-preview [data-pane-pending-thumb] { display: none; }
+.workspace-pane-preview .workspace-pane-static-frame {
+  width: 100%;
+  background: var(--panel);
+}
+
+.workspace-pane-preview .card-thumb [data-pane-media] {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+.workspace-pane-preview .card-thumb [data-pane-media="image"] { background: var(--card); }
+.workspace-pane-preview .asset-grid:not(.list-mode) .card-thumb [data-pane-media] {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+}
+.workspace-pane-preview .subfolder-cover [data-pane-media="image"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.workspace-pane-preview .subfolder-cover:has([data-pane-media="image"]) .subfolder-cover-badge { display: block; }
+
+.workspace-pane-preview [data-pane-source="workspace-home"] {
+  display: grid;
+  min-block-size: 100%;
+  padding: clamp(18px, 5vh, 56px) clamp(9px, 4%, 44px);
+  place-items: center;
+  container-type: inline-size;
+}
+.workspace-pane-preview [data-pane-source="workspace-whiteboard"] {
+  flex: 1 1 auto;
+  min-height: 320px;
+  height: 100%;
+}
+.workspace-pane-preview [data-pane-source="creative-subscriptions"] { min-width: 0; padding: 6px 0 18px; }
+.workspace-pane-preview [data-pane-source="creator-back"] { display: inline-flex; align-items: center; gap: 4px; padding: 4px 1px; margin-bottom: 7px; }
+.workspace-pane-preview [data-pane-source="creator-back"] svg { width: 13px; height: 13px; transform: rotate(180deg); }
+.workspace-pane-preview [data-pane-source="creator-work-status"] { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.workspace-pane-preview [data-pane-source="site-navigation"] { min-width: 0; padding-bottom: 24px; }
+.workspace-pane-preview [data-pane-source="browser-sites"] section + section { margin-top: 24px; }
+.workspace-pane-preview [data-pane-source="browser-sites"] h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.workspace-pane-preview [data-pane-source="browser-empty"] { color: var(--muted); font-size: 12px; }
+.workspace-pane-preview [data-pane-source="load-more"] { display: flex; margin: 13px auto 0; }
+.workspace-pane-preview [data-pane-source="show-earlier-assets"] { display: block; margin: 3px 0 7px; padding: 2px 4px; }

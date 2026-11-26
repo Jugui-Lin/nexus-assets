@@ -33,6 +33,38 @@ pub struct WhiteboardProjectsSnapshot {
     pub projects: Vec<WhiteboardProject>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WhiteboardCursor {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteboardPresenceRequest {
+    pub project_id: String,
+    pub session_id: String,
+    pub active: bool,
+    pub cursor: Option<WhiteboardCursor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhiteboardPresenceMember {
+    pub member_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<WhiteboardCursor>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct WhiteboardPresenceSnapshot {
+    pub members: Vec<WhiteboardPresenceMember>,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WhiteboardProjectCreate {

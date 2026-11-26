@@ -1,13 +1,167 @@
-use super::{fetch, html, Discovery, FeedItem, PROFILE_TYPES};
+use super::{fetch, fetch_with_redirect_check, html, Discovery, FeedItem, PROFILE_TYPES};
 use dom_query::Document;
 use flate2::read::GzDecoder;
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, io::Read};
 
 const MAX_PLAYLIST_BYTES: usize = 1024 * 1024;
+const MAX_VIDEO_METADATA_BYTES: usize = 64 * 1024;
+const VIDEO_METADATA_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/view";
 const MAX_WORKS: usize = 40;
 const STATE_MARKER: &str = "window.__INITIAL_STATE__";
+
+enum VideoId {
+    Bvid(String),
+    Aid(u64),
+}
+
+impl VideoId {
+    fn from_page(page: &Url) -> Option<Self> {
+        if page.scheme() != "https"
+            || !matches!(
+                page.domain(),
+                Some("bilibili.com" | "www.bilibili.com" | "m.bilibili.com")
+            )
+            || page.port().is_some()
+        {
+            return None;
+        }
+        let path = page.path().strip_prefix("/video/")?;
+        let id = path.strip_suffix('/').unwrap_or(path);
+        let prefix = id.get(..2)?;
+        let rest = id.get(2..)?;
+        if prefix.eq_ignore_ascii_case("bv")
+            && rest.len() == 10
+            && rest.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Some(Self::Bvid(format!("BV{rest}")));
+        }
+        if prefix.eq_ignore_ascii_case("av") {
+            return parse_aid(rest).map(Self::Aid);
+        }
+        None
+    }
+
+    fn endpoint(&self) -> Option<Url> {
+        let mut url = Url::parse(VIDEO_METADATA_ENDPOINT).ok()?;
+        match self {
+            Self::Bvid(id) => {
+                url.query_pairs_mut().append_pair("bvid", id);
+            }
+            Self::Aid(id) => {
+                url.query_pairs_mut().append_pair("aid", &id.to_string());
+            }
+        }
+        Some(url)
+    }
+}
+
+fn parse_aid(id: &str) -> Option<u64> {
+    if id.starts_with('0') || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    id.parse().ok()
+}
+
+pub(super) fn official_video_metadata_route(url: &Url) -> bool {
+    let Some((key, value)) = url.query().and_then(|query| query.split_once('=')) else {
+        return false;
+    };
+    let valid_id = match key {
+        "bvid" => {
+            value.len() == 12
+                && value.starts_with("BV")
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        }
+        "aid" => parse_aid(value).is_some(),
+        _ => false,
+    };
+    valid_id && url.as_str() == format!("{VIDEO_METADATA_ENDPOINT}?{key}={value}")
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VideoReferenceMetadata {
+    title: Option<String>,
+    cover_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VideoMetadataResponse {
+    code: i64,
+    data: Option<VideoMetadataData>,
+}
+
+#[derive(Deserialize)]
+struct VideoMetadataData {
+    bvid: String,
+    aid: u64,
+    title: Option<String>,
+    pic: Option<String>,
+}
+
+fn video_cover_url(origin: &Url, image: &str) -> Option<String> {
+    let mut url = Url::parse(&html::public_image_url(origin, image)?).ok()?;
+    if !url.domain()?.ends_with(".hdslb.com") {
+        return None;
+    }
+    let archive = url.path().strip_prefix("/bfs/archive/");
+    if url.query().is_none()
+        && archive
+            .and_then(|file| file.split_once('.'))
+            .is_some_and(|(name, extension)| {
+                !name.is_empty()
+                    && name.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                    && matches!(extension, "jpg" | "jpeg" | "png" | "webp")
+            })
+    {
+        url.set_path(&format!("{}@480w.webp", url.path()));
+    }
+    Some(url.into())
+}
+
+fn parse_video_metadata(
+    bytes: &[u8],
+    id: &VideoId,
+    origin: &Url,
+) -> Option<VideoReferenceMetadata> {
+    let response: VideoMetadataResponse = serde_json::from_slice(bytes).ok()?;
+    if response.code != 0 {
+        return None;
+    }
+    let data = response.data?;
+    let matches = match id {
+        VideoId::Bvid(id) => data.bvid == *id,
+        VideoId::Aid(id) => data.aid == *id,
+    };
+    if !matches {
+        return None;
+    }
+    let title = data
+        .title
+        .as_deref()
+        .and_then(|value| html::compact_text(value, 160));
+    let cover_url = data
+        .pic
+        .as_deref()
+        .and_then(|value| video_cover_url(origin, value));
+    (title.is_some() || cover_url.is_some()).then_some(VideoReferenceMetadata { title, cover_url })
+}
+
+pub(super) async fn video_reference_metadata(page: &Url) -> Option<VideoReferenceMetadata> {
+    let id = VideoId::from_page(page)?;
+    let endpoint = id.endpoint()?;
+    let (source, bytes) = fetch_with_redirect_check(
+        endpoint,
+        "application/json",
+        MAX_VIDEO_METADATA_BYTES,
+        |_| false,
+    )
+    .await
+    .ok()?;
+    parse_video_metadata(&bytes, &id, &source)
+}
 
 pub(super) fn playlist_id(url: &Url) -> Option<u64> {
     if url.scheme() != "https"
@@ -276,6 +430,72 @@ mod tests {
     use serde_json::{json, Value};
 
     const CREATOR: u64 = 66482012;
+
+    #[test]
+    fn builds_only_the_canonical_video_metadata_routes() {
+        let page = Url::parse("https://m.bilibili.com/video/bv1cXVz67EaF/?p=2#fragment").unwrap();
+        let endpoint = VideoId::from_page(&page).unwrap().endpoint().unwrap();
+        assert_eq!(
+            endpoint.as_str(),
+            "https://api.bilibili.com/x/web-interface/view?bvid=BV1cXVz67EaF"
+        );
+        assert!(official_video_metadata_route(&endpoint));
+        let av = Url::parse("https://www.bilibili.com/video/av123").unwrap();
+        assert!(official_video_metadata_route(
+            &VideoId::from_page(&av).unwrap().endpoint().unwrap()
+        ));
+        for bad in [
+            "https://www.bilibili.com/video/BV1cXVz67EaF/extra",
+            "https://www.bilibili.com.example/video/BV1cXVz67EaF",
+            "https://www.bilibili.com:444/video/BV1cXVz67EaF",
+            "https://www.bilibili.com/video/av0",
+        ] {
+            assert!(
+                VideoId::from_page(&Url::parse(bad).unwrap()).is_none(),
+                "{bad}"
+            );
+        }
+        for bad in [
+            "https://api.bilibili.com/x/web-interface/view?bvid=BV1cXVz67EaF&foo=1",
+            "https://api.bilibili.com/x/web-interface/view?bvid=BV1cXVz67EaF#extra",
+            "https://api.bilibili.com.example/x/web-interface/view?bvid=BV1cXVz67EaF",
+        ] {
+            assert!(
+                !official_video_metadata_route(&Url::parse(bad).unwrap()),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_video_identity_and_filters_cover_urls() {
+        let expected = VideoId::Bvid("BV1cXVz67EaF".into());
+        let origin = expected.endpoint().unwrap();
+        let mut response = json!({
+            "code": 0,
+            "data": {
+                "aid": 123,
+                "bvid": "BV1cXVz67EaF",
+                "title": " 实际视频   标题 ",
+                "pic": "http://i2.hdslb.com/bfs/archive/ABC123.png"
+            }
+        });
+        let parse = |response: &Value| {
+            parse_video_metadata(response.to_string().as_bytes(), &expected, &origin)
+        };
+        let video = parse(&response).unwrap();
+        assert_eq!(video.title.as_deref(), Some("实际视频 标题"));
+        assert_eq!(
+            video.cover_url.as_deref(),
+            Some("https://i2.hdslb.com/bfs/archive/ABC123.png@480w.webp")
+        );
+        response["data"]["pic"] = json!("https://i2.hdslb.com.example/bfs/archive/ABC123.png");
+        assert!(parse(&response).unwrap().cover_url.is_none());
+        response["data"]["bvid"] = json!("BV1AAAAAABBB");
+        assert!(parse(&response).is_none());
+        response["code"] = json!(-412);
+        assert!(parse(&response).is_none());
+    }
 
     fn page(rows: Vec<Value>, total: u64) -> Value {
         json!({

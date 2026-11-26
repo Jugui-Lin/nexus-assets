@@ -34,6 +34,7 @@ const BUILD_FILES: &[(&str, &[u8])] = &[
     source_file!("c4d_preview.rs"),
     source_file!("collections.rs"),
     source_file!("creative_subscriptions.rs"),
+    source_file!("ies_preview.rs"),
     source_file!("linear_preview.rs"),
     source_file!("max_preview.rs"),
     source_file!("team.rs"),

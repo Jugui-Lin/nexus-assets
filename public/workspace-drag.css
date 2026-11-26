@@ -27,10 +27,16 @@
 .marquee-selecting, .marquee-selecting * { cursor: crosshair !important; user-select: none; }
 .dragging-assets, .dragging-assets * { cursor: grabbing !important; user-select: none; }
 
-#selection-marquee, #drag-badge {
+#selection-marquee, #drag-badge, .asset-drag-preview {
   position: fixed;
   z-index: 25;
   pointer-events: none;
+}
+
+.asset-drag-preview {
+  top: 0;
+  left: 0;
+  object-fit: contain;
 }
 
 #selection-marquee { border: 1px solid #a9b5ff; background: #8a9afb35; }
@@ -60,15 +66,15 @@
 .dcc-drop-dock {
   position: absolute;
   z-index: 8;
-  left: 50%;
-  bottom: 42px;
+  left: var(--asset-drag-dock-left, 50%);
+  bottom: var(--asset-drag-dock-bottom, 42px);
   transform: translateX(-50%);
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 6px;
   width: max-content;
-  max-width: calc(100% - 32px);
+  max-width: var(--asset-drag-dock-width, calc(100% - 32px));
   padding: 6px;
   border: 1px solid #566391;
   border-radius: 8px;
@@ -77,6 +83,7 @@
 }
 
 .dcc-drop-dock > button { gap: 7px; white-space: nowrap; }
+.assets-over-whiteboard .dcc-drop-dock { display: none; }
 
 .files-drop-overlay {
   position: fixed;
@@ -177,6 +184,7 @@
 #asset-menu [role="menuitem"] svg { width: 15px; height: 15px; }
 #asset-menu [role="menuitem"] kbd { margin-left: auto; color: var(--muted); font: inherit; font-size: 11px; }
 #asset-menu [role="menuitem"] .asset-menu-chevron { margin-left: auto; width: 12px; height: 12px; color: var(--muted); }
+#asset-menu [role="menuitem"]:disabled { opacity: .45; cursor: default; background: transparent; }
 .asset-menu-pager {
   display: grid;
   grid-template-columns: 1fr auto 1fr;

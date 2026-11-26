@@ -88,42 +88,127 @@ async function imageDigest(buffer) {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
+let database;
+
+function openDatabase() {
+  if (database) return database;
+  const opening = new Promise((resolve, reject) => {
+    const request = indexedDB.open('nexus-whiteboard-images', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('images');
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        if (database === opening) database = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => reject(Error('无法打开白板图片存储。'));
+  });
+  database = opening;
+  opening.catch(() => { if (database === opening) database = null; });
+  return opening;
+}
+
+function teamCachePrefix(teamId) {
+  if (typeof teamId !== 'string' || !teamId) throw Error('请先打开团队白板。');
+  // Cache keys start with the JSON-encoded team ID, independent of the board project.
+  return JSON.stringify([teamId]).slice(0,-1) + ',';
+}
+
+function cacheImageId(key) {
+  try {
+    const id = JSON.parse(key)?.[2];
+    return typeof id === 'string' && imageIdPattern.test(id) ? id : null;
+  } catch { return null; }
+}
+
+export async function listWhiteboardImageCache(teamId) {
+  const prefix = teamCachePrefix(teamId);
+  const db = await openDatabase();
+  const range = IDBKeyRange.bound(prefix,prefix + '\uffff',false,true);
+  return new Promise((resolve,reject) => {
+    const transaction = db.transaction('images','readonly');
+    const request = transaction.objectStore('images').openCursor(range);
+    const entries = [];
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      const blob = cursor.value;
+      const id = cacheImageId(cursor.key);
+      if (id && blob instanceof Blob && imageTypes.has(blob.type)) {
+        entries.push({key:cursor.key,id,bytes:blob.size,mime:blob.type});
+      }
+      cursor.continue();
+    };
+    transaction.oncomplete = () => resolve(entries);
+    transaction.onabort = () => reject(Error('无法读取本机白板图片缓存。'));
+  });
+}
+
+async function imagesTransaction(mode, start) {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('images', mode);
+    const request = start(transaction.objectStore('images'));
+    transaction.oncomplete = () => resolve(request.result);
+    transaction.onabort = () => reject(Error('无法读写本机白板图片，请检查存储空间。'));
+  });
+}
+
+export async function readWhiteboardImageCache(teamId, keys) {
+  const prefix = teamCachePrefix(teamId);
+  const allowed = [...new Set(keys)].filter(key => typeof key === 'string' && key.startsWith(prefix))
+    .map(key => ({key,id:cacheImageId(key)})).filter(({id}) => id);
+  if (!allowed.length) return [];
+  const db = await openDatabase();
+  return new Promise((resolve,reject) => {
+    const transaction = db.transaction('images','readonly');
+    const store = transaction.objectStore('images');
+    const requests = allowed.map(entry => ({...entry,request:store.get(entry.key)}));
+    transaction.oncomplete = () => resolve(requests.map(({key,id,request}) => ({key,id,blob:request.result}))
+      .filter(({blob}) => blob instanceof Blob && imageTypes.has(blob.type)));
+    transaction.onabort = () => reject(Error('无法读取选中的白板图片缓存。'));
+  });
+}
+
+async function decodeTeamImage(data, id) {
+  if (!imageTypes.has(data?.mime) || typeof data.base64 !== 'string' ||
+      !data.base64.length || data.base64.length > maxBase64Length) throw Error('团队图片数据无效。');
+  const bytes = Uint8Array.from(atob(data.base64), value => value.charCodeAt(0));
+  const [mime, width, height] = imageHeader(bytes.buffer);
+  if (bytes.length > maxBytes || mime !== data.mime || await imageDigest(bytes.buffer) !== id) {
+    throw Error('团队图片数据无效。');
+  }
+  checkDimensions(width, height);
+  return new Blob([bytes], {type:mime});
+}
+
+export async function clearSyncedWhiteboardImageCache({teamId,keys,api,available}) {
+  const entries = await readWhiteboardImageCache(teamId,keys);
+  const synced = new Map();
+  let cleared = 0;
+  for (const {key,id} of entries) {
+    if (!available()) break;
+    if (!synced.has(id)) {
+      const found = await Promise.resolve().then(() => api('team_whiteboard_get_image', {teamId,imageId:id}))
+        .then(data => decodeTeamImage(data,id)).then(() => true, () => false);
+      synced.set(id,found);
+    }
+    if (!available()) break;
+    if (synced.get(id)) {
+      await imagesTransaction('readwrite',store => store.delete(key));
+      cleared++;
+    }
+  }
+  return {cleared,skipped:entries.length - cleared};
+}
+
 export function createWhiteboardImages({api}) {
-  let database;
   const uploads = new Map();
   const downloads = new Map();
   const uploaded = new Set();
   const cacheKey = (scope, id) => JSON.stringify([scope.teamId || null, scope.workspaceKey || scope.key || '', id]);
-
-  function openDatabase() {
-    if (database) return database;
-    const opening = new Promise((resolve, reject) => {
-      const request = indexedDB.open('nexus-whiteboard-images', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('images');
-      request.onsuccess = () => {
-        const db = request.result;
-        db.onversionchange = () => {
-          db.close();
-          if (database === opening) database = null;
-        };
-        resolve(db);
-      };
-      request.onerror = () => reject(Error('无法打开白板图片存储。'));
-    });
-    database = opening;
-    opening.catch(() => { if (database === opening) database = null; });
-    return opening;
-  }
-
-  async function imagesTransaction(mode, start) {
-    const db = await openDatabase();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction('images', mode);
-      const request = start(transaction.objectStore('images'));
-      transaction.oncomplete = () => resolve(request.result);
-      transaction.onabort = () => reject(Error('无法读写本机白板图片，请检查存储空间。'));
-    });
-  }
 
   function storeBlob(key, blob) {
     return imagesTransaction('readwrite', store => store.put(blob, key));
@@ -135,15 +220,7 @@ export function createWhiteboardImages({api}) {
 
   async function fetchBlob(teamId, id, key) {
     const data = await api('team_whiteboard_get_image', {teamId, imageId:id});
-    if (!imageTypes.has(data?.mime) || typeof data.base64 !== 'string' ||
-        !data.base64.length || data.base64.length > maxBase64Length) throw Error('团队图片数据无效。');
-    const bytes = Uint8Array.from(atob(data.base64), value => value.charCodeAt(0));
-    const [mime, width, height] = imageHeader(bytes.buffer);
-    if (bytes.length > maxBytes || mime !== data.mime || await imageDigest(bytes.buffer) !== id) {
-      throw Error('团队图片数据无效。');
-    }
-    checkDimensions(width, height);
-    const blob = new Blob([bytes], {type:mime});
+    const blob = await decodeTeamImage(data,id);
     await storeBlob(key, blob);
     uploaded.add(key);
     return blob;

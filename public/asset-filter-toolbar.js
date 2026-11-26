@@ -245,6 +245,7 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
       const button = create('button', 'asset-filter-option', option.textContent);
       button.dataset.value = option.value;
       button.addEventListener('click', () => {
+        if (option.hidden || option.disabled) return;
         definition.select.value = option.value;
         definition.select.dispatchEvent(new Event('change', {bubbles:true}));
         close(true);
@@ -255,7 +256,10 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
     toolbar.append(panel);
     definition.panel = panel;
     definition.refresh = () => {
-      for (const button of options.children) {
+      for (const [index, button] of [...options.children].entries()) {
+        const option = definition.select.options[index];
+        button.classList.toggle('hidden', option.hidden);
+        button.disabled = option.disabled;
         button.setAttribute('aria-pressed', String(button.dataset.value === definition.select.value));
       }
     };

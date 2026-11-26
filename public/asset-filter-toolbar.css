@@ -15,7 +15,7 @@
 }
 
 .asset-filter-strip > :is(button, .view-controls, .toolbar-connection),
-#asset-pinned-filters { flex-shrink: 0; }
+:is(#asset-pinned-filters, [data-pane-source="asset-pinned-filters"]) { flex-shrink: 0; }
 .asset-filter-strip .view-controls { margin-inline-start: auto; }
 .asset-filter-strip #view-density { display: block; }
 .asset-filter-strip .toolbar-connection {
@@ -25,15 +25,15 @@
   margin-inline-start: 4px;
   padding: 0 2px;
 }
-.asset-filter-strip #connection-summary {
+.asset-filter-strip :is(#connection-summary, [data-pane-source="connection-summary"]) {
   max-width: 84px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#asset-pinned-filters { display: flex; gap: 3px; }
-#asset-pinned-filters:empty { display: none; }
+:is(#asset-pinned-filters, [data-pane-source="asset-pinned-filters"]) { display: flex; gap: 3px; }
+:is(#asset-pinned-filters, [data-pane-source="asset-pinned-filters"]):empty { display: none; }
 
 .asset-filter-trigger {
   display: inline-flex;
@@ -50,7 +50,7 @@
 
 .asset-filter-trigger svg,
 .asset-filter-panel svg { width: 14px; height: 14px; }
-#asset-filter-more-toggle { min-width: 30px; padding-inline: 6px; }
+:is(#asset-filter-more-toggle, [data-pane-source="asset-filter-more-toggle"]) { min-width: 30px; padding-inline: 6px; }
 .asset-filter-trigger:hover,
 .asset-filter-trigger[aria-expanded="true"] { background: #242e30; }
 .asset-filter-trigger.is-active,

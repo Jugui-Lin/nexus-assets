@@ -36,6 +36,7 @@ pub(crate) async fn team_organization(
             available: false,
             revision: 0,
             favorite_ids: Vec::new(),
+            favorite_times: None,
             collections: Vec::new(),
         }
     } else {
@@ -45,6 +46,12 @@ pub(crate) async fn team_organization(
         return Err("团队工作空间已切换".into());
     }
     desktop_ids(&mut result.favorite_ids);
+    result.favorite_times = result.favorite_times.map(|times| {
+        times
+            .into_iter()
+            .map(|(id, time)| (format!("team:{id}"), time))
+            .collect()
+    });
     for collection in &mut result.collections {
         desktop_ids(&mut collection.asset_ids);
     }

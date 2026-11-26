@@ -37,6 +37,7 @@ mod drop_ingest;
 mod folder_browser;
 mod folder_deletion;
 mod library_visibility;
+mod mesh_preview;
 mod native_drag;
 mod nexus_updater;
 mod personal_tags;
@@ -400,10 +401,11 @@ async fn read_preview(
     size: Option<u32>,
 ) -> Result<Value, String> {
     let size = thumbnail_desktop::checked_size(size)?;
-    let _image_slot = if matches!(mode.as_str(), "mesh" | "mesh_thumbnail") {
-        None
+    let mesh = matches!(mode.as_str(), "mesh" | "mesh_thumbnail");
+    let _preview_slot = if mesh {
+        mesh_preview::slot().await?
     } else {
-        Some(thumbnail_desktop::image_slot().await?)
+        thumbnail_desktop::image_slot().await?
     };
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -414,25 +416,24 @@ async fn read_preview(
             return Ok(preview_image_payload(thumbnail_desktop::read_shared_thumbnail(&state, &app, &id, size)?));
         }
         let source = thumbnail_desktop::PreviewSource::resolve(&state, &app, &id)?;
-        if matches!(mode.as_str(), "mesh" | "mesh_thumbnail") {
-            use std::io::Read;
+        if mode == "dimensions" {
+            if source.asset.kind != "texture" {
+                return Ok(Value::Null);
+            }
+            let dimensions = image::image_dimensions(&source.asset.path).ok();
+            return Ok(dimensions.map_or(Value::Null, |(width, height)| {
+                json!({"width":width,"height":height})
+            }));
+        }
+        if mesh {
             let a = &source.asset;
-            let mesh_limit = if mode == "mesh_thumbnail" { 750_000 } else { 30_000_000 };
-            if !matches!(a.ext.as_str(), "obj" | "stl" | "ply" | "glb" | "gltf") {
-                return Err("交互预览支持 OBJ、STL、PLY、GLB 和内嵌几何的 glTF".into());
-            }
-            let cache_key = if mode == "mesh_thumbnail" { source.mesh_key(size) } else { None };
-            let mut bytes = Vec::new();
-            fs::File::open(&a.path).map_err(|e| e.to_string())?.take(mesh_limit + 1)
-                .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-            if bytes.len() as u64 > mesh_limit {
-                return Err("网格文件超过此预览模式的文件大小限制".into());
-            }
-            let mut payload = if a.ext != "obj" {
-                json!({"base64":base64::engine::general_purpose::STANDARD.encode(bytes)})
-            } else {
-                let source = String::from_utf8(bytes).map_err(|_| "OBJ 文件不是 UTF-8 文本")?;
-                json!({"text":source})
+            let thumbnail = mode == "mesh_thumbnail";
+            let cache_key = if thumbnail { source.mesh_key(size) } else { None };
+            let mut payload = match mesh_preview::read(Path::new(&a.path), &a.ext, thumbnail)? {
+                mesh_preview::Preview::Obj(text) => json!({"text":text}),
+                mesh_preview::Preview::Binary(bytes) => {
+                    json!({"base64":base64::engine::general_purpose::STANDARD.encode(bytes)})
+                }
             };
             if let Some(cache_key) = cache_key {
                 payload["cacheKey"] = json!(cache_key);
@@ -558,6 +559,16 @@ impl SmartImportOptions {
         self.scene_import.is_some() || self.max_mode.is_some()
     }
 
+    fn direct_max_textures(&self, extension: &str, saved_mode: Option<&str>) -> bool {
+        use c4d_import_preferences::MaxMode;
+        extension == "max"
+            && matches!(self.kind.as_str(), "auto" | "scene")
+            && self.scene_import.as_ref().is_none_or(|scene| scene.materials && scene.textures)
+            && match self.max_mode {
+                Some(mode) => matches!(mode, MaxMode::Direct),
+                None => saved_mode == Some("direct"),
+            }
+    }
 
     fn validate(&self) -> Result<(), String> {
         if !matches!(
@@ -672,7 +683,7 @@ async fn queue_import(
         return Err("资产文件不可用，请检查本地路径或网盘挂载".into());
     }
     let mut j = json!({"id":Uuid::new_v4().to_string(),"sessionId":session_id,"dcc":session["dcc"],"assetId":a.id,"name":a.name,"path":a.path,"status":"queued","created":now()});
-    if let Some(options) = smart_options {
+    if let Some(options) = &smart_options {
         j["mode"] = json!("smart");
         j["options"] = json!(options);
     }
@@ -711,6 +722,12 @@ async fn queue_import(
             }
         }
     }
+    if host == "c4d" && session["maxTextureBindings"] != true && j["projectExport"].is_null() {
+        let saved_mode = j["c4dPreferences"]["settings"]["maxMode"].as_str();
+        if smart_options.as_ref().is_some_and(|options| options.direct_max_textures(&a.ext, saved_mode)) {
+            return Err("当前 Cinema 4D 会话还在运行旧桥接。请保存工程，在 DCC 连接中心更新桥接，完全退出并重开 Cinema 4D 后再导入 MAX 贴图。".into());
+        }
+    }
     lock_db(&state)?.put_job(&j)?;
     Ok(j)
     }).await.map_err(|e|e.to_string())?
@@ -745,8 +762,9 @@ async fn register(
     let project_export = smart_import && v["projectExport"] == true;
     let scene_import = smart_import && v["sceneImportOptions"] == true;
     let scoped_c4d_preferences = smart_import && v["scopedC4dPreferences"] == true;
+    let max_texture_bindings = smart_import && v["maxTextureBindings"] == true;
     let max_import = dcc == "blender" && v["maxImport"] == true;
-    let session = json!({"id":id,"dcc":dcc,"pid":v["pid"],"placement":placement,"maxImport":max_import,"smartImport":smart_import,"projectExport":project_export,"sceneImportOptions":scene_import,"scopedC4dPreferences":scoped_c4d_preferences,"label":v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),"lastSeen":now()});
+    let session = json!({"id":id,"dcc":dcc,"pid":v["pid"],"placement":placement,"maxImport":max_import,"smartImport":smart_import,"projectExport":project_export,"sceneImportOptions":scene_import,"scopedC4dPreferences":scoped_c4d_preferences,"maxTextureBindings":max_texture_bindings,"label":v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),"lastSeen":now()});
     s.sessions.lock().unwrap().insert(id.clone(), session);
     Ok(Json(json!({"id":id})))
 }
@@ -991,6 +1009,7 @@ fn main() {
             baidu_cloud_desktop::baidu_open_authorization,
             subscription_feed::subscription_feed,
             subscription_feed::subscription_discover,
+            subscription_feed::creative_video_reference_metadata,
             subscription_feed::site::browser_site_metadata,
             subscription_feed::subscription_profile,
             subscription_feed::xinpianchang_player,
@@ -1023,6 +1042,7 @@ fn main() {
             team_desktop::quick_access::team_quick_access,
             team_desktop::quick_access::team_set_quick_access,
             team_desktop::whiteboard::team_whiteboard_get,
+            team_desktop::whiteboard::team_whiteboard_presence,
             team_desktop::whiteboard::team_whiteboard_apply,
             team_desktop::whiteboard::team_whiteboard_projects,
             team_desktop::whiteboard::team_whiteboard_create_project,
@@ -1030,6 +1050,11 @@ fn main() {
             team_desktop::whiteboard::team_whiteboard_put_image,
             team_desktop::whiteboard::team_whiteboard_get_image,
             team_desktop::whiteboard::read_whiteboard_image_file,
+            team_desktop::whiteboard::read_whiteboard_clipboard_files,
+            team_desktop::whiteboard::team_import_whiteboard_files,
+            team_desktop::whiteboard::team_reference_whiteboard_files,
+            team_desktop::whiteboard::team_reveal_whiteboard_file,
+            team_desktop::whiteboard::team_preview_whiteboard_file,
             team_desktop::recycle::team_list_recycled_assets,
             team_desktop::recycle::team_recycle_assets,
             team_desktop::recycle::team_restore_recycled_assets,

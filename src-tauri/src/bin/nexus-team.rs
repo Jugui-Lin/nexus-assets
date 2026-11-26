@@ -38,6 +38,8 @@ mod sources;
 mod quick_access;
 #[path = "nexus-team/whiteboard.rs"]
 mod whiteboard;
+#[path = "nexus-team/whiteboard_presence.rs"]
+mod whiteboard_presence;
 
 #[derive(Clone)]
 struct Store(Arc<Mutex<Connection>>);
@@ -2037,6 +2039,7 @@ fn router(
         .merge(asset_recycle::routes())
         .merge(quick_access::routes())
         .merge(whiteboard::routes())
+        .merge(whiteboard_presence::routes())
         .route(
             "/v1/tags",
             post(create_tag)

@@ -171,7 +171,7 @@ impl PreviewSource {
     }
 
     pub(super) fn thumbnail(&self, size: u32) -> Result<Option<(String, Vec<u8>)>, String> {
-        if self.asset.ext == "max" {
+        if matches!(self.asset.ext.as_str(), "max" | "ies") {
             if let Some(path) = self.local_directory(false).ok().flatten() {
                 if let Some(image) = self.cached_thumbnail(&path, size) {
                     return Ok(Some(image));
@@ -388,7 +388,12 @@ async fn store_thumbnail(
         let status = if video {
             source.store_video_thumbnail(size, &cache_key, &bytes, batch)?
         } else {
-            thumbnail_cache::store_mesh(&source.asset, &source.write_directory(batch)?, size, &cache_key, &bytes)?
+            let directory = source.write_directory(batch)?;
+            let status = thumbnail_cache::store_mesh(&source.asset, &directory, size, &cache_key, &bytes)?;
+            if let Ok(Some((mime, image))) = thumbnail_cache::read(&source.asset, &directory, size) {
+                source.cache_indexed_thumbnail(size, &mime, &image);
+            }
+            status
         };
         serde_json::to_value(status).map_err(|error| error.to_string())
     })

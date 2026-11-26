@@ -1,0 +1,21 @@
+.asset-grid.masonry-mode:not(.list-mode)[data-masonry-layout] {
+  display: block;
+  position: relative;
+  min-height: var(--masonry-height, 0px);
+}
+
+.asset-grid.masonry-mode:not(.list-mode)[data-masonry-layout] > .asset-card {
+  position: absolute;
+  inset-inline-start: var(--masonry-inline, 0px);
+  top: var(--masonry-top, 0px);
+  width: var(--masonry-width);
+}
+
+.asset-grid.masonry-mode:not(.list-mode) > .asset-card .card-thumb {
+  height: auto;
+  aspect-ratio: var(--masonry-aspect, var(--masonry-placeholder-aspect, 1));
+}
+
+.asset-grid.masonry-mode > :is([data-video-hover], [data-masonry-video]) { --masonry-placeholder-aspect: 16 / 9; }
+
+.browser-scroll:has(> .masonry-mode[data-masonry-layout]:not(.hidden)) { overflow-anchor: none; }

@@ -16,6 +16,7 @@ mod max_preview;
 mod collections;
 pub mod creative_subscriptions;
 mod file_import;
+mod ies_preview;
 mod linear_preview;
 #[cfg(all(windows, feature = "desktop"))]
 mod jpeg_preview;
@@ -33,6 +34,15 @@ pub fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+pub fn now_millis() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 pub fn kind(ext: &str) -> Option<&'static str> {
     match ext {
@@ -138,6 +148,8 @@ pub struct Asset {
     pub tags: Vec<String>,
     #[serde(default)]
     pub favorite: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_at: Option<u64>,
     #[serde(default)]
     pub notes: String,
     #[serde(default)]
@@ -373,6 +385,7 @@ impl Catalog {
             library_id: library.into(),
             tags: vec![],
             favorite: false,
+            favorite_at: None,
             notes: String::new(),
             rating: 0,
             workflow: WorkflowStatus::Unset,
@@ -651,6 +664,9 @@ impl Catalog {
             }
         }
         if let Some(b) = patch.get("favorite").and_then(Value::as_bool) {
+            if b != a.favorite {
+                a.favorite_at = b.then(now_millis);
+            }
             a.favorite = b;
         }
         if let Some(s) = patch.get("notes").and_then(Value::as_str) {
@@ -820,7 +836,9 @@ pub fn scaled_preview_image(
     max_size: u32,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
     let embedded_scene = a.kind == "scene" && matches!(a.ext.as_str(), "c4d" | "max") && a.thumbnail.is_none();
-    let p = if a.kind == "texture" || embedded_scene {
+    let p = if a.ext == "ies" {
+        a.thumbnail.as_deref().or(Some(a.path.as_str()))
+    } else if a.kind == "texture" || embedded_scene {
         Some(a.path.as_str())
     } else {
         a.thumbnail.as_deref()
@@ -840,7 +858,7 @@ pub fn scaled_preview_image(
             fs::read(p).map_err(|e| e.to_string())?,
         )));
     }
-    if !embedded_scene && !preview_image_format(&ext) {
+    if !embedded_scene && ext != "ies" && !preview_image_format(&ext) {
         return Ok(None);
     }
     if !embedded_scene && metadata.len() > MAX_PREVIEW_SOURCE_BYTES {
@@ -880,6 +898,32 @@ pub fn scaled_preview_image(
 }
 
 const MAX_PREVIEW_SOURCE_BYTES: u64 = 192 * 1024 * 1024;
+
+fn attachment_extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+pub fn supports_attachment_preview(path: &Path) -> bool {
+    let extension = attachment_extension(path);
+    extension == "c4d" || preview_image_format(&extension)
+}
+
+pub fn attachment_preview_png(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let extension = attachment_extension(path);
+    if extension != "c4d" && !preview_image_format(&extension) {
+        return Ok(None);
+    }
+    let source_bytes = fs::metadata(path).map_err(|error| error.to_string())?.len();
+    if extension != "c4d" && source_bytes > MAX_PREVIEW_SOURCE_BYTES {
+        return Ok(None);
+    }
+    const MAX_ATTACHMENT_PREVIEW_BYTES: usize = 300 * 1024;
+    Ok(decode_scaled_preview(path, &extension, 256, source_bytes)?
+        .filter(|bytes| bytes.len() <= MAX_ATTACHMENT_PREVIEW_BYTES))
+}
 
 fn preview_image_format(ext: &str) -> bool {
     matches!(
@@ -940,6 +984,7 @@ fn decode_raster_preview(
 fn decode_scaled_preview(path: &Path, ext: &str, max_size: u32, source_bytes: u64) -> Result<Option<Vec<u8>>, String> {
     let embedded = match ext {
         "c4d" => c4d_preview::decode(path)?,
+        "ies" => ies_preview::decode(path, max_size)?,
         "max" => max_preview::decode(path)?,
         _ => Some(decode_raster_preview(path, ext, max_size, source_bytes)?),
     };
@@ -1036,15 +1081,18 @@ mod tests {
         let r = c.scan(&assets, None, "local", |_| {}).unwrap();
         assert_eq!(r["found"], 1);
         let a = c.assets().unwrap().remove(0);
-        c.patch(
+        let favorite_time = c.patch(
             &a.id,
             json!({"favorite":true,"tags":["家具","家具",""],"notes":"检查材质","rating":4,"workflow":"review"}),
         )
+        .unwrap()
+        .favorite_at
         .unwrap();
         c.scan(&assets, None, "local", |_| {}).unwrap();
         let out = c.assets().unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].favorite);
+        assert_eq!(out[0].favorite_at, Some(favorite_time));
         assert_eq!(out[0].tags, vec!["家具"]);
         assert_eq!(out[0].notes, "检查材质");
         assert_eq!(out[0].rating, 4);
@@ -1052,6 +1100,21 @@ mod tests {
         assert!(c.patch(&a.id, json!({"rating": 6})).is_err());
         assert!(c.patch(&a.id, json!({"workflow": "unknown"})).is_err());
         assert_eq!(c.asset(&a.id).unwrap().rating, 4);
+        assert_eq!(
+            c.patch(&a.id, json!({"favorite":true})).unwrap().favorite_at,
+            Some(favorite_time)
+        );
+        assert_eq!(
+            c.patch(&a.id, json!({"favorite":false})).unwrap().favorite_at,
+            None
+        );
+        let mut legacy = c.asset(&a.id).unwrap();
+        legacy.favorite = true;
+        c.upsert(&legacy).unwrap();
+        assert_eq!(
+            c.patch(&a.id, json!({"favorite":true})).unwrap().favorite_at,
+            None
+        );
     }
     #[test]
     fn scan_batches_report_committed_progress_and_keep_successful_rows() {

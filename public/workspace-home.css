@@ -1,5 +1,4 @@
-#app.workspace-home-active .work-area { grid-template-columns: minmax(0, 1fr); }
-#app.workspace-home-active :is(.inspector, .workspace-divider--inspector, .workspace-panel-toggle--inspector, .footer-keys) { display: none; }
+#app.workspace-home-active .footer-keys { display: none; }
 
 .workspace-home-toggle {
   min-height: var(--page-control-size);

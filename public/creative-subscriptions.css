@@ -1,5 +1,4 @@
-.workspace-subscriptions .work-area { grid-template-columns: minmax(0, 1fr); }
-.workspace-subscriptions :is(.inspector, .workspace-divider--inspector, .workspace-panel-toggle--inspector, .footer-keys) { display: none; }
+.workspace-subscriptions .footer-keys { display: none; }
 #creative-subscriptions { min-width: 0; padding: 6px 0 18px; }
 .creative-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-bottom: 10px; }
 .creative-search { flex: 0 1 245px; min-width: min(100%, 165px); background: var(--panel); border-color: var(--line); }
@@ -129,6 +128,27 @@
 .creator-work-meta time { white-space: nowrap; }
 .creator-work-open { position: absolute; inset-inline-end: 8px; inset-block-start: 50%; transform: translateY(-50%); width: 24px; height: 24px; color: var(--muted); }
 .creator-work-open svg { width: 14px; height: 14px; }
+#creator-video-references { margin-block-start: 22px; padding-block-start: 12px; border-top: 1px solid var(--line); }
+.creator-reference-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.creator-reference-toolbar h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 650; }
+.creator-reference-form { display: flex; flex: 1 1 295px; flex-wrap: wrap; gap: 6px; align-items: center; }
+#creator-video-reference-status { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+#creator-video-reference-status:empty { display: none; }
+.creator-reference-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 225px), 1fr));
+  gap: 10px; padding: 0; margin: 10px 0 0; list-style: none;
+}
+.creator-reference-list[hidden] { display: none; }
+.creator-reference-card { display: flex; flex-direction: column; gap: 7px; padding: 7px; cursor: pointer; }
+.creator-reference-card:only-child { max-inline-size: 315px; }
+.creator-reference-card .creator-work-cover { display: grid; flex-basis: auto; width: 100%; }
+.creator-reference-card .creator-work-cover > img { pointer-events: none; }
+.creator-reference-caption { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.creator-reference-caption .icon-button { flex: 0 0 25px; width: 25px; height: 26px; }
+.creator-reference-caption .icon-button svg { width: 14px; height: 14px; }
+.creator-reference-label { flex: 1; min-width: 0; padding-inline-start: 2px; }
+.creator-reference-card:hover .creator-work-title { color: var(--accent); }
+.creator-reference-host { display: block; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .creator-works[data-layout="cards"] .creator-work-play { flex-direction: column; align-items: stretch; gap: 8px; padding: 7px; }
 .creator-works[data-layout="cards"] .creator-work-cover { flex-basis: auto; width: 100%; }
 .creator-works[data-layout="cards"] .creator-work-content { flex: none; padding: 0 2px 2px; }

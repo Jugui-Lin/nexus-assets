@@ -12,6 +12,10 @@ function overlaps(a, b) {
   return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 }
 
+function fraction(value) {
+  return Math.min(1, Math.max(0, value));
+}
+
 export function initWorkspaceDrag(options) {
   const grid = document.querySelector('#asset-grid');
   const scroll = document.querySelector('#browser-scroll');
@@ -21,11 +25,17 @@ export function initWorkspaceDrag(options) {
   const app = document.querySelector('#app');
   let gesture;
   let highlighted;
+  let droppingPreview;
   let suppressClickUntil = 0;
   let frame;
   let outgoing = false;
 
-  function finish() {
+  function clearDroppingPreview() {
+    droppingPreview?.remove();
+    droppingPreview = null;
+  }
+
+  function finish(keepPreview = false) {
     const current = gesture;
     if (!current) return null;
     gesture = null;
@@ -36,15 +46,23 @@ export function initWorkspaceDrag(options) {
     marquee.classList.add('hidden');
     badge.classList.add('hidden');
     dock.classList.add('hidden');
+    dock.style.removeProperty('--asset-drag-dock-left');
+    dock.style.removeProperty('--asset-drag-dock-bottom');
+    dock.style.removeProperty('--asset-drag-dock-width');
+    if (keepPreview) {
+      clearDroppingPreview();
+      droppingPreview = current.preview.element;
+    } else current.preview?.element.remove();
     highlighted?.classList.remove('drop-target-active');
     highlighted = null;
-    app.classList.remove('dragging-assets', 'marquee-selecting', 'has-drop-target');
+    app.classList.remove('dragging-assets', 'marquee-selecting', 'has-drop-target', 'assets-over-whiteboard');
     return current;
   }
 
   function cancel() {
     const current = finish();
     if (current?.active && current.kind === 'marquee') options.mark(current.before);
+    return Boolean(current?.active);
   }
 
   function startOutgoing(current, ids) {
@@ -75,7 +93,7 @@ export function initWorkspaceDrag(options) {
     if (event.clientX >= area.left + scroll.clientWidth) return;
     gesture = {
       kind: handle ? 'native' : !card || event.shiftKey ? 'marquee' : 'assets',
-      id: card?.dataset.id, pointer: event.pointerId, x: event.clientX, y: event.clientY,
+      id: card?.dataset.id, card, pointer: event.pointerId, x: event.clientX, y: event.clientY,
       scrollTop: scroll.scrollTop, before: options.marked(), additive: event.shiftKey || event.ctrlKey || event.metaKey,
       active: false,
     };
@@ -98,18 +116,81 @@ export function initWorkspaceDrag(options) {
     options.mark(current.additive ? new Set([...current.before, ...hits]) : new Set(hits));
   }
 
-  function findTarget(x, y) {
-    return document.elementFromPoint(x, y)?.closest(options.dropSelector) || null;
+  function findTarget(x, y, ids) {
+    const hit = document.elementFromPoint(x, y);
+    return hit?.closest(options.dropSelector) || options.canvasDropTarget?.(hit, x, y, ids) || null;
   }
 
-  function drawAssets(x, y) {
-    badge.style.left = Math.max(4, Math.min(x + 15, window.innerWidth - badge.offsetWidth - 6)) + 'px';
-    badge.style.top = Math.max(4, Math.min(y + 16, window.innerHeight - badge.offsetHeight - 6)) + 'px';
-    const target = findTarget(x, y);
+  function positionPreview(preview, x, y) {
+    const {element, width, height, gripX, gripY} = preview;
+    element.style.transform = 'translate(' + (x - width * gripX) + 'px, ' + (y - height * gripY) + 'px)';
+  }
+
+  function prepareMediaPreview(current) {
+    const id = current.canvasAssetId;
+    const source = grid.querySelector('.asset-card[data-id="' + CSS.escape(id) + '"] img[data-thumb]');
+    const image = new Image();
+    const frame = (source?.checkVisibility() ? source : current.card?.querySelector('.card-thumb'))?.getBoundingClientRect();
+    if (!frame?.width || !frame.height) return;
+    image.className = 'asset-drag-preview';
+    image.alt = '';
+    image.draggable = false;
+    image.setAttribute('aria-hidden', 'true');
+    image.hidden = true;
+
+    function show(naturalWidth, naturalHeight) {
+      if (gesture !== current || !naturalWidth || !naturalHeight) return;
+      const scale = Math.min(frame.width / naturalWidth, frame.height / naturalHeight);
+      const width = scale * naturalWidth;
+      const height = scale * naturalHeight;
+      const gripX = id === current.id ? fraction((current.x - frame.left - (frame.width - width) / 2) / width) : .5;
+      const gripY = id === current.id ? fraction((current.y - frame.top - (frame.height - height) / 2) / height) : .5;
+      image.style.width = width + 'px';
+      image.style.height = height + 'px';
+      current.preview = {element:image, assetId:id, width, height, gripX, gripY};
+      document.body.append(image);
+      if (Number.isFinite(current.clientX)) drawAssets(current, current.clientX, current.clientY);
+    }
+
+    if (source?.complete && source.naturalWidth && source.currentSrc) {
+      image.src = source.currentSrc;
+      show(source.naturalWidth, source.naturalHeight);
+    } else {
+      options.loadCanvasPreview?.(id, current.scope).then(async url => {
+        if (!url || gesture !== current) return;
+        image.src = url;
+        await image.decode();
+        show(image.naturalWidth, image.naturalHeight);
+      }).catch(() => {});
+    }
+  }
+
+  function drawAssets(current, x, y) {
+    const target = findTarget(x, y, current.ids);
+    const onCanvas = target?.classList.contains('whiteboard-stage');
+    const showMedia = Boolean(current.canvasAssetId && (!target || onCanvas));
+    app.classList.toggle('assets-over-whiteboard', Boolean(onCanvas));
+    badge.classList.toggle('hidden', showMedia);
+    dock.classList.toggle('hidden', onCanvas || !dock.childElementCount);
+    if (current.canvasAssetId && !dock.classList.contains('hidden')) {
+      const pane = scroll.parentElement.getBoundingClientRect();
+      const origin = dock.parentElement.getBoundingClientRect();
+      dock.style.setProperty('--asset-drag-dock-left', pane.left + pane.width / 2 - origin.left + 'px');
+      dock.style.setProperty('--asset-drag-dock-bottom', origin.bottom - pane.bottom + 10 + 'px');
+      dock.style.setProperty('--asset-drag-dock-width', Math.max(0, pane.width - 20) + 'px');
+    }
+    if (current.preview) {
+      current.preview.element.hidden = !showMedia;
+      if (showMedia) positionPreview(current.preview, x, y);
+    }
+    if (!showMedia) {
+      badge.style.left = Math.max(4, Math.min(x + 15, window.innerWidth - badge.offsetWidth - 6)) + 'px';
+      badge.style.top = Math.max(4, Math.min(y + 16, window.innerHeight - badge.offsetHeight - 6)) + 'px';
+    }
     if (target === highlighted) return;
     highlighted?.classList.remove('drop-target-active');
     highlighted = target;
-    highlighted?.classList.add('drop-target-active');
+    if (!onCanvas) highlighted?.classList.add('drop-target-active');
     app.classList.toggle('has-drop-target', Boolean(target));
   }
 
@@ -127,7 +208,7 @@ export function initWorkspaceDrag(options) {
     const previous = scroll.scrollTop;
     if (delta) scroll.scrollTop += delta;
     if (current.kind === 'marquee') drawMarquee(current, x, y);
-    else drawAssets(x, y);
+    else drawAssets(current, x, y);
     if (previous !== scroll.scrollTop) frame = requestAnimationFrame(draw);
   }
 
@@ -150,11 +231,11 @@ export function initWorkspaceDrag(options) {
       } else {
         current.ids = options.draggedIds(current.id);
         current.scope = options.scope();
+        current.canvasAssetId = options.canvasMediaId?.(current.ids, current.id);
         app.classList.add('dragging-assets');
         const hint = options.outgoingHint?.(current.ids);
         badge.textContent = current.ids.length + ' 项资产' + (hint ? ' · ' + hint : '');
-        badge.classList.remove('hidden');
-        dock.classList.toggle('hidden', !dock.childElementCount);
+        if (current.canvasAssetId) prepareMediaPreview(current);
         if (options.allowExternalDrag && options.waitForExternalDrag && current.ids.length) {
           // The Windows cursor watch also covers cases where the WebView drops an edge event.
           Promise.resolve().then(() => options.waitForExternalDrag()).then(exited => {
@@ -176,11 +257,22 @@ export function initWorkspaceDrag(options) {
 
   function up(event) {
     if (gesture?.pointer !== event.pointerId) return;
-    const target = gesture.active && gesture.kind === 'assets' && findTarget(event.clientX, event.clientY);
+    const {clientX:x, clientY:y} = event;
+    const target = gesture.active && gesture.kind === 'assets' && findTarget(x, y, gesture.ids);
     if (gesture.active && gesture.kind === 'marquee') drawMarquee(gesture, event.clientX, event.clientY);
-    const current = finish();
-    if (target && current.scope === options.scope()) {
-      Promise.resolve(options.drop(target, current.ids, current.scope)).catch(options.onError);
+    const validDrop = target && gesture.scope === options.scope();
+    const preview = validDrop && target.classList.contains('whiteboard-stage') ? gesture.preview : null;
+    if (preview) {
+      preview.element.hidden = false;
+      positionPreview(preview, x, y);
+    }
+    const current = finish(Boolean(preview));
+    if (validDrop) {
+      const media = preview && {assetId:preview.assetId, width:preview.width, height:preview.height,
+        gripX:preview.gripX, gripY:preview.gripY};
+      Promise.resolve(options.drop(target, current.ids, current.scope, {x, y, media})).catch(options.onError).finally(() => {
+        if (droppingPreview === preview?.element) clearDroppingPreview();
+      });
     }
   }
 
@@ -196,12 +288,17 @@ export function initWorkspaceDrag(options) {
     if (gesture.kind === 'assets' && (event.buttons & 1)) return;
     cancel();
   });
-  window.addEventListener('blur', cancel);
+  window.addEventListener('pointerdown', clearDroppingPreview, {capture:true});
+  window.addEventListener('blur', () => {
+    cancel();
+    clearDroppingPreview();
+  });
   window.addEventListener('keydown', event => {
     if (event.key === 'Escape' && gesture?.active) {
       event.preventDefault();
       cancel();
     }
+    if (event.key === 'Escape') clearDroppingPreview();
   });
   document.addEventListener('click', event => {
     if (event.detail && (gesture?.active || performance.now() < suppressClickUntil)) {
@@ -209,5 +306,8 @@ export function initWorkspaceDrag(options) {
       event.stopImmediatePropagation();
     }
   }, true);
-  return {isDraggingOut: () => outgoing};
+  return {
+    cancelActive: () => Boolean(gesture?.active) && cancel(),
+    isDraggingOut: () => outgoing,
+  };
 }
