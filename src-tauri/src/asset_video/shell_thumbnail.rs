@@ -55,12 +55,12 @@ impl Drop for ShellBitmap {
 }
 
 fn windows_error(error: windows::core::Error) -> String {
-    format!("Windows 无法提取视频缩略图：{error}")
+    format!("Windows 无法提取文件缩略图：{error}")
 }
 
 pub(super) fn read(path: &Path, size: u32) -> Result<DynamicImage, String> {
     if !path.is_absolute() || !(128..=1024).contains(&size) {
-        return Err("视频缩略图路径或尺寸无效".into());
+        return Err("文件缩略图路径或尺寸无效".into());
     }
     let _apartment = Apartment::enter().map_err(windows_error)?;
     let filename: Vec<u16> = nexus_core::clean_path(path)
@@ -92,7 +92,7 @@ pub(super) fn read(path: &Path, size: u32) -> Result<DynamicImage, String> {
                 .max(details.bmHeight.unsigned_abs())
                 > MAX_BITMAP_EDGE
         {
-            return Err("Windows 返回的视频缩略图尺寸无效".into());
+            return Err("Windows 返回的文件缩略图尺寸无效".into());
         }
 
         let wic: IWICImagingFactory =
@@ -106,7 +106,7 @@ pub(super) fn read(path: &Path, size: u32) -> Result<DynamicImage, String> {
             .GetSize(&mut width, &mut height)
             .map_err(windows_error)?;
         if width.min(height) == 0 || width.max(height) > MAX_BITMAP_EDGE {
-            return Err("Windows 返回的视频缩略图尺寸无效".into());
+            return Err("Windows 返回的文件缩略图尺寸无效".into());
         }
         let converter = wic.CreateFormatConverter().map_err(windows_error)?;
         converter
@@ -127,7 +127,7 @@ pub(super) fn read(path: &Path, size: u32) -> Result<DynamicImage, String> {
         (pixels, width, height)
     };
     let image = DynamicImage::ImageRgb8(
-        RgbImage::from_raw(width, height, pixels).ok_or("无法读取 Windows 视频缩略图像素")?,
+        RgbImage::from_raw(width, height, pixels).ok_or("无法读取 Windows 文件缩略图像素")?,
     );
     Ok(if width.max(height) > size {
         image.thumbnail(size, size)

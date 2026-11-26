@@ -245,7 +245,7 @@ function createPinRemovalDialog() {
   return {dialog, description, error, cancel, confirm};
 }
 
-export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenPinnedFolder, onLocatePinnedFolder, onApplySearch, onRescanFolder, onNotify, canMoveFolder, moveFolder, teamQuickAccess}) {
+export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenPinnedFolder, onLocatePinnedFolder, onApplySearch, onRefreshAssets, onNotify, canMoveFolder, moveFolder, teamQuickAccess}) {
   const mainNav = document.querySelector('#main-nav');
   const selectVisible = document.querySelector('#select-visible');
   const searchInput = document.querySelector('#search');
@@ -294,17 +294,11 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
   selectVisible.before(actions);
   actions.append(saveSearch, selectVisible);
 
-  const folderActions = element('div', 'workspace-folder-actions hidden');
+  const folderActions = document.querySelector('#asset-folder-actions');
   const pin = button('icon-button workspace-folder-button workspace-pin-folder', '固定当前文件夹', 'star');
-  (searchInput.closest('.asset-search-control') || mainNav).before(folderActions);
-  folderActions.append(pin);
-  const rescan = onRescanFolder && button('icon-button workspace-folder-button workspace-rescan-folder', '重新扫描当前文件夹');
-  if (rescan) {
-    const glyph = element('span', '', '↻');
-    glyph.setAttribute('aria-hidden', 'true');
-    rescan.append(glyph);
-    folderActions.append(rescan);
-  }
+  folderActions.prepend(pin);
+  const refresh = onRefreshAssets && button('icon-button workspace-folder-button workspace-refresh-assets', '刷新当前目录', 'refresh');
+  if (refresh) pin.after(refresh);
 
   const dialog = createSaveDialog();
   const pinRemoval = createPinRemovalDialog();
@@ -313,7 +307,7 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
   let pendingRemoval = null;
   let pinScope = getScope();
   let editingPins = false;
-  let rescanning = false;
+  let refreshing = false;
   let shared = {key:null, status:'idle', records:[], revision:null};
   let sharedRead;
   let sharedWrite;
@@ -437,12 +431,6 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
   function currentFolder() {
     const {library, folder} = getState();
     return library ? resolveFolder(library, folder) : null;
-  }
-
-  function currentScannableLibrary() {
-    const shared = getScope().startsWith('team:');
-    const {library, libraries} = getState();
-    return libraries.find(item => item.id === library && (shared ? item.watching : item.path)) || null;
   }
 
   function searchFocusTarget() {
@@ -654,11 +642,7 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
     const folder = currentFolder();
     const folderKey = folder ? pinKey(state.library, folder.path) : null;
     folderActions.classList.toggle('hidden', !folder);
-    if (rescan) {
-      rescan.classList.toggle('hidden', !currentScannableLibrary());
-      rescan.setAttribute('aria-disabled', String(rescanning));
-      rescan.title = rescanning ? '正在重新扫描文件夹' : '重新扫描当前文件夹';
-    }
+    refresh?.classList.toggle('hidden', !folder || !views.includes(state.view));
 
     const searches = saved.searches.map(item => {
       const query = resolveQuery(item.query);
@@ -742,26 +726,20 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
     const {library, folder} = getState();
     if (library) togglePin(library, folder);
   });
-  rescan?.addEventListener('click', async () => {
-    const library = currentScannableLibrary();
-    const folder = currentFolder();
-    if (!library || !folder || rescanning) return;
+  refresh?.addEventListener('click', async () => {
+    if (refreshing || !currentFolder() || !views.includes(getState().view)) return;
     const scope = getScope();
-    rescanning = true;
-    render();
-    onNotify(`正在重新扫描「${folder.name}」…`);
+    refreshing = true;
+    refresh.setAttribute('aria-disabled', 'true');
+    refresh.title = '正在刷新当前目录';
     try {
-      const result = await onRescanFolder(library, folder.path);
-      if (scope === getScope()) {
-        const partial = result.errors?.length ? '，部分文件无法读取' : '';
-        const count = Number.isFinite(result.found) ? `，已索引 ${result.found} 项资产` : '';
-        onNotify(`「${folder.name}」重新扫描完成${count}${partial}`);
-      }
+      await onRefreshAssets();
     } catch (error) {
-      if (scope === getScope()) onNotify(`重新扫描失败：${error?.message || error}`, true);
+      if (scope === getScope()) onNotify(`刷新失败。${error?.message || error}`, true);
     } finally {
-      rescanning = false;
-      render();
+      refreshing = false;
+      refresh.removeAttribute('aria-disabled');
+      refresh.title = refresh.getAttribute('aria-label');
     }
   });
   window.addEventListener('storage', event => {

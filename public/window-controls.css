@@ -1,0 +1,84 @@
+[data-window-drag][hidden], .nexus-window-controls[hidden], #nexus-workspace-bar[hidden] { display: none; }
+
+#nexus-workspace-bar:not([hidden]) {
+  --workspace-bar-height: 34px;
+  box-sizing: border-box;
+  block-size: var(--workspace-bar-height);
+}
+
+#nexus-workspace-bar:not([hidden]) ~ :is(#app, #file-workspace) {
+  block-size: calc(100dvh - 34px);
+  min-block-size: 0;
+}
+
+[data-window-drag]:not([hidden]) {
+  app-region: drag;
+  align-self: stretch;
+  flex: 1 0 22px;
+  user-select: none;
+}
+
+.nexus-window-controls {
+  align-self: stretch;
+  display: flex;
+  flex: none;
+  align-items: stretch;
+}
+
+#nexus-workspace-bar .nexus-window-controls {
+  margin-block-start: -4px;
+}
+
+#nexus-workspace-bar .nexus-window-controls button {
+  display: grid;
+  place-items: center;
+  inline-size: 37px;
+  padding: 0;
+  border-radius: 0;
+  color: var(--muted);
+}
+
+#nexus-workspace-bar .nexus-window-controls button:hover {
+  background: #8882;
+  color: var(--text);
+}
+
+#nexus-workspace-bar .nexus-window-controls [data-window-action="close"]:hover {
+  background: #b8383a;
+  color: white;
+}
+
+.nexus-window-controls button svg {
+  inline-size: 16px;
+  block-size: 16px;
+}
+
+#nexus-workspace-bar [data-explorer-drop-active] {
+  outline: 1px solid var(--explorer-meter);
+  outline-offset: -1px;
+}
+
+#file-workspace-menu {
+  flex: none;
+  app-region: no-drag;
+}
+
+#file-workspace-menu[open] { z-index: 16; }
+
+#file-workspace-menu > #file-workspace-settings {
+  display: grid;
+  inline-size: 27px;
+  block-size: 27px;
+  padding: 0;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--muted);
+}
+
+#file-workspace-menu > #file-workspace-settings:is(:hover, :focus-visible),
+#file-workspace-menu[open] > #file-workspace-settings {
+  background: var(--explorer-hover);
+  color: var(--accent);
+}
+
+#file-workspace-menu > .workspace-tools-panel { background: var(--card); }

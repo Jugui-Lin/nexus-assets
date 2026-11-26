@@ -4,8 +4,13 @@ import {captureWorkspacePane} from './workspace-pane-preview.js';
 const dividerSize = 8;
 const deckBottomInset = 4;
 const minimumSplitSpan = 420;
+const closedTabLimit = 16;
 
-export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goHome, icon, thumbnail, onPaneLayout = () => {}, onDuplicate = () => {}, onError = () => {}}) {
+export function initWorkspaceTabs({
+  getScope, capture, restore, beforeSwitch, goHome, icon, thumbnail, onReveal,
+  onEmpty, onDetachTab, onRestoreReveal = onReveal, canDetachActive = () => true,
+  doubleClickCloseEnabled = () => false, onPaneLayout = () => {}, onDuplicate = () => {}, onError = () => {},
+}) {
   const heading = document.getElementById('page-title');
   const add = document.getElementById('workspace-tab-add');
   const join = document.getElementById('workspace-pane-join');
@@ -26,9 +31,11 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
   let shown;
   let splitSide = 'right';
   let operation;
+  const detaching = new Set();
+  const closedTabs = [];
   let ratio = 50;
 
-  function createTab(title, snapshot) {
+  function createTab(title, snapshot, initialView) {
     const group = document.createElement('div');
     group.className = 'workspace-tab';
     group.setAttribute('role', 'presentation');
@@ -37,15 +44,47 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
     trigger.className = 'workspace-tab-trigger';
     trigger.setAttribute('role', 'tab');
     trigger.setAttribute('aria-keyshortcuts', 'Delete');
+    if (onReveal) trigger.innerHTML = icon('stack');
+    const label = document.createElement('span');
+    trigger.append(label);
+    const pin = document.createElement('span');
+    pin.className = 'workspace-tab-pin';
+    pin.hidden = true;
+    pin.setAttribute('aria-hidden','true');
+    pin.innerHTML = icon('pin');
+    trigger.append(pin);
     const close = document.createElement('button');
     close.type = 'button';
     close.className = 'workspace-tab-close';
     close.innerHTML = icon('close');
-    const tab = {id:'workspace-tab-' + ++sequence, title, snapshot, group, trigger, close};
+    const tab = {id:'workspace-tab-' + ++sequence, title, snapshot, initialView, group, trigger, label, close,pin,pinned:false};
     trigger.id = tab.id;
     group.dataset.tabId = tab.id;
     group.append(trigger, close);
-    trigger.addEventListener('click', () => activate(paneFor(tab), tab));
+    let opening;
+    trigger.addEventListener('click', event => {
+      if (event.detail > 1 && doubleClickCloseEnabled()) return;
+      opening = openTab(tab);
+    });
+    trigger.addEventListener('dblclick', event => {
+      if (event.button !== 0 || !doubleClickCloseEnabled()) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const clickedScope = scope;
+      const pending = opening;
+      opening = undefined;
+      const closeClickedTab = () => {
+        if (scope === clickedScope && scope === getScope() && paneFor(tab) && doubleClickCloseEnabled()) {
+          remove(tab);
+        }
+      };
+      // The first click may still be revealing or switching to this tab.
+      // A declined switch or a different active tab must leave it in place.
+      if (pending) void pending.then(result => {
+        if (result !== false && shown === tab) closeClickedTab();
+      });
+      else closeClickedTab();
+    });
     close.addEventListener('click', () => remove(tab));
     return tab;
   }
@@ -55,7 +94,7 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
   }
 
   function paint() {
-    const split = secondary.tabs.length > 0;
+    const split = Boolean(secondary.active);
     const axis = dockAxis(splitSide);
     deck.toggleAttribute('data-workspace-split', split);
     deck.dataset.splitSide = splitSide;
@@ -65,8 +104,9 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
     divider.setAttribute('aria-orientation', axis === 'rows' ? 'horizontal' : 'vertical');
     divider.setAttribute('aria-label', axis === 'rows' ? '调整分屏高度' : '调整分屏宽度');
     divider.hidden = join.hidden = !split;
-    secondary.list.hidden = secondary.element.hidden = !split;
     for (const pane of panes) {
+      pane.list.hidden = !pane.active;
+      pane.element.hidden = pane !== primary && !pane.active;
       const isFocused = pane === focused;
       pane.element.toggleAttribute('data-pane-focused', isFocused);
       pane.element.tabIndex = !isFocused && pane.active ? 0 : -1;
@@ -82,8 +122,11 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
       pane.tabs.forEach((tab, index) => {
         const selected = tab === pane.active;
         if (pane.list.children[index] !== tab.group) pane.list.insertBefore(tab.group, pane.list.children[index] ?? null);
-        if (tab.trigger.textContent !== tab.title) tab.trigger.textContent = tab.title;
-        tab.trigger.title = tab.title;
+        if (tab.label.textContent !== tab.title) tab.label.textContent = tab.title;
+        tab.trigger.title = tab.title + (tab.pinned ? ' · 已固定' : '');
+        tab.trigger.setAttribute('aria-label',tab.trigger.title);
+        tab.group.toggleAttribute('data-pinned',tab.pinned);
+        tab.pin.hidden = !tab.pinned;
         tab.trigger.setAttribute('aria-controls', pane.element.id);
         tab.trigger.setAttribute('aria-selected', String(selected));
         tab.trigger.tabIndex = selected ? 0 : -1;
@@ -98,25 +141,29 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
 
   function placeAssetControls() {
     const liveAssets = !controls.hidden;
-    const restingAssets = panes.some(pane => pane.preview?.header);
-    const local = Boolean(secondary.active) && liveAssets !== restingAssets;
+    const local = panes.some(pane => pane !== focused && pane.active && Boolean(pane.preview?.header) !== liveAssets);
     deck.toggleAttribute('data-pane-local-controls', local);
     const anchor = local && liveAssets ? scroll : deck;
     if (controls.nextElementSibling !== anchor) anchor.before(controls);
     onPaneLayout({split:Boolean(secondary.active), pane:scroll.parentElement, assetView:liveAssets, tabId:shown?.id});
   }
 
-  function resetScope() {
+  function resetScope(title = heading.textContent.trim() || '资产工作台') {
     drag.cancel();
-    scope = getScope();
+    const nextScope = getScope();
+    if (scope !== nextScope) closedTabs.length = 0;
+    scope = nextScope;
     operation = undefined;
     deck.removeAttribute('aria-busy');
     focused = primary;
-    shown = primary.active = createTab(heading.textContent.trim() || '资产工作台');
+    shown = primary.active = createTab(title);
     primary.tabs = [shown];
-    secondary.active = null;
-    secondary.tabs = [];
+    splitSide = 'right';
     for (const pane of panes) {
+      if (pane !== primary) {
+        pane.active = null;
+        pane.tabs = [];
+      }
       pane.preview?.dispose();
       pane.preview?.element.remove();
       pane.preview?.header?.remove();
@@ -129,7 +176,7 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
   }
 
   function ensureScope() {
-    if (!shown || scope !== getScope()) resetScope();
+    if (scope !== getScope()) resetScope();
   }
 
   function focusTab(tab) {
@@ -146,7 +193,7 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
     if (shown === tab) return;
     shown = tab;
     if (tab.snapshot) restore(tab.snapshot);
-    else goHome();
+    else goHome(tab.initialView);
   }
 
   function collectPreviews() {
@@ -171,12 +218,12 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
 
   function showLayout(previews) {
     paint();
-    const resting = panes.find(pane => pane !== focused && pane.active);
-    if (resting) {
+    for (const resting of panes.filter(pane => pane !== focused && pane.active)) {
       const tab = resting.active;
       let preview = previews.get(tab);
       if (!preview) {
         present(resting, tab);
+        if (!tab.snapshot) tab.snapshot = capture();
         const previewScope = scope;
         preview = captureWorkspacePane(scroll, {
           controls: controls.hidden ? null : controls,
@@ -187,24 +234,26 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
       if (preview.header) resting.element.append(preview.header);
       resting.element.append(preview.element);
     }
-    present(focused, focused.active);
+    if (focused.active) present(focused, focused.active);
+    else shown = undefined;
     placeAssetControls();
-    resting?.preview.restoreScroll(resting.active.snapshot?.scroll);
+    for (const pane of panes) pane.preview?.restoreScroll(pane.active?.snapshot?.scroll);
   }
 
   async function transition(change, moveFocus = false) {
     ensureScope();
-    if (operation) return;
+    if (operation) return false;
     const token = {};
     operation = token;
     deck.setAttribute('aria-busy', 'true');
     const current = () => operation === token && scope === getScope();
     try {
-      if (await beforeSwitch() === false || !current()) return;
-      shown.snapshot = capture();
+      if (await beforeSwitch() === false || !current()) return false;
+      if (shown) shown.snapshot = capture();
       const previews = collectPreviews();
       const previousFocus = focused;
       const previousSide = splitSide;
+      const previousRatio = ratio;
       const previousPanes = panes.map(pane => ({tabs:[...pane.tabs], active:pane.active}));
       try {
         change();
@@ -214,6 +263,7 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
         panes.forEach((pane, index) => Object.assign(pane, previousPanes[index]));
         focused = previousFocus;
         splitSide = previousSide;
+        setRatio(previousRatio);
         shown = undefined;
         try { showLayout(previews); }
         finally { disposeUnusedPreviews(attemptedPreviews); }
@@ -221,9 +271,12 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
       } finally {
         disposeUnusedPreviews(previews);
       }
-      if (moveFocus) focusTab(focused.active);
+      if (moveFocus && focused.active) focusTab(focused.active);
+      if (!focused.active) onEmpty?.();
+      return true;
     } catch (failure) {
       if (current()) onError(failure);
+      return false;
     } finally {
       if (operation === token) {
         operation = undefined;
@@ -241,31 +294,127 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
     }, keyboard);
   }
 
+  function openTab(tab, keyboard = false) {
+    const shown = onReveal?.();
+    if (shown) return shown.then(() => activate(paneFor(tab),tab,keyboard)).catch(failure => {
+      onError(failure);
+      return false;
+    });
+    return activate(paneFor(tab),tab,keyboard);
+  }
+
   function removeFromPane(pane, tab) {
     const index = pane.tabs.indexOf(tab);
     pane.tabs.splice(index, 1);
     if (tab !== pane.active) return;
     pane.active = pane.tabs[index] || pane.tabs[index - 1] || null;
-    if (pane === primary && !pane.active) {
-      pane.active = createTab('主页');
-      pane.tabs.push(pane.active);
-    }
   }
 
-  function remove(tab) {
+  function compactPanes() {
+    if (!primary.active && secondary.active) {
+      primary.tabs = secondary.tabs;
+      primary.active = secondary.active;
+      secondary.tabs = [];
+      secondary.active = null;
+    }
+    if (!secondary.active) focused = primary;
+  }
+
+  function rememberClosed(tab, pane, index) {
+    closedTabs.push({
+      title:tab.title,snapshot:tab.snapshot,initialView:tab.initialView,
+      pinned:tab.pinned,paneId:pane.id,index,
+    });
+    if (closedTabs.length > closedTabLimit) closedTabs.shift();
+  }
+
+  function remove(tab, {skipFocus = false, remember = true} = {}) {
     ensureScope();
     const pane = paneFor(tab);
     if (!pane || operation) return;
+    const index = pane.tabs.indexOf(tab);
+    const originalScope = scope;
     if (tab !== pane.active) {
       removeFromPane(pane, tab);
+      if (remember) rememberClosed(tab,pane,index);
       paint();
-      focusTab(pane.active);
+      if (!skipFocus) focusTab(pane.active);
       return;
     }
-    transition(() => {
+    return transition(() => {
       removeFromPane(pane, tab);
-      if (!focused.active) focused = primary;
-    }, true);
+      compactPanes();
+      if (!primary.active && !onEmpty) {
+        primary.active = createTab('全部资产');
+        primary.tabs = [primary.active];
+      }
+    }, !skipFocus).then(closed => {
+      if (closed && remember && scope === originalScope) rememberClosed(tab,pane,index);
+      return closed;
+    });
+  }
+
+  function tabById(id) {
+    return panes.flatMap(pane => pane.tabs).find(tab => tab.id === id);
+  }
+
+  function findManagedTab(element) {
+    const tab = tabById(element.closest('.workspace-tab[data-tab-id]')?.dataset.tabId);
+    return tab && {id:tab.id,title:tab.title,pinned:tab.pinned};
+  }
+
+  function setTabPinned(id,pinned) {
+    ensureScope();
+    const tab = tabById(id);
+    if (!tab || operation) return false;
+    tab.pinned = pinned;
+    paint();
+    return true;
+  }
+
+  function otherUnpinnedTabs(target) {
+    return paneFor(target)?.tabs.filter(tab => tab !== target && !tab.pinned) ?? [];
+  }
+
+  async function closeOtherTabs(id) {
+    ensureScope();
+    const target = tabById(id);
+    const pane = paneFor(target);
+    const others = otherUnpinnedTabs(target);
+    if (!pane || !others.length || operation) return false;
+    const originalScope = scope;
+    const removed = others.map(tab => ({tab,index:pane.tabs.indexOf(tab)}));
+    const keep = () => { pane.tabs = pane.tabs.filter(tab => !others.includes(tab)); };
+    if (target === shown) {
+      keep();
+      paint();
+      focusTab(target);
+    } else if (!await transition(() => {
+      keep();
+      pane.active = target;
+      focused = pane;
+    },true)) return false;
+    if (scope === originalScope) {
+      for (const {tab,index} of removed) rememberClosed(tab,pane,index);
+    }
+    return true;
+  }
+
+  async function restoreClosedTab() {
+    const record = closedTabs.at(-1);
+    const originalScope = scope;
+    if (!record || operation || originalScope !== getScope()) return false;
+    await onRestoreReveal?.();
+    if (originalScope !== scope || originalScope !== getScope() || !closedTabs.includes(record)) return false;
+    const restored = await transition(() => {
+      focused = record.paneId === secondary.id && secondary.active ? secondary : primary;
+      const tab = createTab(record.title,record.snapshot,record.initialView);
+      tab.pinned = record.pinned;
+      focused.tabs.splice(record.index,0,tab);
+      focused.active = tab;
+    },true);
+    if (restored && originalScope === scope && closedTabs.includes(record)) closedTabs.splice(closedTabs.indexOf(record),1);
+    return restored;
   }
 
   function paneAtEdge(edge) {
@@ -303,32 +452,67 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
       }
       target.active = tab;
       focused = target;
+      if (dockToNewAxis && !primary.active) {
+        primary.active = createTab('全部资产');
+        primary.tabs = [primary.active];
+      }
+      compactPanes();
     }, true);
   }
 
-  add.addEventListener('click', () => {
+  async function detachTab({tabId, paneId}) {
     ensureScope();
-    if (operation) return;
+    const tab = panes.find(pane => pane.id === paneId)?.tabs.find(tab => tab.id === tabId);
+    if (!tab || operation || detaching.has(tab)) return;
+    if (tab === shown && !canDetachActive()) {
+      onError('请先保存当前页面的修改，再拖出标签页。');
+      return;
+    }
+    const page = tab === shown ? capture() : tab.snapshot;
+    if (!page) return;
+    const sourceScope = scope;
+    const original = JSON.stringify(page);
+    detaching.add(tab);
+    try {
+      const restored = await onDetachTab({scope:sourceScope,page});
+      if (!restored || sourceScope !== getScope() || !paneFor(tab)) return;
+      const current = tab === shown ? capture() : tab.snapshot;
+      if (JSON.stringify(current) === original && (tab !== shown || canDetachActive())) remove(tab,{skipFocus:true,remember:false});
+    } catch (failure) { onError(failure); }
+    finally { detaching.delete(tab); }
+  }
+
+  function insertTab(tab) {
+    focused.tabs.splice(focused.tabs.indexOf(shown) + 1, 0, tab);
+    focused.active = tab;
+  }
+
+  function duplicateActive() {
+    ensureScope();
+    if (operation || !shown) return;
     try {
       shown.snapshot = capture();
       const tab = createTab(shown.title, shown.snapshot);
-      focused.tabs.splice(focused.tabs.indexOf(shown) + 1, 0, tab);
-      shown = focused.active = tab;
+      insertTab(tab);
+      shown = tab;
       paint();
       onDuplicate();
       focusTab(tab);
     } catch (failure) { onError(failure); }
-  });
+  }
+  add.addEventListener('click', duplicateActive);
 
   join.addEventListener('click', () => {
     if (!secondary.active) return;
     transition(() => {
-      const active = focused.active;
-      primary.tabs.push(...secondary.tabs);
-      primary.active = active;
+      const otherTabs = [...primary.tabs, ...secondary.tabs].filter(tab => tab !== shown);
+      primary.tabs = [shown, ...otherTabs];
+      primary.active = shown;
       secondary.tabs = [];
       secondary.active = null;
       focused = primary;
+      splitSide = 'right';
+      setRatio(50);
     }, true);
   });
 
@@ -346,7 +530,7 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
       const offset = event.key === 'ArrowLeft' ? -1 : 1;
       const target = event.key === 'Home' ? pane.tabs[0] : event.key === 'End' ? pane.tabs.at(-1)
         : pane.tabs[(pane.tabs.indexOf(tab) + offset + pane.tabs.length) % pane.tabs.length];
-      activate(pane, target, true);
+      openTab(target, true);
     });
     pane.element.addEventListener('click', () => {
       if (pane !== focused && pane.active) activate(pane, pane.active);
@@ -393,18 +577,20 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
     root:deck,
     bounds:deck,
     getLists:() => panes.filter(pane => !pane.list.hidden).map(pane => pane.list),
-    canDrag:() => !operation,
+    canDrag:({tabId}) => !operation && ![...detaching].some(tab => tab.id === tabId),
     canSplit,
     getDockRect: (edge, rect) => secondary.active && dockAxis(edge) === dockAxis(splitSide)
       ? paneAtEdge(edge).element.getBoundingClientRect()
       : dockRect(rect, edge, {ratio:ratio / 100, gap:dividerSize, bottomInset:deckBottomInset}),
     onDrop:moveTab,
+    onDetach:onDetachTab ? detachTab : undefined,
   });
   resetScope();
   return {
     render(title) {
       ensureScope();
       placeAssetControls();
+      if (!shown) return;
       const label = String(title || '').trim() || '资产工作台';
       if (shown.title === label) return;
       shown.title = label;
@@ -412,7 +598,52 @@ export function initWorkspaceTabs({getScope, capture, restore, beforeSwitch, goH
     },
     activeId() {
       ensureScope();
-      return shown.id;
+      return shown?.id ?? null;
+    },
+    hasTab(id) {
+      ensureScope();
+      return Boolean(tabById(id));
+    },
+    getTabCount() {
+      return panes.reduce((count,pane) => count + pane.tabs.length,0);
+    },
+    duplicateActive,
+    findManagedTab,setTabPinned,closeOtherTabs,restoreClosedTab,
+    closeManagedTab:id => remove(tabById(id)),
+    canCloseOtherTabs:id => !operation && otherUnpinnedTabs(tabById(id)).length > 0,
+    hasClosedTabs:() => scope === getScope() && closedTabs.length > 0,
+    openView(title, view) {
+      return transition(() => insertTab(createTab(title, undefined, view)), true);
+    },
+    async openLinkedView(title) {
+      let tab;
+      await transition(() => {
+        tab = createTab(title, undefined, 'all');
+        insertTab(tab);
+      });
+      return tab && shown === tab ? tab.id : null;
+    },
+    async activateLinkedView(id) {
+      ensureScope();
+      const pane = panes.find(pane => pane.tabs.some(tab => tab.id === id));
+      const tab = pane?.tabs.find(tab => tab.id === id);
+      if (!tab) return false;
+      await activate(pane,tab);
+      return shown === tab;
+    },
+    ensureOpen() {
+      ensureScope();
+      if (shown) return;
+      resetScope('全部资产');
+      goHome();
+    },
+    async restoreDetachedTab(payload, restoreProject) {
+      ensureScope();
+      if (!shown || !payload?.page?.criteria || payload.scope !== scope) return false;
+      if (restore(payload.page) === false) return false;
+      if (payload.page.whiteboardProject && !await restoreProject(payload.page.whiteboardProject)) return false;
+      shown.snapshot = capture();
+      return true;
     },
     async focusPane(element, tabId) {
       ensureScope();

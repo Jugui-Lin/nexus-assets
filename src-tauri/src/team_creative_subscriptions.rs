@@ -4,6 +4,27 @@ use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
 
 const ROUTE: &str = "/v1/creative-subscriptions";
+const VIDEO_ROUTE: &str = "/v1/creative-video-references";
+
+async fn read<T: DeserializeOwned>(
+    team: &Desktop,
+    team_id: &str,
+    route: &str,
+    unavailable: T,
+) -> Result<T, String> {
+    let active = team.connection_for_team(team_id)?;
+    let request = team.authenticated_request(&active.config, Method::GET, route, None);
+    let response = Desktop::send(request).await?;
+    let result = if response.status() == StatusCode::NOT_FOUND {
+        unavailable
+    } else {
+        Desktop::decode_response(response).await?
+    };
+    if team.active_connection()? != active {
+        return Err("团队工作空间已切换".into());
+    }
+    Ok(result)
+}
 
 async fn mutate<T: DeserializeOwned>(
     team: &Desktop,
@@ -22,21 +43,16 @@ pub(crate) async fn team_creative_subscriptions(
     team: tauri::State<'_, Desktop>,
     team_id: String,
 ) -> Result<CreatorSubscriptions, String> {
-    let active = team.connection_for_team(&team_id)?;
-    let request = team.authenticated_request(&active.config, Method::GET, ROUTE, None);
-    let response = Desktop::send(request).await?;
-    let subscriptions = if response.status() == StatusCode::NOT_FOUND {
+    read(
+        &team,
+        &team_id,
+        ROUTE,
         CreatorSubscriptions {
             available: false,
             subscriptions: Vec::new(),
-        }
-    } else {
-        Desktop::decode_response(response).await?
-    };
-    if team.active_connection()? != active {
-        return Err("团队工作空间已切换".into());
-    }
-    Ok(subscriptions)
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -82,6 +98,63 @@ pub(crate) async fn team_delete_creative_subscription(
         Method::DELETE,
         &format!("{ROUTE}/{id}"),
         &RemoveCreatorSubscription { revision },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn team_creative_video_references(
+    team: tauri::State<'_, Desktop>,
+    team_id: String,
+) -> Result<VideoReferences, String> {
+    read(
+        &team,
+        &team_id,
+        VIDEO_ROUTE,
+        VideoReferences {
+            available: false,
+            references: Vec::new(),
+            revision: 0,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn team_save_creative_video_reference(
+    team: tauri::State<'_, Desktop>,
+    team_id: String,
+    reference: VideoReferenceInput,
+    migration: Option<bool>,
+    revision: Option<u64>,
+) -> Result<VideoReferences, String> {
+    mutate(
+        &team,
+        &team_id,
+        Method::PUT,
+        VIDEO_ROUTE,
+        &SaveVideoReference {
+            reference,
+            migration: migration.unwrap_or_default(),
+            revision,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn team_delete_creative_video_reference(
+    team: tauri::State<'_, Desktop>,
+    team_id: String,
+    url: String,
+    revision: u64,
+) -> Result<VideoReferences, String> {
+    mutate(
+        &team,
+        &team_id,
+        Method::DELETE,
+        VIDEO_ROUTE,
+        &RemoveVideoReference { url, revision },
     )
     .await
 }

@@ -93,7 +93,7 @@ function applyStripOffsets(strips, source, target, index, width) {
 const dockLabels = {left:'停靠到左侧', right:'停靠到右侧', top:'停靠到上方', bottom:'停靠到下方'};
 
 export function initWorkspaceTabDrag({
-  root, bounds = root, getLists, onDrop, getDockRect,
+  root, bounds = root, getLists, onDrop, getDockRect, onDetach,
   canDrag = () => true, canSplit = () => true,
 }) {
   const documentRoot = document.documentElement;
@@ -143,8 +143,9 @@ export function initWorkspaceTabDrag({
       stop();
       return;
     }
+    const outside = Boolean(onDetach && (x < -8 || y < -8 || x > window.innerWidth + 8 || y > window.innerHeight + 8));
     let strips = Array.from(getLists(), stripLayout);
-    let target = getStripAt(strips, x, y);
+    let target = outside ? null : getStripAt(strips, x, y);
     if (target && scroll && autoScroll(target, x)) {
       strips = Array.from(getLists(), stripLayout);
       target = getStripAt(strips, x, y);
@@ -152,7 +153,7 @@ export function initWorkspaceTabDrag({
     }
     const surface = typeof bounds === 'function' ? bounds() : bounds;
     const rect = surface?.getBoundingClientRect();
-    const edge = !target && rect ? getDockEdge(rect, x, y, current.drop?.edge, edge =>
+    const edge = !outside && !target && rect ? getDockEdge(rect, x, y, current.drop?.edge, edge =>
       canSplit({tabId, paneId, edge})) : null;
     let index = null;
     if (target) {
@@ -167,6 +168,7 @@ export function initWorkspaceTabDrag({
     const top = target ? target.rect.top + (target.rect.height - height) / 2 : y - dy;
     ghost.style.transform = 'translate3d(' + (x - dx) + 'px,' + top + 'px,0)';
     ghost.toggleAttribute('data-workspace-tab-snapped', Boolean(target || edge));
+    current.detached = outside;
     current.drop = target || edge
       ? {tabId, paneId, targetPaneId:target?.list.dataset.paneId ?? paneId, index, edge}
       : null;
@@ -227,6 +229,10 @@ export function initWorkspaceTabDrag({
   document.addEventListener('pointermove', event => {
     const current = gesture;
     if (!current || event.pointerId !== current.pointerId) return;
+    if (!(event.buttons & 1)) {
+      stop();
+      return;
+    }
     current.x = event.clientX;
     current.y = event.clientY;
     if (!current.dragging) {
@@ -253,8 +259,10 @@ export function initWorkspaceTabDrag({
     current.y = event.clientY;
     updateTarget();
     const drop = gesture?.drop;
+    const detached = gesture?.detached;
     stop();
-    if (drop) onDrop(drop);
+    if (detached) onDetach({tabId:current.tabId,paneId:current.paneId});
+    else if (drop) onDrop(drop);
   }, {capture:true, signal});
 
   document.addEventListener('click', event => {
@@ -266,7 +274,7 @@ export function initWorkspaceTabDrag({
 
   for (const type of ['pointercancel', 'lostpointercapture']) {
     document.addEventListener(type, event => {
-      if (event.pointerId === gesture?.pointerId) stop();
+      if (event.pointerId === gesture?.pointerId && (type !== 'lostpointercapture' || !(event.buttons & 1))) stop();
     }, {capture:true, signal});
   }
   document.addEventListener('keydown', event => {

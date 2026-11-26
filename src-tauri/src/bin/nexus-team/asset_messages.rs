@@ -2,13 +2,13 @@ use super::{
     asset_recycle::visible_asset_sql, db_error, error, with_member, ApiError, ApiResult, Store,
 };
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
 use nexus_core::now;
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -47,7 +47,18 @@ pub(super) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS member_poke_sender
             ON member_pokes(sender,created,recipient);
         CREATE INDEX IF NOT EXISTS member_poke_expired
-            ON member_pokes(created) WHERE dismissed=1;",
+            ON member_pokes(created) WHERE dismissed=1;
+        CREATE TABLE IF NOT EXISTS creative_video_reference_messages (
+            id TEXT PRIMARY KEY,
+            sender TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            recipient TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            reference_key TEXT NOT NULL REFERENCES creative_video_references(key) ON DELETE CASCADE,
+            reference_created_revision INTEGER NOT NULL,
+            created INTEGER NOT NULL,
+            UNIQUE(recipient,sender,reference_key,reference_created_revision)
+        );
+        CREATE INDEX IF NOT EXISTS creative_video_reference_message_recipient
+            ON creative_video_reference_messages(recipient,created,id);",
     )
 }
 
@@ -55,7 +66,11 @@ pub(super) fn routes() -> Router<Store> {
     Router::new()
         .route(
             "/v1/asset-messages",
-            get(inbox).post(send).layer(DefaultBodyLimit::max(4096)),
+            get(read_inbox).post(send).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/v1/creative-video-reference-messages",
+            post(send_video_reference).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/v1/asset-messages/{id}", delete(remove))
         .route(
@@ -77,6 +92,26 @@ struct PokeRequest {
     recipient_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SendVideoReferenceRequest {
+    recipient_id: String,
+    reference_key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InboxOptions {
+    #[serde(default)]
+    video_references: bool,
+}
+
+#[derive(Serialize)]
+struct VideoReferenceTarget {
+    key: String,
+    title: String,
+}
+
 #[derive(Serialize)]
 struct Accepted {
     accepted: bool,
@@ -96,6 +131,8 @@ struct Message {
     sender_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video_reference: Option<VideoReferenceTarget>,
     asset_ids: Vec<String>,
     created: u64,
 }
@@ -105,6 +142,7 @@ struct Message {
 struct Inbox {
     messages: Vec<Message>,
     pokes_available: bool,
+    video_references_available: bool,
 }
 
 fn canonical_id(value: &str) -> Result<String, ApiError> {
@@ -214,6 +252,76 @@ async fn send(
     .await
 }
 
+async fn send_video_reference(
+    State(store): State<Store>,
+    headers: HeaderMap,
+    Json(request): Json<SendVideoReferenceRequest>,
+) -> ApiResult<Accepted> {
+    with_member(store, headers, move |conn, member| {
+        let recipient = canonical_id(&request.recipient_id)?;
+        if recipient == member.id {
+            return Err(error(StatusCode::BAD_REQUEST, "请选择其他团队成员"));
+        }
+        let key = request.reference_key;
+        if key.is_empty() || key.len() > 2048 || key.chars().any(char::is_control) {
+            return Err(error(StatusCode::BAD_REQUEST, "视频引用编号无效"));
+        }
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        check_recipient(&tx, &recipient)?;
+        let revision: u64 = tx
+            .query_row(
+                "SELECT created_revision FROM creative_video_references WHERE key=?1 AND removed=0",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "这条视频引用已从团队库移除"))?;
+        let repeated: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM creative_video_reference_messages
+                 WHERE recipient=?1 AND sender=?2 AND reference_key=?3
+                       AND reference_created_revision=?4)",
+                params![recipient, member.id, key, revision],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if repeated {
+            return Ok(Accepted { accepted: true });
+        }
+        tx.execute(
+            "DELETE FROM creative_video_reference_messages AS m
+             WHERE recipient=?1 AND NOT EXISTS (SELECT 1 FROM creative_video_references r
+                 WHERE r.key=m.reference_key AND r.created_revision=m.reference_created_revision
+                       AND r.removed=0)",
+            [&recipient],
+        )
+        .map_err(db_error)?;
+        let pending: usize = tx
+            .query_row(
+                "SELECT COUNT(*) FROM creative_video_reference_messages WHERE recipient=?1",
+                [&recipient],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if pending >= MAX_INBOX {
+            return Err(error(StatusCode::CONFLICT, "该成员的待收视频引用消息已满"));
+        }
+        tx.execute(
+            "INSERT INTO creative_video_reference_messages
+                (id,sender,recipient,reference_key,reference_created_revision,created)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![Uuid::new_v4().to_string(), member.id, recipient, key, revision, now()],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(Accepted { accepted: true })
+    })
+    .await
+}
+
 async fn poke(
     State(store): State<Store>,
     headers: HeaderMap,
@@ -270,7 +378,15 @@ async fn poke(
     }).await
 }
 
-async fn inbox(State(store): State<Store>, headers: HeaderMap) -> ApiResult<Inbox> {
+async fn read_inbox(
+    State(store): State<Store>,
+    headers: HeaderMap,
+    Query(options): Query<InboxOptions>,
+) -> ApiResult<Inbox> {
+    inbox(store, headers, options.video_references).await
+}
+
+async fn inbox(store: Store, headers: HeaderMap, include_video_references: bool) -> ApiResult<Inbox> {
     with_member(store, headers, move |conn, member| {
         let visible_asset = visible_asset_sql();
         let mut statement = conn
@@ -304,6 +420,7 @@ async fn inbox(State(store): State<Store>, headers: HeaderMap) -> ApiResult<Inbo
                     sender_name,
                     sender_id: None,
                     kind: None,
+                    video_reference: None,
                     asset_ids: vec![asset_id],
                     created,
                 });
@@ -321,6 +438,7 @@ async fn inbox(State(store): State<Store>, headers: HeaderMap) -> ApiResult<Inbo
                     sender_name: row.get(2)?,
                     created: row.get(3)?,
                     kind: Some("poke"),
+                    video_reference: None,
                     asset_ids: Vec::new(),
                 })
             })
@@ -328,10 +446,39 @@ async fn inbox(State(store): State<Store>, headers: HeaderMap) -> ApiResult<Inbo
         for row in rows {
             messages.push(row.map_err(db_error)?);
         }
+        if include_video_references {
+            let mut video_references = conn.prepare(
+                "SELECT m.id,s.name,m.created,r.key,r.title,r.url
+                 FROM creative_video_reference_messages m
+                 JOIN members s ON s.id=m.sender
+                 JOIN creative_video_references r ON r.key=m.reference_key
+                     AND r.created_revision=m.reference_created_revision AND r.removed=0
+                 WHERE m.recipient=?1 ORDER BY m.created,m.rowid",
+            ).map_err(db_error)?;
+            let rows = video_references.query_map([&member.id], |row| {
+                let title: String = row.get(4)?;
+                Ok(Message {
+                    id: row.get(0)?,
+                    sender_name: row.get(1)?,
+                    sender_id: None,
+                    kind: Some("creative-video-reference"),
+                    video_reference: Some(VideoReferenceTarget {
+                        key: row.get(3)?,
+                        title: if title.is_empty() { row.get(5)? } else { title },
+                    }),
+                    asset_ids: Vec::new(),
+                    created: row.get(2)?,
+                })
+            }).map_err(db_error)?;
+            for row in rows {
+                messages.push(row.map_err(db_error)?);
+            }
+        }
         messages.sort_by_key(|message| message.created);
         Ok(Inbox {
             messages,
             pokes_available: true,
+            video_references_available: include_video_references,
         })
     })
     .await
@@ -358,8 +505,15 @@ async fn remove(
             )
             .map_err(db_error)?
             > 0;
+        let video_removed = conn
+            .execute(
+                "DELETE FROM creative_video_reference_messages WHERE id=?1 AND recipient=?2",
+                params![id, member.id],
+            )
+            .map_err(db_error)?
+            > 0;
         Ok(Removed {
-            removed: removed || dismissed,
+            removed: removed || dismissed || video_removed,
         })
     })
     .await
@@ -421,7 +575,7 @@ mod tests {
             )
             .await;
             assert!(matches!(rejected, Err((StatusCode::NOT_FOUND, _))));
-            assert!(inbox(State(store.clone()), auth(&receiver_token))
+            assert!(inbox(store.clone(), auth(&receiver_token), false)
                 .await
                 .unwrap()
                 .0
@@ -438,7 +592,7 @@ mod tests {
                 .0
                 .accepted
             );
-            let received = inbox(State(store.clone()), auth(&receiver_token))
+            let received = inbox(store.clone(), auth(&receiver_token), false)
                 .await
                 .unwrap()
                 .0;
@@ -446,7 +600,7 @@ mod tests {
             assert_eq!(message.sender_name, "共同作者");
             assert_eq!(message.asset_ids, vec![visible_id]);
             let id = message.id.clone();
-            assert!(inbox(State(store.clone()), auth(&third_token))
+            assert!(inbox(store.clone(), auth(&third_token), false)
                 .await
                 .unwrap()
                 .0
@@ -466,7 +620,7 @@ mod tests {
                     .0
                     .removed
             );
-            assert!(inbox(State(store), auth(&receiver_token))
+            assert!(inbox(store, auth(&receiver_token), false)
                 .await
                 .unwrap()
                 .0
@@ -515,7 +669,7 @@ mod tests {
             assert!(matches!(unavailable, Err((StatusCode::NOT_FOUND, _))));
             assert!(poke_member(&sender_token, &recipient).await.unwrap().0.accepted);
             assert!(poke_member(&sender_token, &recipient).await.unwrap().0.accepted);
-            let received = inbox(State(store.clone()), auth(&recipient_token)).await.unwrap().0;
+            let received = inbox(store.clone(), auth(&recipient_token), false).await.unwrap().0;
             assert!(received.pokes_available);
             assert_eq!(received.messages.len(), 1);
             let message = &received.messages[0];
@@ -524,11 +678,11 @@ mod tests {
             assert_eq!(serialized["senderId"], sender.as_str());
             assert_eq!(serialized["senderName"], "挥手者");
             assert!(message.asset_ids.is_empty());
-            assert!(inbox(State(store.clone()), auth(&other_token)).await.unwrap().0.messages.is_empty());
+            assert!(inbox(store.clone(), auth(&other_token), false).await.unwrap().0.messages.is_empty());
             assert!(!remove(State(store.clone()), auth(&other_token), Path(message.id.clone())).await.unwrap().0.removed);
             assert!(remove(State(store.clone()), auth(&recipient_token), Path(message.id.clone())).await.unwrap().0.removed);
             assert!(poke_member(&sender_token, &recipient).await.unwrap().0.accepted);
-            assert!(inbox(State(store.clone()), auth(&recipient_token)).await.unwrap().0.messages.is_empty());
+            assert!(inbox(store.clone(), auth(&recipient_token), false).await.unwrap().0.messages.is_empty());
             {
                 let conn = store.0.lock().unwrap();
                 conn.execute("DELETE FROM member_pokes", []).unwrap();

@@ -45,7 +45,7 @@ pub(super) fn routes() -> Router<Store> {
         )
 }
 
-fn checked_url(value: &str, https_only: bool) -> Result<Url, ApiError> {
+pub(super) fn checked_url(value: &str, https_only: bool) -> Result<Url, ApiError> {
     let invalid = || {
         error(
             StatusCode::BAD_REQUEST,

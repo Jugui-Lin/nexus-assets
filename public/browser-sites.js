@@ -1,5 +1,6 @@
 import {initBrowserSiteMetadata} from './browser-site-metadata.js';
 import {initBrowserSiteDrag} from './browser-site-drag.js';
+import {initBrowserSiteTeamSync} from './browser-site-team-sync.js';
 
 const defaultGroups = [
   ['视频', [
@@ -23,6 +24,7 @@ const bookmarkKey = 'nexus-browser-bookmarks-v1';
 const defaultScope = 'personal:personal';
 const defaultCategory = '其他';
 const bookmarkCategory = '收藏的网站';
+const teamRefreshInterval = 20_000;
 const siteNames = new Map([
   ['gfxcamp.com','龋齿一号 GFXCamp'],
   ['modown.cn','魔顿'],
@@ -133,32 +135,48 @@ function navigationState(sites, order = defaultGroups.map(([title]) => title), n
   return {sites, categories:[...new Set([...order, ...sites.map(site => site.category), newSiteCategory])], newSiteCategory};
 }
 
-function loadNavigation(scope) {
+function normalizeNavigation(saved) {
+  const rows = Array.isArray(saved) ? saved : saved?.sites;
+  if (!Array.isArray(rows)) return null;
+  const ids = new Set();
+  const addresses = new Set();
+  const sites = rows.flatMap(site => {
+    const id = cleanLabel(site?.id, 200);
+    const name = cleanLabel(site?.name, 120);
+    const category = cleanLabel(site?.category, 40);
+    const address = safeAddress(site?.url);
+    if (!id || !category || !address || ids.has(id) || addresses.has(address.href)) return [];
+    ids.add(id);
+    addresses.add(address.href);
+    const iconData = siteIcon(site.iconData);
+    const description = cleanDescription(site.description);
+    const url = address.href;
+    const autoName = site.autoName === true || !name || isAddressLabel(name,url);
+    return [{id, name:autoName ? automaticSiteName(url,null,name) : name, url, category, ...(iconData && {iconData}),
+      ...(description && {description}), ...(autoName && {autoName:true})}];
+  });
+  const order = Array.isArray(saved?.categories) ? saved.categories.map(title => cleanLabel(title,40)).filter(Boolean) : undefined;
+  return navigationState(sites,order,cleanLabel(saved?.newSiteCategory,40) || defaultCategory);
+}
+
+const defaultNavigation = () => navigationState(baseSites());
+
+function readNavigation(scope) {
   try {
     const stored = localStorage.getItem(scopedStorage(scope)) ?? localStorage.getItem(legacyScopedStorage(scope));
-    const saved = JSON.parse(stored ?? (scope === defaultScope ? localStorage.getItem(legacyStorageKey) : null));
-    const rows = Array.isArray(saved) ? saved : saved?.sites;
-    if (!Array.isArray(rows)) return navigationState(baseSites());
-    const ids = new Set();
-    const addresses = new Set();
-    const sites = rows.flatMap(site => {
-      const id = cleanLabel(site?.id, 200);
-      const name = cleanLabel(site?.name, 120);
-      const category = cleanLabel(site?.category, 40);
-      const address = safeAddress(site?.url);
-      if (!id || !category || !address || ids.has(id) || addresses.has(address.href)) return [];
-      ids.add(id);
-      addresses.add(address.href);
-      const iconData = siteIcon(site.iconData);
-      const description = cleanDescription(site.description);
-      const url = address.href;
-      const autoName = site.autoName === true || !name || isAddressLabel(name,url);
-      return [{id, name:autoName ? automaticSiteName(url,null,name) : name, url, category, ...(iconData && {iconData}),
-        ...(description && {description}), ...(autoName && {autoName:true})}];
-    });
-    const order = Array.isArray(saved?.categories) ? saved.categories.map(title => cleanLabel(title,40)).filter(Boolean) : undefined;
-    return navigationState(sites,order,cleanLabel(saved?.newSiteCategory,40) || defaultCategory);
-  } catch { return navigationState(baseSites()); }
+    return normalizeNavigation(JSON.parse(stored ?? (scope === defaultScope ? localStorage.getItem(legacyStorageKey) : null)));
+  } catch { return null; }
+}
+
+function mergeLegacyNavigation(shared, local) {
+  const existing = [...shared.sites,...baseSites()];
+  const ids = new Set(existing.map(site => site.id));
+  const addresses = new Set(existing.map(site => site.url));
+  const added = local.sites.filter(site => !ids.has(site.id) && !addresses.has(site.url));
+  if (!added.length) return shared;
+  const categories = new Set(added.map(site => site.category));
+  return navigationState([...shared.sites,...added],
+    [...shared.categories,...local.categories.filter(category => categories.has(category))], shared.newSiteCategory);
 }
 
 function loadBookmarks(scope) {
@@ -203,7 +221,8 @@ function actionButton(type, label, callback) {
   return button;
 }
 
-export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = defaultScope, log = () => {}}) {
+export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam, writeTeam,
+  scope = defaultScope, log = () => {}}) {
   const get = id => document.getElementById(id);
   const navigation = get('site-navigation');
   const filter = get('browser-site-filter');
@@ -211,13 +230,19 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
   const empty = get('browser-empty');
   const entry = get('browser-site-quick-url');
   const entryStatus = get('browser-site-quick-status');
-  let {sites,categories,newSiteCategory} = loadNavigation(scope);
+  const teamStatus = get('browser-site-team-status');
+  let {sites,categories,newSiteCategory} = readNavigation(scope) || defaultNavigation();
   let bookmarks = loadBookmarks(scope);
+  let workspace = scope;
+  let teamId;
+  let wasVisible = false;
   let editing;
   let categoryDraft;
   let automaticName;
   let automaticDescription;
   let lookupTimer;
+  let categoryDrag;
+  let categoryDropTarget;
 
   const dialog = element('dialog', 'browser-site-dialog');
   dialog.id = 'browser-site-dialog';
@@ -259,6 +284,30 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
   const categoryFeedback = get('browser-site-category-status');
 
   const visible = () => !document.hidden && !navigation.classList.contains('hidden') && !navigation.hidden;
+  const teamSync = readTeam && writeTeam ? initBrowserSiteTeamSync({
+    read:readTeam, write:writeTeam, normalize:normalizeNavigation, defaults:defaultNavigation,
+    legacy:readNavigation, mergeLegacy:mergeLegacyNavigation,
+    busy:() => drag.busy() || Boolean(categoryDrag) || dialog.open || categoryDialog.open,
+    apply(updated) {
+      if (JSON.stringify(updated) === JSON.stringify({sites,categories,newSiteCategory})) return;
+      ({sites,categories,newSiteCategory} = updated);
+      if (!drag.busy() && !categoryDrag) render();
+    },
+    status(phase, error) {
+      const message = {
+        loading:'团队共享 · 正在同步',
+        ready:'团队共享 · 已同步',
+        saving:'团队共享 · 正在保存',
+        unavailable:'团队服务需要更新',
+        error:'团队站点同步失败',
+        writeError:'团队站点更改未保存，请刷新后重试',
+      }[phase] || '';
+      teamStatus.hidden = !message;
+      teamStatus.dataset.phase = phase || '';
+      if (teamStatus.textContent !== message) teamStatus.textContent = message;
+      teamStatus.title = error ? String(error?.message || error).slice(0,200) : '';
+    },
+  }) : null;
   const metadata = initBrowserSiteMetadata({
     initialScope:scope, read:readMetadata, normalize:normalizedMetadata, visible,
     onChange() {
@@ -286,8 +335,22 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
     metadata.request([...sites, ...bookmarks].map(site => site.url));
   }
 
+  function canEditSites(status = entryStatus) {
+    if (!teamId || !teamSync || teamSync.canWrite()) return true;
+    const message = '团队站点同步完成后即可编辑。';
+    if (status === entryStatus) showEntryStatus(message,true);
+    else status.textContent = message;
+    return false;
+  }
+
   function save(next, status = feedback, order = categories, addTo = newSiteCategory) {
+    if (!canEditSites(status)) return false;
     const updated = navigationState(next,order,addTo);
+    if (teamId && teamSync) {
+      if (!teamSync.save(updated)) return false;
+      ({sites,categories,newSiteCategory} = updated);
+      return true;
+    }
     try { localStorage.setItem(scopedStorage(scope), JSON.stringify(updated)); }
     catch {
       const message = '无法保存网站导航，请检查本机存储空间。';
@@ -346,7 +409,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
   }
 
   function showEditor(site) {
-    if (!site || dialog.open) return;
+    if (!site || dialog.open || !canEditSites()) return;
     editing = site.id;
     automaticName = site.autoName === true;
     automaticDescription = !site.description;
@@ -421,8 +484,12 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
       else {
         const edit = actionButton('edit', '重命名分类 ' + title, () => showCategoryEditor(title));
         edit.classList.add('browser-site-category-edit');
+        edit.draggable = true;
         edit.dataset.siteCategoryEdit = title;
         edit.setAttribute('aria-haspopup', 'dialog');
+        edit.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+        edit.title = '点击重命名，拖动调整分类顺序';
+        section.dataset.navigationCategory = title;
         edit.prepend(element('span', '', title));
         heading.append(edit);
       }
@@ -451,7 +518,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
   }
 
   function showCategoryEditor(title) {
-    if (categoryDialog.open || !categories.includes(title)) return;
+    if (categoryDialog.open || !categories.includes(title) || !canEditSites()) return;
     categoryDraft = {scope,title};
     categoryName.value = title;
     categoryFeedback.textContent = '';
@@ -495,6 +562,73 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
     paint();
     requestMetadata();
   }
+
+  function moveCategory(title, target, after) {
+    if (title === target || !categories.includes(title) || !categories.includes(target)) return false;
+    const order = categories.filter(category => category !== title);
+    order.splice(order.indexOf(target) + Number(after), 0, title);
+    if (order.every((category,index) => category === categories[index])) return false;
+    if (!save(sites,entryStatus,order)) return false;
+    render();
+    categoryButton(title)?.focus({preventScroll:true});
+    return true;
+  }
+
+  function clearCategoryDrop() {
+    categoryDropTarget?.removeAttribute('data-category-drop');
+    categoryDropTarget = null;
+  }
+
+  list.addEventListener('dragstart', event => {
+    const title = event.target.closest('[data-site-category-edit]')?.dataset.siteCategoryEdit;
+    if (!title || !event.dataTransfer || drag.busy() || (teamId && teamSync && !teamSync.canWrite())) {
+      if (title) event.preventDefault();
+      return;
+    }
+    categoryDrag = title;
+    event.dataTransfer.setData('text/plain',title);
+    event.dataTransfer.effectAllowed = 'move';
+  });
+  list.addEventListener('dragover', event => {
+    if (!categoryDrag) return;
+    const target = event.target.closest('[data-navigation-category]');
+    clearCategoryDrop();
+    if (!target || target.dataset.navigationCategory === categoryDrag) return;
+    categoryDropTarget = target;
+    target.dataset.categoryDrop = categories.indexOf(categoryDrag) < categories.indexOf(target.dataset.navigationCategory)
+      ? 'after' : 'before';
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  });
+  list.addEventListener('dragleave', event => {
+    if (!categoryDropTarget?.contains(event.relatedTarget)) clearCategoryDrop();
+  });
+  list.addEventListener('drop', event => {
+    if (!categoryDrag || !categoryDropTarget) return;
+    event.preventDefault();
+    const title = categoryDrag;
+    const {navigationCategory,categoryDrop} = categoryDropTarget.dataset;
+    categoryDrag = null;
+    clearCategoryDrop();
+    moveCategory(title,navigationCategory,categoryDrop === 'after');
+  });
+  window.addEventListener('dragend', () => {
+    const canceled = Boolean(categoryDrag);
+    categoryDrag = null;
+    clearCategoryDrop();
+    if (canceled) paint();
+  });
+  list.addEventListener('keydown', event => {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        !['ArrowUp','ArrowDown'].includes(event.key)) return;
+    const heading = event.target.closest('[data-site-category-edit]');
+    if (!heading) return;
+    event.preventDefault();
+    const after = event.key === 'ArrowDown';
+    const section = heading.closest('[data-navigation-category]');
+    const target = (after ? section.nextElementSibling : section.previousElementSibling)?.dataset.navigationCategory;
+    if (target) moveCategory(heading.dataset.siteCategoryEdit,target,after);
+  });
 
   function moveSite({id, category, before, bookmark}) {
     const current = bookmark ? bookmarks : sites;
@@ -610,36 +744,51 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, scope = d
   window.addEventListener('storage', event => {
     if (event.key === scopedStorage(scope) || event.key === legacyScopedStorage(scope) || event.key === bookmarkKey + ':' + scope ||
         event.key === null || (scope === defaultScope && [legacyStorageKey, bookmarkKey].includes(event.key))) {
-      ({sites,categories,newSiteCategory} = loadNavigation(scope));
+      if (!teamId || !teamSync) ({sites,categories,newSiteCategory} = readNavigation(scope) || defaultNavigation());
       bookmarks = loadBookmarks(scope);
       render();
     }
   });
-  window.addEventListener('focus', requestMetadata);
-  document.addEventListener('visibilitychange', requestMetadata);
+  function refresh() {
+    requestMetadata();
+    if (visible()) teamSync?.refresh();
+  }
+  window.addEventListener('focus', refresh);
+  document.addEventListener('visibilitychange', refresh);
+  if (teamSync) setInterval(() => { if (visible()) teamSync.refresh(); }, teamRefreshInterval);
   if (readMetadata) setInterval(requestMetadata, 30 * 60 * 1000);
 
   render();
   return {
     render,
-    setScope(next) {
-      if (next === scope) {
-        if (!visible() && drag.busy()) render();
+    refresh,
+    setScope(next, nextTeamId, nextWorkspace = next) {
+      const showing = visible();
+      const opened = showing && !wasVisible;
+      wasVisible = showing;
+      if (next === scope && workspace === nextWorkspace && teamId === nextTeamId) {
+        if (!showing && drag.busy()) render();
         else requestMetadata();
+        if (opened) teamSync?.refresh();
         return;
       }
       scope = next;
+      workspace = nextWorkspace;
+      teamId = nextTeamId;
       metadata.setScope(next);
       clearTimeout(lookupTimer);
       if (dialog.open) dialog.close();
       if (categoryDialog.open) categoryDialog.close();
       editing = null;
       categoryDraft = null;
+      categoryDrag = null;
+      clearCategoryDrop();
       filter.value = entry.value = '';
       showEntryStatus();
-      ({sites,categories,newSiteCategory} = loadNavigation(scope));
+      ({sites,categories,newSiteCategory} = teamSync?.setScope(scope,teamId) || readNavigation(scope) || defaultNavigation());
       bookmarks = loadBookmarks(scope);
       render();
+      if (showing) teamSync?.refresh();
     },
   };
 }

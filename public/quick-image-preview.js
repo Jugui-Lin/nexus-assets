@@ -5,7 +5,7 @@ const middlePressed = 4;
 
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
-export function initQuickImagePreview({viewport, image}) {
+export function initQuickImagePreview({viewport, image, background}) {
   let zoom = 1;
   let x = 0;
   let y = 0;
@@ -47,6 +47,7 @@ export function initQuickImagePreview({viewport, image}) {
   function reset() {
     endDrag();
     viewport.hidden = true;
+    if (background) background.hidden = true;
     zoom = 1;
     x = 0;
     y = 0;
@@ -59,7 +60,10 @@ export function initQuickImagePreview({viewport, image}) {
     reset();
     image.src = url;
     viewport.hidden = false;
+    if (background) background.hidden = false;
   }
+
+  background?.addEventListener('change', () => { viewport.dataset.background = background.value; });
 
   viewport.addEventListener('wheel', event => {
     const size = bounds();

@@ -31,9 +31,11 @@ const BUILD_FILES: &[(&str, &[u8])] = &[
     source_file!("lib.rs"),
     source_file!("asset_recycle.rs"),
     source_file!("baidu_cloud.rs"),
+    source_file!("browser_sites.rs"),
     source_file!("c4d_preview.rs"),
     source_file!("collections.rs"),
     source_file!("creative_subscriptions.rs"),
+    source_file!("file_import.rs"),
     source_file!("ies_preview.rs"),
     source_file!("linear_preview.rs"),
     source_file!("max_preview.rs"),
@@ -45,11 +47,14 @@ const BUILD_FILES: &[(&str, &[u8])] = &[
     source_file!("bin/nexus-team/asset_messages.rs"),
     source_file!("bin/nexus-team/asset_recycle.rs"),
     source_file!("bin/nexus-team/baidu_cloud.rs"),
+    source_file!("bin/nexus-team/browser_sites.rs"),
     source_file!("bin/nexus-team/creative_subscriptions.rs"),
+    source_file!("bin/nexus-team/creative_video_references.rs"),
     source_file!("bin/nexus-team/organization.rs"),
     source_file!("bin/nexus-team/quick_access.rs"),
     source_file!("bin/nexus-team/sources.rs"),
     source_file!("bin/nexus-team/whiteboard.rs"),
+    source_file!("bin/nexus-team/whiteboard_presence.rs"),
 ];
 
 #[derive(Serialize)]

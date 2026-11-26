@@ -16,6 +16,25 @@ use tauri::Manager;
 mod shell_thumbnail;
 pub(crate) mod stream;
 
+#[cfg(windows)]
+pub(crate) fn system_video_thumbnail_bytes(path: &Path, size: u32) -> Result<Vec<u8>, String> {
+    static SHELL_THUMBNAILS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _permit = SHELL_THUMBNAILS
+        .try_acquire()
+        .map_err(|_| "系统正在提取另一个视频的缩略图")?;
+    system_file_thumbnail_bytes(path, size)
+}
+
+#[cfg(windows)]
+pub(crate) fn system_file_thumbnail_bytes(path: &Path, size: u32) -> Result<Vec<u8>, String> {
+    let image = shell_thumbnail::read(path, size)?;
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, image::ImageFormat::WebP)
+        .map_err(|error| error.to_string())?;
+    Ok(bytes.into_inner())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoSource {
@@ -156,18 +175,13 @@ pub(crate) async fn generate_system_video_thumbnail(
     {
         use base64::Engine;
 
-        static SHELL_THUMBNAILS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
         let size = checked_size(Some(size))?;
-        let permit = SHELL_THUMBNAILS
-            .try_acquire()
-            .map_err(|_| "系统正在提取另一个视频的缩略图")?;
         let state = state.inner().clone();
         let worker_app = app.clone();
         let worker_state = state.clone();
         let worker_id = id.clone();
         let worker_key = cache_key.clone();
         let frame = tauri::async_runtime::spawn_blocking(move || {
-            let _permit = permit;
             let source = PreviewSource::resolve(&worker_state, &worker_app, &worker_id)?;
             if thumbnail_cache::video_key(&source.asset, size)?.as_deref()
                 != Some(worker_key.as_str())
@@ -175,12 +189,7 @@ pub(crate) async fn generate_system_video_thumbnail(
                 return Err("视频文件或封面已变化，请刷新后重试".into());
             }
             let approved = approved_video_file(&source.asset)?;
-            let image = shell_thumbnail::read(&approved.path, size)?;
-            let mut bytes = std::io::Cursor::new(Vec::new());
-            image
-                .write_to(&mut bytes, image::ImageFormat::WebP)
-                .map_err(|e| e.to_string())?;
-            Ok::<_, String>(bytes.into_inner())
+            system_video_thumbnail_bytes(&approved.path, size)
         });
         let bytes = tokio::time::timeout(std::time::Duration::from_secs(8), frame)
             .await

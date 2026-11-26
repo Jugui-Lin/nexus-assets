@@ -1,17 +1,26 @@
 #app {
   position: relative;
   display: grid;
-  grid-template: minmax(0, 1fr) auto / var(--sidebar-width) minmax(0, 1fr);
+  grid-template:
+    "toolbar toolbar" auto
+    "sidebar content" minmax(0, 1fr)
+    "footer footer" auto
+    / var(--sidebar-width) minmax(0, 1fr);
+}
+
+#app > .topbar {
+  grid-area: toolbar;
+  min-width: 0;
 }
 
 #app > .sidebar {
-  grid-area: 1 / 1;
+  grid-area: sidebar;
   position: static;
   min-height: 0;
 }
 
 #app > .content-shell {
-  grid-area: 1 / 2;
+  grid-area: content;
   width: auto;
   height: auto;
   min-height: 0;
@@ -20,7 +29,7 @@
 }
 
 #workspace-footer {
-  grid-area: 2 / 1 / 3 / -1;
+  grid-area: footer;
   display: flex;
   align-items: stretch;
   gap: 0;
@@ -69,10 +78,9 @@
 .workspace-toolbar-leading {
   display: flex;
   align-items: center;
-  flex: 1;
+  flex: 0 1 auto;
   gap: 8px;
   min-width: 0;
-  container-type: inline-size;
 }
 
 .workspace-panel-toggle {
@@ -124,7 +132,7 @@
 }
 
 .workspace-divider--sidebar {
-  grid-area: 1 / 1 / 2 / 2;
+  grid-area: sidebar;
   inset-inline-end: -5px;
 }
 
@@ -169,6 +177,20 @@
 
 .workspace-divider:focus-visible {
   outline: none;
+}
+
+.workspace-divider--shared::after { display: none; }
+
+.workspace-divider--shared::before {
+  inset-inline: 5px auto;
+  width: 1px;
+  background: var(--line);
+}
+
+.workspace-divider--shared:is(:hover, :focus-visible, .is-resizing)::before {
+  width: 2px;
+  background: var(--accent);
+  opacity: 1;
 }
 
 .workspace-resizing,

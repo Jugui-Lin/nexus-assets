@@ -11,6 +11,8 @@ pub(crate) struct Inbox {
     available: bool,
     #[serde(default)]
     pokes_available: bool,
+    #[serde(default)]
+    video_references_available: bool,
 }
 
 fn inbox_available() -> bool { true }
@@ -24,6 +26,14 @@ struct AssetMessage {
     created: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video_reference: Option<VideoReferenceTarget>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct VideoReferenceTarget {
+    key: String,
+    title: String,
 }
 
 #[tauri::command]
@@ -65,6 +75,36 @@ pub(crate) async fn team_send_asset_message(
 }
 
 #[tauri::command]
+pub(crate) async fn team_send_video_reference_message(
+    team: tauri::State<'_, Desktop>,
+    team_id: String,
+    recipient_id: Uuid,
+    reference_key: String,
+) -> Result<Value, String> {
+    let active = team.connection_for_team(&team_id)?;
+    if active.identity.member_id == recipient_id.to_string() {
+        return Err("请选择当前团队的其他成员".into());
+    }
+    let body = serde_json::to_vec(&json!({
+        "recipientId": recipient_id,
+        "referenceKey": reference_key,
+    }))
+    .map_err(|error| error.to_string())?;
+    let response = team
+        .request(
+            &active.config,
+            Method::POST,
+            "/v1/creative-video-reference-messages",
+            Some(body),
+        )
+        .await?;
+    if team.active_connection()? != active {
+        return Err("团队工作空间已切换".into());
+    }
+    Ok(response)
+}
+
+#[tauri::command]
 pub(crate) async fn team_asset_messages(
     team: tauri::State<'_, Desktop>,
     team_id: String,
@@ -73,13 +113,23 @@ pub(crate) async fn team_asset_messages(
     if active.identity.team_id != team_id {
         return Err("团队工作空间已切换".into());
     }
-    let request = team.authenticated_request(&active.config, Method::GET, "/v1/asset-messages", None);
+    let request = team.authenticated_request(
+        &active.config,
+        Method::GET,
+        "/v1/asset-messages?videoReferences=true",
+        None,
+    );
     let response = Desktop::send(request).await?;
     if team.active_connection()? != active {
         return Err("团队工作空间已切换".into());
     }
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(Inbox {messages:Vec::new(), available:false, pokes_available:false});
+        return Ok(Inbox {
+            messages: Vec::new(),
+            available: false,
+            pokes_available: false,
+            video_references_available: false,
+        });
     }
     let mut inbox: Inbox = Desktop::decode_response(response).await?;
     for message in &mut inbox.messages {

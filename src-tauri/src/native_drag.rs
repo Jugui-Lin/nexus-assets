@@ -17,6 +17,16 @@ pub async fn start_asset_drag(
     Err("当前系统暂不支持将资产拖到其他应用".into())
 }
 
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+pub async fn start_local_file_drag(
+    window: tauri::WebviewWindow,
+    paths: Vec<String>,
+) -> Result<bool, String> {
+    let _ = (window, paths);
+    Err("当前系统暂不支持将文件拖到其他应用".into())
+}
+
 #[cfg(target_os = "windows")]
 pub use windows_drag::*;
 
@@ -131,6 +141,54 @@ mod windows_drag {
             tokio::time::sleep(Duration::from_millis(16)).await;
         }
         Ok(false)
+    }
+
+    #[tauri::command]
+    pub async fn start_local_file_drag(
+        window: tauri::WebviewWindow,
+        paths: Vec<String>,
+    ) -> Result<bool, String> {
+        if !drag_button_pressed() || escape_pressed() {
+            return Ok(false);
+        }
+        let paths = local_drag_paths(paths)?;
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let source = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let result = source
+                    .hwnd()
+                    .map_err(|error| error.to_string())
+                    .and_then(|hwnd| {
+                        drag_local_paths(hwnd, &paths)
+                            .map_err(|error| format!("无法启动系统拖放：{error}"))
+                    });
+                let _ = send.send(result);
+            })
+            .map_err(|error| error.to_string())?;
+        receive.await.map_err(|error| error.to_string())?
+    }
+
+    fn local_drag_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
+        if !(1..=crate::local_explorer::MAX_ENTRIES).contains(&paths.len()) {
+            return Err("选中的文件数量超出可处理范围".into());
+        }
+        // Keep the original Explorer paths and avoid opening NAS files while
+        // the pointer is moving. The destination's Shell operation opens them.
+        paths
+            .into_iter()
+            .map(|path| {
+                if path.len() > 32_768 {
+                    return Err("文件路径过长".into());
+                }
+                let path = PathBuf::from(path);
+                crate::local_explorer::validate_file_path(&path)?;
+                if path.file_name().is_none() {
+                    return Err("请选择要拖动的文件或文件夹".into());
+                }
+                Ok(path)
+            })
+            .collect()
     }
 
     fn cursor_outside_client(hwnd: usize) -> windows::core::Result<bool> {
@@ -333,6 +391,46 @@ mod windows_drag {
         fn drop(&mut self) {
             unsafe { OleUninitialize() }
         }
+    }
+
+    #[implement(IDropSource)]
+    struct LocalFileDropSource {}
+
+    impl IDropSource_Impl for LocalFileDropSource_Impl {
+        fn QueryContinueDrag(&self, escape: BOOL, _keys: MODIFIERKEYS_FLAGS) -> HRESULT {
+            if escape.as_bool() {
+                DRAGDROP_S_CANCEL
+            } else if drag_button_pressed() {
+                S_OK
+            } else {
+                DRAGDROP_S_DROP
+            }
+        }
+
+        fn GiveFeedback(&self, _effect: DROPEFFECT) -> HRESULT {
+            DRAGDROP_S_USEDEFAULTCURSORS
+        }
+    }
+
+    fn drag_local_paths(hwnd: HWND, paths: &[PathBuf]) -> windows::core::Result<bool> {
+        if !drag_button_pressed()
+            || escape_pressed()
+            || DRAG_IN_PROGRESS.swap(true, Ordering::AcqRel)
+        {
+            return Ok(false);
+        }
+        let _active = ActiveDrag;
+        let _ole = OleApartment::initialize()?;
+        let data = file_data_object(paths)?;
+        if !drag_button_pressed() {
+            return Ok(false);
+        }
+        let source: IDropSource = LocalFileDropSource {}.into();
+        let effect = unsafe {
+            let _ = ReleaseCapture();
+            SHDoDragDrop(Some(hwnd), &data, &source, DROPEFFECT_COPY)?
+        };
+        Ok(effect.contains(DROPEFFECT_COPY))
     }
 
     enum Handoff {
@@ -639,7 +737,7 @@ mod windows_drag {
         }
     }
 
-    fn drop_files_memory(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
+    pub(crate) fn drop_files_memory(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
         let mut file_names = Vec::new();
         for path in paths {
             file_names.extend(path.as_os_str().encode_wide());

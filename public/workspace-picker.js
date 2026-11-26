@@ -3,11 +3,11 @@ const openingViewKey = 'nexus-workspace-opening-view';
 export function workspaceOpeningView(preferences = localStorage) {
   try {
     const view = preferences.getItem(openingViewKey);
-    return view === 'all' || view === 'favorites' ? view : 'home';
-  } catch { return 'home'; }
+    return view === 'favorites' ? 'favorites' : 'all';
+  } catch { return 'all'; }
 }
 
-export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnterTeam, onTeam, canSwitch,
+export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnterTeam, onTeam, onImport, canSwitch,
   onPersonalRenamed, onTeamRenamed, notify, preferences = localStorage}) {
   const trigger = document.querySelector('#workspace-settings');
   const panel = document.querySelector('#workspace-switcher');
@@ -127,7 +127,8 @@ export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnt
     }
     actions.querySelector('[data-workspace-action="team"]').classList.toggle('hidden', Boolean(shared));
     for (const button of panel.querySelectorAll('[data-workspace-action], [type="submit"]')) {
-      button.disabled = busy || (!native && button.dataset.workspaceAction !== 'settings');
+      const availableOnWeb = ['settings', 'import'].includes(button.dataset.workspaceAction);
+      button.disabled = busy || (!native && !availableOnWeb);
     }
     position();
   }
@@ -265,6 +266,7 @@ export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnt
     else if (action === 'cancel-create') toggleCreate(false);
     else if (action === 'open') change('open');
     else if (action === 'settings') openSettings();
+    else if (action === 'import') { close(true); onImport(); }
     else if (action === 'team') { close(true); onTeam(); }
   });
   createForm.addEventListener('submit', event => {

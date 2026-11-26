@@ -71,7 +71,7 @@ export function whiteboardLinkPatch(text, point) {
 }
 
 export function bindWhiteboardLinkDrag(cards, {resolve, icon, available, targetAt, scope, drop, notify,
-  cardSelector = '.creator-card[data-creator-id]'}) {
+  alternateTarget, cardSelector = '.creator-card[data-creator-id]'}) {
   let drag;
   let settling = false;
   let suppressUntil = 0;
@@ -80,6 +80,7 @@ export function bindWhiteboardLinkDrag(cards, {resolve, icon, available, targetA
     const current = drag;
     if (!current) return;
     drag = null;
+    alternateTarget?.highlight?.(null);
     if (cards.hasPointerCapture(current.pointer)) cards.releasePointerCapture(current.pointer);
     if (current.preview) {
       current.preview.remove();
@@ -96,14 +97,23 @@ export function bindWhiteboardLinkDrag(cards, {resolve, icon, available, targetA
     return {x:left, y:top};
   }
 
+  function dropTarget(current, x, y) {
+    const alternate = alternateTarget?.available(current.entry) && alternateTarget.targetAt(x,y);
+    alternateTarget?.highlight?.(alternate || null);
+    if (alternate) return {element:alternate, alternate:true};
+    const element = targetAt(x,y);
+    return element && {element};
+  }
+
   cards.addEventListener('pointerdown', event => {
     if (settling || drag || !event.isPrimary || event.button !== 0 || event.pointerType === 'touch' ||
-        event.target.closest('button, a, input, textarea, select, [contenteditable]') || !available()) return;
+        event.target.closest('button, a, input, textarea, select, [contenteditable]')) return;
     const card = event.target.closest(cardSelector);
-    const text = card && whiteboardLinkText(resolve(card) || {});
-    if (!text) return;
+    const entry = card && resolve(card);
+    const text = entry && whiteboardLinkText(entry);
+    if (!text || (!available() && !alternateTarget?.available(entry))) return;
     const {left,top,width,height} = card.getBoundingClientRect();
-    drag = {pointer:event.pointerId, x:event.clientX, y:event.clientY, text, scope:scope(),
+    drag = {pointer:event.pointerId, x:event.clientX, y:event.clientY, entry, text, scope:scope(),
       grabX:(event.clientX-left)/width, grabY:(event.clientY-top)/height};
   });
   cards.addEventListener('dragstart', event => { if (drag) event.preventDefault(); });
@@ -121,20 +131,26 @@ export function bindWhiteboardLinkDrag(cards, {resolve, icon, available, targetA
       cards.setPointerCapture(current.pointer);
       document.body.append(current.preview);
     }
-    previewPosition(current, event.clientX, event.clientY, targetAt(event.clientX,event.clientY));
+    const target = dropTarget(current,event.clientX,event.clientY);
+    previewPosition(current, event.clientX, event.clientY, target?.element);
     event.preventDefault();
   }, {capture:true, passive:false});
   window.addEventListener('pointerup', event => {
     const current = drag;
     if (!current || event.pointerId !== current.pointer) return;
-    const target = current.preview && current.scope === scope() && cards.checkVisibility() && targetAt(event.clientX,event.clientY);
+    const target = current.preview && current.scope === scope() && cards.checkVisibility() &&
+      dropTarget(current,event.clientX,event.clientY);
     if (!target) return cancel();
     drag = null;
+    alternateTarget?.highlight?.(null);
     suppressUntil = performance.now() + 150;
     if (cards.hasPointerCapture(current.pointer)) cards.releasePointerCapture(current.pointer);
-    const position = previewPosition(current, event.clientX, event.clientY, target);
+    const position = previewPosition(current, event.clientX, event.clientY, target.element);
     settling = true;
-    Promise.resolve().then(() => drop(target, current.text, current.scope, position))
+    if (target.alternate) current.preview.remove();
+    Promise.resolve().then(() => target.alternate
+      ? alternateTarget.drop(target.element,current.entry,current.scope)
+      : drop(target.element,current.text,current.scope,position))
       .catch(error => notify(String(error?.message || error), true))
       .finally(() => { settling = false; current.preview.remove(); });
   }, {capture:true});

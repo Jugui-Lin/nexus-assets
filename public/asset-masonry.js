@@ -77,7 +77,7 @@ export function layoutAssetMasonry(grid, previous = []) {
   const customWidth = number('--grid-zoom-width');
   const requestedWidth = customWidth || number('--card-min') || 139;
   const columns = Math.max(1, Math.floor((available + horizontalGap) / (requestedWidth + horizontalGap)));
-  const width = customWidth ? Math.min(available, customWidth) : (available - (columns - 1) * horizontalGap) / columns;
+  const width = (available - (columns - 1) * horizontalGap) / columns;
   const cards = Array.from(grid.children).filter(child => child.classList.contains('asset-card'));
   let reuseColumn = Number(grid.dataset.masonryColumns) === columns;
 
@@ -144,12 +144,12 @@ export function initAssetMasonry(grid) {
     frame = 0;
     const index = preserveAnchor ? visibleAnchor() : -1;
     const old = positions[index];
-    const columns = grid.dataset.masonryColumns;
+    const scrollTop = old ? scroller.scrollTop : 0;
     positions = layoutAssetMasonry(grid, positions);
     const next = positions[index];
-    if (old && next && columns === grid.dataset.masonryColumns && sameCard(old.card, next.card)) {
+    if (old && next && sameCard(old.card, next.card)) {
       const shift = next.top - old.top;
-      if (Math.abs(shift) > .5) scroller.scrollTop += shift;
+      if (Math.abs(scrollTop + shift - scroller.scrollTop) > .5) scroller.scrollTop = scrollTop + shift;
       scrollAnchor = {index, scrollTop:scroller.scrollTop};
     } else scrollAnchor = undefined;
   }

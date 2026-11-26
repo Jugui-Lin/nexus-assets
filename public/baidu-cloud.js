@@ -2,7 +2,7 @@ const ROOT = '/apps/bdpan';
 const ROOT_LABEL = '我的应用数据 / bdpan';
 const APP_FOLDER = ROOT + '/Nexus Assets';
 
-export function initBaiduCloud({api, native, copy, workspace, icon, log = () => {}}) {
+export function initBaiduCloud({api, native, copy, workspace, icon, closeMenu, log = () => {}}) {
   const dialog = document.querySelector('#baidu-cloud-dialog');
   const get = name => dialog.querySelector('#baidu-cloud-' + name);
   const status = get('status');
@@ -289,8 +289,8 @@ export function initBaiduCloud({api, native, copy, workspace, icon, log = () => 
     scheduleAuthorizationPoll(current);
   }
 
-  const open = event => {
-    event?.currentTarget.closest('details')?.removeAttribute('open');
+  const open = () => {
+    closeMenu?.();
     view = {workspace:workspace(), mode:'links', path:'', next:null, linksGeneration:0};
     rows.replaceChildren();
     get('context').textContent = view.workspace.teamId

@@ -14,6 +14,7 @@ pub mod baidu_cloud;
 mod c4d_preview;
 mod max_preview;
 mod collections;
+pub mod browser_sites;
 pub mod creative_subscriptions;
 mod file_import;
 mod ies_preview;
@@ -813,17 +814,50 @@ pub fn relative_folder(root: &Path, directory: &Path) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
+pub fn is_houdini_scene_extension(ext: &str) -> bool {
+    ["hip", "hiplc", "hipnc"]
+        .iter()
+        .any(|format| ext.eq_ignore_ascii_case(format))
+}
+
+pub fn asset_thumbnail_candidates(path: &Path) -> Vec<PathBuf> {
+    let Some(folder) = path.parent() else {
+        return Vec::new();
+    };
+    let houdini = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(is_houdini_scene_extension);
+    let mut candidates = Vec::with_capacity(if houdini { 11 } else { 4 });
+    if houdini {
+        if let Some(filename) = path.file_name() {
+            for extension in [".png", ".jpg", ".jpeg"] {
+                let mut name = filename.to_os_string();
+                name.push(extension);
+                candidates.push(folder.join(name));
+            }
+        }
+    }
+    candidates.extend([path.with_extension("jpg"), path.with_extension("png")]);
+    if houdini {
+        candidates.push(path.with_extension("jpeg"));
+        if let Some(stem) = path.file_stem() {
+            for suffix in ["_thumbnail.png", "_thumbnail.jpg", "_thumbnail.jpeg"] {
+                let mut name = stem.to_os_string();
+                name.push(suffix);
+                candidates.push(folder.join(name));
+            }
+        }
+    }
+    candidates.extend([folder.join("preview.jpg"), folder.join("preview.png")]);
+    candidates
+}
+
 pub fn asset_thumbnail(path: &Path) -> Option<String> {
-    let folder = path.parent()?;
-    [
-        path.with_extension("jpg"),
-        path.with_extension("png"),
-        folder.join("preview.jpg"),
-        folder.join("preview.png"),
-    ]
-    .iter()
-    .find(|candidate| candidate.is_file())
-    .map(|candidate| clean_path(candidate))
+    asset_thumbnail_candidates(path)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| clean_path(&candidate))
 }
 
 pub fn preview_image(a: &Asset, cache_dir: &Path) -> Result<Option<(String, Vec<u8>)>, String> {
@@ -1059,6 +1093,32 @@ mod tests {
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
         assert_eq!(preview_image(&a, &cache).unwrap().unwrap().1, bytes);
     }
+
+    #[test]
+    fn houdini_scene_previews_use_the_matching_companion_image() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scene = scratch.path().join("场景.hiplc");
+        fs::write(&scene, b"fixture").unwrap();
+        let folder_preview = scratch.path().join("preview.png");
+        image::RgbImage::new(10, 10).save(&folder_preview).unwrap();
+        let thumbnail = scratch.path().join("场景_thumbnail.png");
+        image::RgbImage::new(320, 160).save(&thumbnail).unwrap();
+        assert_eq!(asset_thumbnail(&scene), Some(clean_path(&thumbnail)));
+
+        let explicit = scratch.path().join("场景.hiplc.png");
+        image::RgbImage::new(640, 320).save(&explicit).unwrap();
+        let catalog = Catalog::open(&scratch.path().join("db")).unwrap();
+        catalog.add_file(&scene, "fixture").unwrap();
+        let asset = catalog.assets().unwrap().remove(0);
+        assert_eq!(asset.thumbnail.as_deref(), Some(clean_path(&explicit).as_str()));
+        let (mime, bytes) = preview_image(&asset, &scratch.path().join("cache"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(mime, "image/png");
+        let image = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((image.width(), image.height()), (512, 256));
+    }
+
     #[test]
     fn scanner_connection_does_not_interrupt_live_jobs() {
         let d = tempfile::tempdir().unwrap();

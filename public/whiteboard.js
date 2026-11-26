@@ -232,6 +232,13 @@ function loadPersonal(key) {
   return new Map();
 }
 
+export function personalBoardReferencesAsset(key, assetId) {
+  for (const item of loadPersonal(key).values()) {
+    if (item.assetId === assetId) return true;
+  }
+  return false;
+}
+
 function loadOutbox(key, teamId) {
   try {
     const saved = JSON.parse(localStorage.getItem(outboxKey + key));

@@ -1,7 +1,7 @@
 //! Locate registered DCC applications and conventional installations on local disks.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     env,
     ffi::{c_void, OsStr, OsString},
     fs,
@@ -13,10 +13,14 @@ use std::{
 use windows::{
     core::{w, PCWSTR, PWSTR},
     Win32::{
-        Foundation::ERROR_SUCCESS,
+        Foundation::{CloseHandle, ERROR_SUCCESS},
         Storage::FileSystem::{
             GetDriveTypeW, GetFileVersionInfoSizeW, GetFileVersionInfoW, GetLogicalDrives,
             VerQueryValueW, VS_FIXEDFILEINFO,
+        },
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
         },
         System::Registry::{
             RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER,
@@ -29,6 +33,41 @@ use windows::{
 
 const DRIVE_FIXED: u32 = 3;
 const UNINSTALL: PCWSTR = w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall");
+
+pub(super) fn running_hosts() -> BTreeMap<&'static str, BTreeSet<u32>> {
+    let mut hosts = BTreeMap::<&'static str, BTreeSet<u32>>::new();
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return hosts;
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut next = unsafe { Process32FirstW(snapshot, &mut entry) };
+    while next.is_ok() {
+        let end = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let filename = String::from_utf16_lossy(&entry.szExeFile[..end]).to_ascii_lowercase();
+        let host = match filename.as_str() {
+            "blender.exe" => Some("blender"),
+            "cinema 4d.exe" => Some("c4d"),
+            "maya.exe" => Some("maya"),
+            "3dsmax.exe" => Some("max"),
+            "houdini.exe" | "houdinifx.exe" | "houdinicore.exe" | "houdiniindie.exe"
+            | "hmaster.exe" => Some("houdini"),
+            _ => None,
+        };
+        if let Some(host) = host {
+            hosts.entry(host).or_default().insert(entry.th32ProcessID);
+        }
+        next = unsafe { Process32NextW(snapshot, &mut entry) };
+    }
+    let _ = unsafe { CloseHandle(snapshot) };
+    hosts
+}
 
 struct Product {
     names: &'static [&'static str],

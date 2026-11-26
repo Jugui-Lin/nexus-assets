@@ -53,12 +53,6 @@ function componentKey(component, windows) {
   return windows ? component.toLowerCase() : component;
 }
 
-export function addressForFolder(library, folder = '') {
-  const root = parseAddress(library?.path);
-  if (!root) return '';
-  return pathText({...root, segments: [...root.segments, ...folder.split('/').filter(Boolean)]});
-}
-
 export function matchFolderAddress(value, libraries) {
   const input = parseAddress(value);
   if (!input) return null;
@@ -83,35 +77,8 @@ export function matchFolderAddress(value, libraries) {
   return {path: pathText(input), match: deepest};
 }
 
-export function initFolderAddress({getLocation, getLibraries, findFolder, openFolder, goHome, onUnknownPath, browseFolder, openAddressMenu, copyAddress, notify}) {
-  const section = document.querySelector('#folder-address');
-  const toggle = section.querySelector('#folder-address-toggle');
-  const panel = document.createElement('nav');
-  panel.id = 'folder-address-panel';
-  panel.className = 'folder-address-panel';
-  panel.hidden = true;
-  panel.setAttribute('aria-label', '文件夹地址和导航');
-  panel.innerHTML = '<form class="folder-address-form">' +
-    '<button type="button" class="folder-address-open" title="在文件管理器中打开当前文件夹" ' +
-    'aria-label="在文件管理器中打开当前文件夹" disabled>' +
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v12H3z"/></svg></button>' +
-    '<input id="folder-address-input" type="text" aria-label="当前文件夹路径，输入后按 Enter 前往" ' +
-    'aria-keyshortcuts="Control+L Meta+L" autocomplete="off" spellcheck="false" placeholder="输入文件夹路径…" />' +
-    '<button type="submit" class="folder-address-go" aria-label="前往输入的路径">前往</button></form>';
-  section.insertBefore(panel, toggle);
-
-  const input = section.querySelector('#folder-address-input');
-  const form = section.querySelector('form');
-  const browse = section.querySelector('.folder-address-open');
+export function initAssetFolderHistory({getLocation, findFolder, openFolder, goHome}) {
   const histories = new Map();
-  let display;
-
-  function setPanelOpen(open) {
-    panel.hidden = !open;
-    toggle.setAttribute('aria-expanded', String(open));
-    if (open) input.focus({preventScroll:true});
-    else input.value = display?.address || '';
-  }
 
   function currentHistory() {
     const scope = getLocation().scope;
@@ -132,13 +99,8 @@ export function initFolderAddress({getLocation, getLibraries, findFolder, openFo
     return !destination.libraryId || Boolean(findFolder(destination.libraryId, destination.folder));
   }
 
-  function currentAddress({libraryId, folder}) {
-    return addressForFolder(getLibraries().find(item => item.id === libraryId), folder);
-  }
-
-  function render() {
-    const location = getLocation();
-    const {scope, libraryId, folder, hidden} = location;
+  function recordLocation() {
+    const {libraryId, folder} = getLocation();
     const history = currentHistory();
     const next = {libraryId, folder, key:locationKey(libraryId, folder)};
     if (next.key !== history.current?.key) {
@@ -148,17 +110,6 @@ export function initFolderAddress({getLocation, getLibraries, findFolder, openFo
       }
       history.current = next;
     }
-
-    section.hidden = Boolean(hidden);
-    if (hidden || (display && display.scope !== scope)) setPanelOpen(false);
-    const address = currentAddress(location);
-    const displayKey = JSON.stringify([scope, next.key, address]);
-    if (displayKey !== display?.key) {
-      display = {key:displayKey, scope, address};
-      input.value = address;
-      input.title = address;
-    }
-    browse.disabled = !browseFolder || !address || Boolean(hidden);
   }
 
   function traverse(direction) {
@@ -175,7 +126,7 @@ export function initFolderAddress({getLocation, getLibraries, findFolder, openFo
       }
     }
     if (!destination) {
-      render();
+      recordLocation();
       return;
     }
     push(destinationStack, history.current);
@@ -185,7 +136,7 @@ export function initFolderAddress({getLocation, getLibraries, findFolder, openFo
       else goHome();
     } finally {
       history.replaying = false;
-      render();
+      recordLocation();
     }
   }
 
@@ -199,86 +150,8 @@ export function initFolderAddress({getLocation, getLibraries, findFolder, openFo
     }
   }
 
-  function matchedFolder(match) {
-    const {libraryId, folder, caseInsensitive} = match;
-    const direct = findFolder(libraryId, folder);
-    if (direct || !caseInsensitive || !folder) return direct;
-    // Team directory names are stored verbatim even on a case-insensitive mount.
-    let current = findFolder(libraryId, '');
-    for (const component of folder.split('/')) {
-      current = current?.children.find(child => child.name.toLowerCase() === component.toLowerCase());
-      if (!current) break;
-    }
-    return current;
-  }
-
-  toggle.addEventListener('click', () => setPanelOpen(panel.hidden));
-  function showAddressMenu(event) {
-    event.preventDefault();
-    if (section.hidden || !display?.address || document.querySelector('dialog[open]')) return;
-    const {key, address} = display;
-    const useCurrentAddress = action => () => {
-      if (!section.hidden && display?.key === key) return action(address);
-    };
-    openAddressMenu(toggle, event, {
-      browse: browseFolder && useCurrentAddress(browseFolder),
-      copy: useCurrentAddress(copyAddress),
-    });
-  }
-  toggle.addEventListener('contextmenu', showAddressMenu);
-  toggle.addEventListener('keydown', event => {
-    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) showAddressMenu(event);
-  });
-  document.addEventListener('pointerdown', event => {
-    if (!panel.hidden && !section.contains(event.target)) setPanelOpen(false);
-  });
-  browse.addEventListener('click', async () => {
-    const location = getLocation();
-    const address = currentAddress(location);
-    if (!browseFolder || !address || location.hidden) return;
-    try {
-      await browseFolder(address);
-    } catch (error) {
-      notify(String(error?.message || error), true);
-    }
-  });
-  form.addEventListener('submit', async event => {
-    event.preventDefault();
-    if (!input.value.trim()) return;
-    const result = matchFolderAddress(input.value, getLibraries());
-    if (!result) {
-      notify('请输入完整的文件夹路径', true);
-      return;
-    }
-    const {path, match} = result;
-    const folder = match && matchedFolder(match);
-    if (folder) {
-      openFolder(match.libraryId, folder.path);
-      render();
-      input.value = display.address;
-      return;
-    }
-    try {
-      await onUnknownPath(path, match);
-    } catch (error) {
-      notify(String(error?.message || error), true);
-    }
-  });
-  panel.addEventListener('keydown', event => {
-    if (event.key !== 'Escape') return;
-    event.preventDefault();
-    event.stopPropagation();
-    setPanelOpen(false);
-    toggle.focus({preventScroll:true});
-  });
   document.addEventListener('keydown', event => {
-    if (event.defaultPrevented || section.hidden || document.querySelector('dialog[open]')) return;
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'l') {
-      event.preventDefault();
-      setPanelOpen(true);
-      input.select();
-      return;
-    }
+    if (event.defaultPrevented || getLocation().hidden || document.querySelector('dialog[open]')) return;
     if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     const direction = {ArrowLeft:'back', ArrowRight:'forward', ArrowUp:'up'}[event.key];
     if (direction === 'up' && getLocation().libraryId) {
@@ -289,5 +162,5 @@ export function initFolderAddress({getLocation, getLibraries, findFolder, openFo
       traverse(direction);
     }
   });
-  return {render};
+  return {recordLocation};
 }

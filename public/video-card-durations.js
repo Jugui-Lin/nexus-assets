@@ -1,6 +1,6 @@
 import {formatTime} from './video-controls.js';
 
-export function initVideoCardDurations({grid, scope, lookup, measure}) {
+export function initVideoCardDurations({grid, scope, lookup, measure, onDuration}) {
   const cache = new Map();
   const active = new Map();
   const visible = new Map();
@@ -20,10 +20,11 @@ export function initVideoCardDurations({grid, scope, lookup, measure}) {
     return {asset, key};
   }
 
-  function present(badge, label) {
+  function present(badge, asset, label) {
     if (!label) return;
     badge.textContent = label;
     badge.classList.remove('hidden');
+    onDuration?.(badge, asset, label);
   }
 
   function forget(thumb) {
@@ -67,7 +68,7 @@ export function initVideoCardDurations({grid, scope, lookup, measure}) {
       const {asset, key} = result;
       const entry = cached(key);
       if (entry) {
-        present(badge, entry.label);
+        present(badge, asset, entry.label);
         forget(thumb);
       } else if (active.size < 2 && !active.has(key)) {
         const request = new AbortController();
@@ -87,7 +88,7 @@ export function initVideoCardDurations({grid, scope, lookup, measure}) {
         const result = identify(badge);
         if (!result) continue;
         const entry = cached(result.key);
-        if (entry) present(badge, entry.label);
+        if (entry) present(badge, result.asset, entry.label);
         else {
           rendered.add(result.key);
           observer.observe(badge.parentElement);

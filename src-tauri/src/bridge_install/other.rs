@@ -61,7 +61,14 @@ fn windows_executables(
 ) -> impl Iterator<Item = PathBuf> {
     let configured = environment
         .configured_executable(dcc)
-        .filter(|path| file_name(path).eq_ignore_ascii_case(executable) && path.is_file())
+        .filter(|path| {
+            let name = file_name(path);
+            name.eq_ignore_ascii_case(executable)
+                || dcc == "houdini"
+                    && super::HOUDINI_EXECUTABLES
+                        .iter()
+                        .any(|variant| name.eq_ignore_ascii_case(variant))
+        })
         .map(Path::to_path_buf);
     let name = executable.to_owned();
     configured.into_iter().chain(

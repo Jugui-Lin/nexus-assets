@@ -24,8 +24,12 @@ use uuid::Uuid;
 
 #[path = "nexus-team/asset_messages.rs"]
 mod asset_messages;
+#[path = "nexus-team/browser_sites.rs"]
+mod browser_sites;
 #[path = "nexus-team/creative_subscriptions.rs"]
 mod creative_subscriptions;
+#[path = "nexus-team/creative_video_references.rs"]
+mod creative_video_references;
 #[path = "nexus-team/organization.rs"]
 mod organization;
 #[path = "nexus-team/asset_recycle.rs"]
@@ -48,10 +52,13 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 type WatchReply = watch::Sender<Option<Result<WatchReport, ApiError>>>;
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WatchReport {
     found: usize,
+    changed: usize,
     errors: Vec<String>,
     revision: u64,
+    completed_at: u64,
 }
 
 #[derive(Default)]
@@ -329,8 +336,10 @@ fn open_store(dir: &FilePath) -> Result<Connection, Box<dyn std::error::Error>> 
          ) WITHOUT ROWID;",
     )?;
     baidu_cloud::init_schema(&conn)?;
-    asset_messages::init_schema(&conn)?;
+    browser_sites::init_schema(&conn)?;
     creative_subscriptions::init_schema(&conn)?;
+    creative_video_references::init_schema(&conn)?;
+    asset_messages::init_schema(&conn)?;
     organization::init_schema(&conn)?;
     asset_recycle::init_schema(&conn)?;
     quick_access::init_schema(&conn)?;
@@ -1873,8 +1882,10 @@ fn scan_watch(store: &Store, library: &str, folder: &str) -> Result<WatchReport,
     }
     Ok(WatchReport {
         found,
+        changed: changes,
         errors,
         revision: team_revision(&conn)?,
+        completed_at: now(),
     })
 }
 
@@ -2034,7 +2045,9 @@ fn router(
         .merge(sources.routes(Arc::clone(&refresh)))
         .merge(baidu.routes())
         .merge(asset_messages::routes())
+        .merge(browser_sites::routes())
         .merge(creative_subscriptions::routes())
+        .merge(creative_video_references::routes())
         .merge(organization::routes())
         .merge(asset_recycle::routes())
         .merge(quick_access::routes())

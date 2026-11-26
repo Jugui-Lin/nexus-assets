@@ -1,0 +1,39 @@
+.nas-folder-sync {
+  width: min(455px, calc(100vw - 32px));
+}
+
+.nas-folder-sync-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 13px;
+  margin-block: 13px;
+  font-size: 12px;
+}
+
+.nas-folder-sync-details dt,
+.nas-folder-sync-result p { color: var(--muted); }
+
+.nas-folder-sync-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.nas-folder-sync-result {
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.nas-folder-sync-result p {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.nas-folder-sync-result p:empty { display: none; }
+.nas-folder-sync[data-nas-sync-state="done"] .nas-folder-sync-result strong { color: var(--accent); }
+.nas-folder-sync:is([data-nas-sync-state="partial"], [data-nas-sync-state="unconfirmed"]) .nas-folder-sync-result strong { color: #c79543; }
+.nas-folder-sync[data-nas-sync-state="error"] .nas-folder-sync-result strong { color: #d27676; }

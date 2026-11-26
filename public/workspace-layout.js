@@ -62,7 +62,7 @@ function createPanelToggle(panel, key) {
   return button;
 }
 
-export function initWorkspaceLayout(preferences = localStorage) {
+export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
   const app = document.querySelector('#app');
   const sidebar = app?.querySelector('.sidebar');
   const workArea = app?.querySelector('.work-area');
@@ -79,6 +79,7 @@ export function initWorkspaceLayout(preferences = localStorage) {
     sidebar: createDivider(sidebar, 'sidebar', '调整文件夹栏宽度'),
     inspector: createDivider(inspector, 'inspector', '调整资产详情栏宽度'),
   };
+  if (sharedSidebar) dividers.sidebar.classList.add('workspace-divider--shared');
   sidebar.after(dividers.sidebar);
   inspector.before(dividers.inspector);
 
@@ -126,6 +127,7 @@ export function initWorkspaceLayout(preferences = localStorage) {
 
   function bounds(key) {
     if (key === 'sidebar') {
+      if (sharedSidebar) return sharedSidebar.bounds();
       return {
         min: geometry.sideMin,
         max: Math.max(geometry.sideMin, maxWidth(key, Math.max(widths.inspector, reservedDetailWidth()))),
@@ -141,7 +143,7 @@ export function initWorkspaceLayout(preferences = localStorage) {
     const inspectorDocked = !context.split && inspectorExpanded();
     const sidebarWidth = collapsed.sidebar
       ? 0
-      : clamp(preferred.sidebar ?? defaults.sidebar, geometry.sideMin,
+      : sharedSidebar?.value() ?? clamp(preferred.sidebar ?? defaults.sidebar, geometry.sideMin,
         maxWidth('sidebar', reservedDetailWidth()));
     const inspectorWidth = inspectorDocked
       ? clamp(preferred.inspector ?? defaults.inspector, limits.inspector.min, maxWidth('inspector', sidebarWidth))
@@ -199,6 +201,10 @@ export function initWorkspaceLayout(preferences = localStorage) {
   }
 
   function adjust(key, value) {
+    if (key === 'sidebar' && sharedSidebar) {
+      sharedSidebar.set(value);
+      return;
+    }
     const { min, max } = bounds(key);
     preferred[key] = clamp(value, min, max);
     renderWidths();
@@ -217,15 +223,24 @@ export function initWorkspaceLayout(preferences = localStorage) {
     divider.classList.remove('is-resizing');
     app.classList.remove('workspace-resizing');
     if (cancelled) {
-      preferred[key] = originalWidth;
-      renderWidths();
+      if (key === 'sidebar' && sharedSidebar) sharedSidebar.set(originalWidth);
+      else {
+        preferred[key] = originalWidth;
+        renderWidths();
+      }
     } else {
+      if (key === 'sidebar') sharedSidebar?.persist();
       writeLayout(preferred, preferences);
     }
     if (divider.hasPointerCapture(pointerId)) divider.releasePointerCapture(pointerId);
   }
 
   function reset(key) {
+    if (key === 'sidebar' && sharedSidebar) {
+      sharedSidebar.set(null);
+      sharedSidebar.persist();
+      return;
+    }
     preferred[key] = null;
     renderWidths();
     writeLayout(preferred, preferences);
@@ -249,7 +264,8 @@ export function initWorkspaceLayout(preferences = localStorage) {
       event.preventDefault();
       divider.focus({ preventScroll: true });
       divider.setPointerCapture(event.pointerId);
-      drag = { key, pointerId: event.pointerId, startX: event.clientX, startWidth: widths[key], originalWidth: preferred[key] };
+      const originalWidth = key === 'sidebar' && sharedSidebar ? sharedSidebar.preferred() : preferred[key];
+      drag = { key, pointerId: event.pointerId, startX: event.clientX, startWidth: widths[key], originalWidth };
       app.classList.add('workspace-resizing');
       divider.classList.add('is-resizing');
     });
@@ -290,6 +306,7 @@ export function initWorkspaceLayout(preferences = localStorage) {
       }
       event.preventDefault();
       adjust(key, width);
+      if (key === 'sidebar') sharedSidebar?.persist();
       writeLayout(preferred, preferences);
     });
   }
@@ -302,6 +319,7 @@ export function initWorkspaceLayout(preferences = localStorage) {
 
   window.addEventListener('resize', onResize);
   onResize();
+  sharedSidebar?.subscribe(renderWidths);
   return {
     setInspectorContext(next) {
       if (next.assetView === context.assetView && next.split === context.split &&

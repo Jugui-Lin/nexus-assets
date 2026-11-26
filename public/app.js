@@ -13,7 +13,11 @@ import {buildTagTree, matchesTag, suggestAssetTags} from './asset-tags.js';
 import {initAssetAI} from './asset-ai.js';
 import {initWorkspacePicker, workspaceOpeningView} from './workspace-picker.js';
 import {initFolderBrowser} from './folder-browser.js';
-import {initFolderAddress} from './folder-address.js';
+import {initAssetFolderHistory, matchFolderAddress} from './folder-address.js';
+import {initLocalExplorer} from './local-explorer.js';
+import {initProjectDependencies} from './project-dependencies.js';
+import {initWorkspaceHandoff} from './workspace-handoff.js';
+import {initFolderSystemIntegration} from './folder-system-integration.js';
 import {initFolderContext} from './folder-context.js';
 import {initFolderAppearance} from './folder-appearance.js';
 import {initDccConnections} from './dcc-connections.js';
@@ -24,6 +28,8 @@ import {assetKindLabels as kinds, initQuickFilters, isRecentlyAdded, summarizeQu
 import {initAssetTypePreferences} from './asset-type-preferences.js';
 import {initAssetFilterToolbar} from './asset-filter-toolbar.js';
 import {initRuntimeLog} from './runtime-log.js';
+import {initWorkspaceGuide} from './workspace-guide.js';
+import {initWorkspaceSettingsSearch} from './workspace-settings-search.js';
 import {initVideoHoverPreview} from './video-hover-preview.js';
 import {initVideoControls} from './video-controls.js';
 import {initVideoCardDurations} from './video-card-durations.js';
@@ -37,11 +43,29 @@ import {initNexusUpdater} from './nexus-updater.js';
 import {initNexusReleaseNotes} from './nexus-release-notes.js';
 import {initBrowserCapture} from './browser-capture.js';
 import {initWorkspaceTabs} from './workspace-tabs.js';
+import {initWorkspaceTabManagement} from './workspace-tab-management.js';
 import {initAssetMasonry} from './asset-masonry.js';
 import {initQuickImagePreview} from './quick-image-preview.js';
+import {initWindowControls} from './window-controls.js';
+import {initExplorerFileDrop} from './local-explorer-drop.js';
+import {initExplorerColumns} from './local-explorer-columns.js';
+import {initExplorerContextMenu} from './local-explorer-context.js';
+import {createExplorerSidebarWidth, initExplorerSidebar} from './local-explorer-sidebar.js';
+import {initFolderAssetsPane} from './folder-assets-pane.js';
+import {initFileWorkspacePreferences, readFileWorkspacePreferences} from './file-workspace-preferences.js';
+import {initExplorerInspector} from './local-explorer-inspector.js';
+import {initExplorerNew} from './local-explorer-new.js';
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const native=Boolean(window.__TAURI__?.core),invoke=window.__TAURI__?.core.invoke;
 const nativeDragOut = native && /Windows/i.test(navigator.userAgent);
+const desktopWindow = nativeDragOut ? window.__TAURI__.window?.getCurrentWindow?.() : null;
+const detachedWindow = /^nexus-tab-[0-9a-f]{32}$/i.test(desktopWindow?.label || '');
+let shouldConfirmDesktopClose = () => false;
+initWindowControls({
+  windowHandle:desktopWindow,
+  shouldConfirmClose:() => shouldConfirmDesktopClose(),
+  report:error,
+});
 const runtimeLog = initRuntimeLog({copy:copyWorkspaceText});
 let pendingNativeRequests = 0;
 document.addEventListener('nexus-appearance-change', event => runtimeLog.add(`切换界面主题 · ${event.detail}`));
@@ -67,12 +91,17 @@ const api=async(command,args={})=>{
 };
 const gridZoomKey = 'nexus-grid-zoom-width';
 const assetLayoutKey = 'nexus-asset-layout';
+const assetThumbnailFitKey = 'nexus-asset-thumbnail-fit';
 const assetViewButtons = {grid:'#grid-view', masonry:'#masonry-view', list:'#list-view'};
 const assetMasonry = initAssetMasonry($('#asset-grid'));
 function preferredAssetLayout(preferences) {
   const layout = preferences.getItem(assetLayoutKey);
   if (Object.hasOwn(assetViewButtons, layout)) return layout;
   return preferences.getItem('nexus-list-mode') === 'true' ? 'list' : 'grid';
+}
+function preferredAssetThumbnailFit(preferences) {
+  const value = preferences.getItem(assetThumbnailFitKey);
+  return ['contain','cover','scale-down'].includes(value) ? value : 'contain';
 }
 const gridZoomLimits = {min: 88, max: 560};
 const savedGridZoom = Number(localStorage.getItem(gridZoomKey));
@@ -85,15 +114,138 @@ const state = {
   rating: 0, workflow: '', quickFilters: [], fileNameQuery: '',
   assetWindowAnchor: null,
   limit: 60, layout: preferredAssetLayout(localStorage),
+  thumbnailFit: preferredAssetThumbnailFit(localStorage),
   density: ['compact', 'normal', 'large'].includes(storedDensity) ? storedDensity : 'normal',
   gridZoom: savedGridZoom >= gridZoomLimits.min && savedGridZoom <= gridZoomLimits.max ? savedGridZoom : 0,
 };
 const expandedFolders = new Set();
-const workspaceHomeButton = $('#open-workspace-home');
-const workspaceHome = $('#workspace-home');
+const appRoot = $('#app');
+const fileWorkspace = $('#file-workspace');
+const sharedSidebar = nativeDragOut ? createExplorerSidebarWidth() : null;
+const fileSidebar = native ? initExplorerSidebar(fileWorkspace,sharedSidebar ?? undefined) : null;
+const workspaceBar = $('#nexus-workspace-bar');
+const newTabTrigger = $('#workspace-new-tab');
+const newTabMenu = $('#workspace-new-tab-menu');
+const newTabOptions = $('#workspace-new-tab-options');
+if (nativeDragOut) {
+  const slot = document.createElement('div');
+  slot.className = 'workspace-tab-heading nexus-asset-tabs';
+  const folderAdd = workspaceBar.querySelector('[data-explorer-add-tab]');
+  folderAdd.before(slot);
+  slot.append($('#workspace-tab-list'),$('#workspace-split-tabs'),$('#workspace-pane-join'));
+  folderAdd.hidden = true;
+  $('#workspace-tab-add').hidden = true;
+  $('#workspace-new-tab-controls').hidden = false;
+  $('#page-title').parentElement.classList.add('workspace-tabs-moved');
+}
+const startupStatus = $('#startup-status');
+const explorerDriveAliases = new Map();
+let assetWorkspaceReady;
+let assetWorkspaceFocus;
+let fileWorkspaceShown = false;
+let fileInspector;
+let fileNewMenu;
+const localExplorer = initLocalExplorer({
+  root:fileWorkspace,
+  detachedWindow,
+  deferInitialTab:nativeDragOut,
+  tabBar:workspaceBar,
+  preferences:readFileWorkspacePreferences(),
+  browse:native ? args => invoke('list_local_files',args) : undefined,
+  treeChildren:nativeDragOut ? args => invoke('local_explorer_tree_children',args) : undefined,
+  selectAllEntries:native ? args => invoke('local_explorer_selection',args) : undefined,
+  entryDetails:nativeDragOut ? args => invoke('local_explorer_entry_details',args) : undefined,
+  open:native ? args => invoke('open_local_file',args) : undefined,
+  reveal:native ? args => invoke('reveal_local_file',args) : undefined,
+  computer:nativeDragOut ? () => invoke('local_explorer_places') : undefined,
+  driveDetails:nativeDragOut ? readExplorerDriveDetails : undefined,
+  thumbnail:native ? args => invoke('local_explorer_thumbnail',args) : undefined,
+  folderThumbnail:native ? args => invoke('local_explorer_folder_thumbnail',args) : undefined,
+  fileIcon:nativeDragOut ? args => invoke('local_explorer_file_icon',args) : undefined,
+  contextMenu:native ? initExplorerContextMenu(fileWorkspace) : undefined,
+  fileAction:nativeDragOut ? args => invoke('local_explorer_file_action',args) : undefined,
+  clipboard:nativeDragOut ? args => invoke('local_explorer_clipboard',args) : undefined,
+  copy:copyWorkspaceText,
+  columns:initExplorerColumns,
+  onOpenFiles:revealFileWorkspace,
+  onDetachTab:nativeDragOut ? tab => openDetachedTab('files',tab) : undefined,
+  onOpenAssetLibrary:() => showAssetWorkspace().catch(error),
+  onBrowseAssets:nativeDragOut ? location => browseFolderAssets(location).catch(error) : undefined,
+  onAddToAssets:nativeDragOut ? location => addExplorerSourceToAssets(location).catch(error) : undefined,
+  onAddToCollection:nativeDragOut ? entries => collectExplorerFiles(entries).catch(error) : undefined,
+  onProjectDependencies:nativeDragOut ? path => projectDependencies.show(path) : undefined,
+  lookupAssets:nativeDragOut ? lookupExplorerAssets : undefined,
+  onLoadAssets:nativeDragOut ? ensureAssetWorkspace : undefined,
+  onToggleFavorite:nativeDragOut ? toggleExplorerFavorite : undefined,
+  searchAssets:nativeDragOut ? searchExplorerCatalog : undefined,
+  assetSearchKey:explorerPathKey,
+  onOpenAssetPane:nativeDragOut ? () => {
+    fileInspector?.hide();
+    return folderAssetPane?.toggle();
+  } : undefined,
+  onOpenAssetDetails:nativeDragOut ? () => fileInspector?.showDetails() : undefined,
+  onSelectionChange:() => {
+    fileInspector?.refresh();
+    fileNewMenu?.update();
+    folderAssetPane?.updateLocation();
+  },
+  onQuickPreview:() => fileInspector?.togglePreview(),
+});
+if (nativeDragOut) fileNewMenu = initExplorerNew({
+  root:fileWorkspace,
+  explorer:localExplorer,
+  listTemplates:() => invoke('local_explorer_new_templates'),
+  create:({directory,kind,templateId,name,target}) => invoke('local_explorer_create_item',{
+    directoryPath:directory,templateId:kind === 'shortcut' ? 'shortcut' : templateId,name,...(target && {target}),
+  }),
+  createFolder:({directory,name}) => invoke('local_explorer_file_action',{action:'new-folder',path:directory,...(name && {name})}),
+  report:toast,
+});
+const folderAssetPane = nativeDragOut ? initFolderAssetsPane({
+  pane:$('#folder-assets-pane'), trigger:$('[data-explorer-asset-action="pane"]'),
+  load:ensureAssetWorkspace,
+  directory:() => localExplorer.getCurrentDirectory(),
+  canOpenFolder:path => Boolean(indexedExplorerFolder(path)),
+  openFolder:path => browseCurrentFolderAsAssets(path).catch(error),
+  search:searchFolderShelf,
+  resolve:id => explorerAssetFile(assetsById.get(id)),
+  thumbnail:asset => thumbCache.get(asset.id) || readThumbnail(asset,128,true),
+  preview:showQuickPreview,
+  async locate(asset) {
+    const directory = assetSourceDirectory(asset.path);
+    if (fileWorkspace.hidden || !directory || !await localExplorer.revealSource(asset.path, {directory})) return false;
+    return !fileWorkspace.hidden && explorerPathKey(localExplorer.getSelectedPath()) === explorerPathKey(asset.path);
+  },
+  favorite:toggleExplorerFavorite,
+  report:error,
+}) : null;
+if (nativeDragOut) fileInspector = initExplorerInspector({
+  root:fileWorkspace,
+  selected:() => localExplorer.getSelectedEntry?.(),
+  selectedEntries:() => localExplorer.getSelectedEntries?.() || [],
+  assetMetadata:{lookup:lookupExplorerMetadata,save:saveExplorerMetadata,
+    versions:readExplorerVersions,openVersion:exportExplorerVersion,
+    references:readExplorerReferences,openReference:openExplorerReference},
+  thumbnail:args => invoke('local_explorer_thumbnail',args),
+  fileIcon:args => invoke('local_explorer_file_icon',args),
+  closeAssetPane:() => folderAssetPane?.hide({focus:false}),
+});
+const explorerFileDrop = nativeDragOut ? initExplorerFileDrop({
+  root:fileWorkspace,
+  explorer:localExplorer,
+  transfer:args => invoke('local_explorer_drop_files',args),
+  report:toast,
+  assetDragSource:target => folderAssetPane?.dragSource(target),
+  dragOut:args => invoke('start_local_file_drag',args),
+  waitForExit:() => invoke('wait_asset_drag_exit'),
+}) : null;
 const assetSearchInput = $('#search');
 const assetSearchToggle = $('#asset-search-toggle');
 const assetSearchField = $('#asset-search-field');
+const assetSearchToolbar = assetSearchField.parentElement;
+const assetSearchStrip = assetSearchToggle.closest('.asset-filter-strip');
+const assetViewNavigation = $('#main-nav');
+const assetViewNavigationSlot = $('#asset-view-navigation-slot');
 const assetSort = $('#sort');
 const favoriteSort = 'favoriteAt';
 
@@ -124,29 +276,61 @@ function syncAssetSearchToggle() {
   assetSearchToggle.title = expanded ? label : label + ' (/)' + (query ? ` · 「${query}」` : '');
 }
 
+function alignAssetSearch() {
+  if (assetSearchField.hidden || !assetSearchToolbar.clientWidth) return;
+  const toolbar = assetSearchToolbar.getBoundingClientRect();
+  const button = assetSearchToggle.getBoundingClientRect();
+  const leftSpace = Math.min(toolbar.width, button.left - toolbar.left - 6);
+  const besideButton = leftSpace >= 144;
+  const width = Math.min(350, besideButton ? leftSpace : toolbar.width);
+  const top = besideButton ? button.top : assetSearchStrip.getBoundingClientRect().bottom + 3;
+  Object.assign(assetSearchField.style, {
+    top:`${top - toolbar.top}px`, left:`${besideButton ? leftSpace - width : 0}px`, width:`${width}px`,
+  });
+}
+
 function setAssetSearchExpanded(expanded) {
   assetSearchToggle.setAttribute('aria-expanded', String(expanded));
   assetSearchField.hidden = !expanded;
   syncAssetSearchToggle();
+  if (expanded) alignAssetSearch();
 }
 
 function focusAssetSearch({select = false} = {}) {
+  assetSearchToggle.scrollIntoView({block:'nearest',inline:'nearest'});
   setAssetSearchExpanded(true);
-  assetSearchInput.focus();
+  assetSearchInput.focus({preventScroll:true});
   if (select) assetSearchInput.select();
+}
+
+function focusWorkspaceSearch(options) {
+  if (state.view === 'subscriptions') creativeSubscriptions.focusSearch();
+  else if (state.view === 'sites') $('#browser-site-filter').focus();
+  else if (isAssetView()) focusAssetSearch(options);
+  else return false;
+  return true;
 }
 
 assetSearchToggle.addEventListener('click', () => {
   if (assetSearchField.hidden) focusAssetSearch();
   else setAssetSearchExpanded(false);
 });
-assetSearchToggle.parentElement.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || assetSearchField.hidden) return;
-  event.preventDefault();
-  event.stopPropagation();
-  setAssetSearchExpanded(false);
-  assetSearchToggle.focus();
+document.addEventListener('pointerdown', event => {
+  if (!assetSearchField.hidden && !assetSearchField.contains(event.target) && !assetSearchToggle.contains(event.target))
+    setAssetSearchExpanded(false);
 });
+for (const element of [assetSearchToggle, assetSearchField]) {
+  element.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || assetSearchField.hidden) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setAssetSearchExpanded(false);
+    assetSearchToggle.focus({preventScroll:true});
+  });
+}
+const assetSearchResize = new ResizeObserver(alignAssetSearch);
+for (const region of [assetSearchToolbar, assetSearchStrip, $('#asset-pinned-filters')]) assetSearchResize.observe(region);
+assetSearchStrip.addEventListener('scroll', alignAssetSearch, {passive:true});
 
 const markedAssets = new Set();
 const fileStates = new Map();
@@ -190,6 +374,9 @@ const videoCardDurations = native ? initVideoCardDurations({
     if (asset?.kind === 'video' && !fileStates.has(id) && (!isTeamAsset(asset) || asset.teamMounted)) return asset;
   },
   measure: loadVideoCardDuration,
+  onDuration(badge, asset, label) {
+    badge.closest('.asset-card')?.setAttribute('aria-label',assetCardLabel(asset,label));
+  },
 }) : null;
 let navSummary = null;
 let displayedLibraryTree = null;
@@ -230,7 +417,7 @@ function displayAssetType(asset) {
   return assetTypePreferences.label(kind, kinds[kind]);
 }
 const editor = { id: null, revision: null, dirty: false, saving: false };
-const names={home:'主页',all:'全部资产',favorites:'我的收藏',recent:'最近入库',jobs:'导入任务',subscriptions:'创作订阅',sites:'站点导航',whiteboard:'白板'};
+const names={all:'全部资产',favorites:'我的收藏',recent:'最近入库',jobs:'导入任务',subscriptions:'创作订阅',sites:'站点导航',whiteboard:'白板'};
 const viewLabel = view => team.active && view === 'favorites' ? '收藏' : names[view];
 const isAssetView = () => ['all', 'favorites', 'recent'].includes(state.view);
 const kindIcons = {video:'play', audio:'play', texture:'grid', scene:'folder', material:'stack', script:'notes', other:'notes'};
@@ -283,7 +470,7 @@ async function queueC4dProject(assetId, mode) {
   const asset = assetsById.get(assetId);
   const sessions = state.sessions.filter(session => session.dcc === 'c4d' && session.projectExport);
   const session = sessions.find(item => item.id === $('#target-session').value) || sessions[0];
-  if (!session) throw Error('请在 DCC 连接中心更新 Cinema 4D 桥接，启动 Cinema 4D 后再转换');
+  if (!session) throw Error('请在 DCC 连接中心检查桥接状态，重开 Cinema 4D 后再转换');
   if (!asset || !['max', 'blend'].includes(asset.ext)) throw Error('源工程已不在当前资产库');
   const destination = await api('pick_folder', {purpose:'c4d-project'});
   if (!destination || scope !== collectionScope() || !assetsById.has(assetId)) return;
@@ -416,14 +603,21 @@ function refreshFolderTrees() {
     }
   }
   for (const id of markedAssets) if (!assetsById.has(id)) markedAssets.delete(id);
+  folderAssetPane?.refresh();
+  refreshExplorerCatalog();
 }
-async function refresh({render = true} = {}) {
-  const {assets,libraries,sessions,jobs,coverIds=[],hiddenFolders=[],definedTags=[]} = await api('get_state');
-  if (team.active) return;
+function applyPersonalCatalog({assets,libraries,coverIds=[],hiddenFolders=[],definedTags=[]}) {
   customCovers.clear();
   for (const id of coverIds) customCovers.add(id);
-  Object.assign(state, {assets,libraries,sessions,jobs,hiddenFolders,definedTags});
+  Object.assign(state, {assets,libraries,hiddenFolders,definedTags});
   refreshFolderTrees();
+}
+async function refresh({render = true} = {}) {
+  const catalog = await api('get_state');
+  if (team.active) return;
+  const {sessions,jobs} = catalog;
+  Object.assign(state,{sessions,jobs});
+  applyPersonalCatalog(catalog);
   if (!render) return;
   $('#engine-label').textContent = native ? 'RUST CORE' : 'DEV PREVIEW';
   renderNav();
@@ -493,10 +687,6 @@ function renderJobCount() {
 function renderNav(){
   syncAssetSearchToggle();
   $('#all-count').textContent=state.assets.length;$('#fav-count').textContent=getNavSummary().favorites;
-  const home = state.view === 'home';
-  workspaceHomeButton.classList.toggle('active', home);
-  if (home) workspaceHomeButton.setAttribute('aria-current', 'page');
-  else workspaceHomeButton.removeAttribute('aria-current');
   renderJobCount();
   folderContext.render();
   $$(':is(#main-nav, #workspace-tools-nav) .nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===state.view&&!state.library&&!state.collection));
@@ -558,7 +748,7 @@ function renderLocation() {
   const folders = folderAncestors(state.folder);
   const place = folders.at(-1)?.name || lib?.name || collection?.name || viewLabel(state.view);
   const root = team.active ? team.info.team.name : personalWorkspace.name;
-  const parts = [`<button type="button" data-crumb-home title="返回主页">${escape(root)}</button>`];
+  const parts = [`<button type="button" data-crumb-root title="查看全部资产">${escape(root)}</button>`];
   if (lib && folders.length) {
     parts.push(`<button type="button" data-crumb-folder="">${escape(lib.name)}</button>`);
     for (const folder of folders.slice(0, -1)) {
@@ -580,7 +770,8 @@ function renderLocation() {
   note.title = description;
   $('#folder-options').classList.toggle('hidden', !lib);
   $('#edit-collection').classList.toggle('hidden', !collection);
-  folderAddress.render();
+  $('#asset-folder-file-view').hidden = !nativeDragOut || !lib?.path || !isAssetView();
+  assetFolderHistory.recordLocation();
 }
 function renderSubfolders() {
   const folder = state.library && !state.collection && isAssetView()
@@ -636,25 +827,29 @@ function renderAssets(){
   renderAssetSort();
   assetTypePreferences.reload(libraryScope());
   if (!assetTypePreferences.categoryEnabled(state.kind)) state.kind = 'all';
-  const home = state.view === 'home';
   const jobs = state.view === 'jobs';
   const subscriptions = state.view === 'subscriptions';
   const sites = state.view === 'sites';
   const board = state.view === 'whiteboard';
   $('#jobs-view').classList.toggle('hidden', !jobs);
-  $('#app').classList.toggle('workspace-home-active', home);
-  workspaceHome.classList.toggle('hidden', !home);
-  if (home) $('#home-asset-count').textContent = state.assets.length.toLocaleString('zh-CN') + ' 项资产';
   $('#app').classList.toggle('workspace-subscriptions', subscriptions);
   $('#app').classList.toggle('workspace-sites-active', sites);
   $('#site-navigation').classList.toggle('hidden', !sites);
   $('#app').classList.toggle('workspace-whiteboard-active', board);
   $('#workspace-whiteboard').classList.toggle('hidden', !board);
   creativeSubscriptions.setVisible(subscriptions);
-  siteNavigation.setScope(libraryScope());
+  siteNavigation.setScope(libraryScope(), team.active ? team.info.team.id : undefined, collectionScope());
   whiteboard.setContext({key:collectionScope(), teamId:team.active ? team.info.team.id : null, visible:board});
-  $('#workspace-asset-controls').hidden = !isAssetView();
-  $('#asset-grid').classList.toggle('hidden', !isAssetView());
+  const showAssets = isAssetView();
+  const navigationParent = showAssets ? assetSearchToggle.parentElement : assetViewNavigationSlot;
+  let navigationFocus;
+  if (assetViewNavigation.parentElement !== navigationParent) {
+    if (assetViewNavigation.contains(document.activeElement)) navigationFocus = document.activeElement;
+    navigationParent.insertBefore(assetViewNavigation,showAssets ? assetSearchToggle : null);
+  }
+  $('#workspace-asset-controls').hidden = !showAssets;
+  navigationFocus?.focus({preventScroll:true});
+  $('#asset-grid').classList.toggle('hidden', !showAssets);
   renderLocation();
   renderSubfolders();
   workspaceNavigation?.render();
@@ -781,27 +976,45 @@ function renderAssetCard(asset, library) {
   const fileState = fileStates.get(asset.id);
   const fileWarning = fileState ? (fileState === 'missing' ? '文件缺失' : '无法访问') : '';
   const nameHeading = `<h3 class="card-name" title="${title}">${title}</h3>`;
+  const nameRow = nativeDragOut && explorerAssetFile(asset)
+    ? `<div class="asset-card-name-row">${nameHeading}<button type="button" class="icon-button card-source" data-reveal-source="${id}" aria-label="定位原文件 ${title}" title="定位原文件">${icon('locate')}</button></div>`
+    : nameHeading;
+  const secondaryName = list && (fileWarning || distinctAssetFileName(asset) || asset.subtitle);
   const format = escape(asset.ext.toUpperCase());
+  const cardLabel = escape(assetCardLabel(asset));
   const placeholder = icon(kindIcons[assetTypePreferences.effectiveKind(asset)] || 'box', 'placeholder-icon');
   const thumbnailFallback = list ? placeholder : `<span class="card-thumb-placeholder" aria-hidden="true">
     ${placeholder}${format ? `<span class="card-thumb-format">${format}</span>` : ''}</span>`;
-  return `<article class="asset-card ${focused ? 'selected' : ''} ${marked ? 'checked' : ''}" data-id="${id}" data-masonry-aspect-key="${escape(masonryAspectKey(asset))}" ${asset.kind === 'video' ? 'data-video-hover' : ''} tabindex="0" aria-label="${title}" aria-haspopup="menu" ${focused ? 'aria-current="true"' : ''}${list ? ' role="row"' : ''}>
+  return `<article class="asset-card ${focused ? 'selected' : ''} ${marked ? 'checked' : ''}" data-id="${id}" data-masonry-aspect-key="${escape(masonryAspectKey(asset))}" ${asset.kind === 'video' ? 'data-video-hover' : ''} tabindex="0" aria-label="${cardLabel}" aria-haspopup="menu" ${focused ? 'aria-current="true"' : ''}${list ? ' role="row"' : ''}>
     <div class="card-thumb"${list ? ' role="cell"' : ''}>
       ${thumbnailFallback}
       <img data-thumb="${id}" alt="" draggable="false" class="hidden">
       ${list ? '' : `<span class="format-badge">${format}</span>`}
       ${fileWarning && !list ? '<span class="file-state">' + fileWarning + '</span>' : ''}
       <button class="icon-button card-favorite ${asset.favorite ? 'is-favorite' : ''}" data-favorite="${id}" title="${asset.favorite ? '取消收藏' : '收藏资产'}">${icon('star')}</button>
-      ${native && !list && asset.kind === 'video' && !fileWarning ? `<span class="card-video-duration hidden" data-video-duration="${id}"></span>` : ''}
+      ${native && !list && asset.kind === 'video' && !fileWarning ? `<span class="card-video-duration hidden" data-video-duration="${id}" aria-hidden="true"></span>` : ''}
       <button class="card-check" data-mark="${id}" aria-label="选择 ${title}" aria-pressed="${marked}">${icon('check')}</button>
       ${nativeDragOut ? '<button type="button" class="card-native-drag" data-native-drag title="拖到其他桌面软件" aria-label="拖到其他桌面软件">' + icon('drag-out') + '</button>' : ''}
     </div>
     <div class="card-info"${list ? ' role="presentation"' : ''}>
-      ${list ? `<div class="asset-list-name" role="cell">${nameHeading}
-        ${fileWarning || asset.subtitle ? `<small${fileWarning ? ' class="asset-list-file-warning"' : ''} title="${escape(fileWarning || asset.subtitle)}">${escape(fileWarning || asset.subtitle)}</small>` : ''}
-      </div>${renderAssetListDetails(asset, library)}` : nameHeading}
+      ${list ? `<div class="asset-list-name" role="cell">${nameRow}
+        ${secondaryName ? `<small${fileWarning ? ' class="asset-list-file-warning"' : ''} title="${escape(secondaryName)}">${escape(secondaryName)}</small>` : ''}
+      </div>${renderAssetListDetails(asset, library)}` : nameRow}
     </div>
   </article>`;
+}
+function distinctAssetFileName(asset) {
+  const filename = (asset.relativePath || asset.path || '').split(/[/\\]/).pop();
+  if (!filename || filename === asset.name || filename.toLowerCase() === (asset.name + '.' + asset.ext).toLowerCase()) return '';
+  return filename;
+}
+function assetCardLabel(asset, duration) {
+  const filename = distinctAssetFileName(asset);
+  const format = asset.ext.toUpperCase();
+  const displayName = filename ? `${asset.name}，文件名 ${filename}` : asset.name;
+  const fileState = fileStates.get(asset.id);
+  return [displayName,format,duration && `时长 ${duration}`,asset.favorite ? '已收藏' : '未收藏',
+    fileState && (fileState === 'missing' ? '文件缺失' : '无法访问')].filter(Boolean).join('，');
 }
 function renderBulkBar() {
   $('#bulk-bar').classList.toggle('hidden', !markedAssets.size);
@@ -1046,6 +1259,10 @@ async function readThumbnail(asset, size, cacheOnly) {
     const local = customCover ? null : await readImage('thumbnail_cached');
     return local || readImage('thumbnail');
   }
+  if (native && cacheOnly && (!isTeamAsset(asset) || asset.teamMounted) &&
+      ['hip', 'hiplc', 'hipnc'].includes(asset.ext)) {
+    return readImage('thumbnail_shared');
+  }
   if (sharedOnly && customCover) return readImage('thumbnail_shared');
   if (customCover) cacheOnly = false;
   const existing = await readImage(cacheOnly ? 'thumbnail_cached' : 'thumbnail');
@@ -1264,11 +1481,11 @@ $('#thumbnail-form').addEventListener('submit', async event => {
     const summary = `${halted() ? '已停止 · ' : ''}已生成 ${generated} 项 · 已缓存 ${cached} 项` +
       (unsupported ? ` · 暂无预览 ${unsupported} 项` : '') + (failed ? ` · 失败 ${failed} 项` : '');
     thumbnailProgress.textContent = firstError ? summary + '。' + firstError : summary;
-    runtimeLog.add(`生成缩略图 · ${thumbnailProgress.textContent}`, failed ? 'error' : 'info');
+    runtimeLog.add(`生成缩略图 · ${thumbnailProgress.textContent}`, failed ? 'error' : 'info', 'preview');
     if (!thumbnailDialog.open) toast(summary, failed > 0);
   } catch (failure) {
     thumbnailProgress.textContent = String(failure?.message || failure);
-    runtimeLog.add(`生成缩略图失败 · ${thumbnailProgress.textContent}`, 'error');
+    runtimeLog.add(`生成缩略图失败 · ${thumbnailProgress.textContent}`, 'error', 'preview');
     if (!thumbnailDialog.open) error(failure);
   } finally {
     thumbnailRun = null;
@@ -1324,7 +1541,7 @@ async function renderInspector(loadPreview=true){
   setConflict(shared && editor.dirty && editor.revision !== a.revision
     ? '同事更新了这项资产。你可以先复制草稿，再载入最新资料。' : '');
   $('#save-metadata').disabled = editor.saving;
-  $('#reveal-file').disabled = Boolean(fileStates.get(a.id) || (shared && !a.teamMounted));
+  $('#reveal-file').disabled = nativeDragOut ? !explorerAssetFile(a) : Boolean(fileStates.get(a.id) || (shared && !a.teamMounted));
   $('#show-asset-folder').disabled = !indexedAssetFolder(a);
   renderSessions();if(!loadPreview)return;
   const serial=++previewSerial;$('#preview-canvas').classList.add('hidden');$('#preview-image').classList.add('hidden');$('#preview-fallback').classList.add('hidden');$('#preview-help').textContent='正在加载预览…';
@@ -1379,10 +1596,10 @@ function updateSend() {
   $('#send-hint').textContent = fileState === 'missing' ? '右键卡片以重新关联文件'
     : fileState ? '请检查磁盘和 NAS 是否可用'
     : unmapped ? '请先链接团队共享文件夹'
-    : updateBlender ? '更新 Blender 桥接并重启 Blender 后即可导入 MAX'
+    : updateBlender ? '请查看 Blender 桥接状态，重开 Blender 后即可导入 MAX'
     : connect ? '连接创作软件后即可导入'
-    : !session ? '先在 DCC 中运行桥接脚本'
-    : !ok && session.dcc === 'c4d' && smartFormats.has(asset?.ext) ? '更新 Cinema 4D 桥接后即可智能导入'
+    : !session ? '启动创作软件以连接 Nexus'
+    : !ok && session.dcc === 'c4d' && smartFormats.has(asset?.ext) ? '请查看 Cinema 4D 的桥接状态'
     : !ok ? (asset ? '.' + asset.ext + ' 需要先转换为目标软件支持的格式' : '先选择一项资产')
     : '导入 ' + dccs[session.dcc]?.name + ' 当前场景';
 }
@@ -1814,9 +2031,14 @@ const teamAssetMessages = initTeamAssetMessages({
   },
   asset: id => assetsById.get(id),
   jump: jumpToTeamNoticeAsset,
+  jumpVideoReference: (key, stillOpen, closeInbox) =>
+    creativeSubscriptions.locateVideoReference(key, stillOpen, () => {
+      closeInbox();
+      setView('subscriptions');
+    }),
   formatDate: date,
   notify: toast,
-  onReceive: count => runtimeLog.add(`收到团队消息 · ${count} 条`),
+  onReceive: count => runtimeLog.add(`收到团队消息 · ${count} 条`, 'info', 'team'),
   onPokeReceive: () => animateTeamAvatar(team.online.find(member => member.self)?.id),
   openDccUpdates: () => dccConnections.show(),
   onError: error,
@@ -1898,6 +2120,7 @@ async function setFavorite(a, value) {
     if (!a.favorite) delete a.favoriteAt;
   }
   navSummary = null;
+  refreshExplorerCatalog();
 }
 function resetFilters(restoreFolder = false, assetWindowAnchor = null) {
   assetFilterToolbar.close();
@@ -1924,7 +2147,7 @@ function setView(view) {
   if (view === 'whiteboard' && state.view === view) whiteboard.showProjects();
   const changed = state.view !== view || state.library || state.collection;
   enterLocation(view);
-  if (changed) runtimeLog.add(`打开工作区页面 · ${viewLabel(view)}`);
+  if (changed) runtimeLog.add(`打开工作区页面 · ${viewLabel(view)}`, 'info', 'folders');
 }
 
 function captureWorkbenchPage() {
@@ -1951,7 +2174,7 @@ function restoreWorkbenchPage(page) {
   if ((criteria.library && !findFolder(folderTrees.get(criteria.library), criteria.folder)) ||
       (criteria.collection && !state.collections.some(collection => collection.id === criteria.collection))) {
     setView(workspaceOpeningView(libraryPreferences));
-    return;
+    return false;
   }
   editor.dirty = false;
   markedAssets.clear();
@@ -1981,6 +2204,7 @@ function restoreWorkbenchPage(page) {
   }
   $('#browser-scroll').scrollTop = scroll;
   renderInspector(needsPreview).catch(error);
+  return true;
 }
 function openFolder(libraryId, path = '', assetId = null, {expandTree = true} = {}) {
   const node = findFolder(folderTrees.get(libraryId), path);
@@ -1990,7 +2214,7 @@ function openFolder(libraryId, path = '', assetId = null, {expandTree = true} = 
   if (expandTree) expandFolderPath(libraryId, node.path);
   const rows = enterLocation('all', libraryId, node.path, null, assetId);
   if (!assetId && !rows.some(asset => asset.id === state.selected)) selectAsset(rows[0]?.id || null).catch(error);
-  if (changed) runtimeLog.add(`打开文件夹 · ${node.name}`);
+  if (changed) runtimeLog.add(`打开文件夹 · ${node.name}`, 'info', 'folders');
   if (team.active && firstFolder) refreshTeam().catch(() => {});
 }
 $('#show-earlier-assets').addEventListener('click', () => {
@@ -2050,14 +2274,11 @@ for (const navigation of $$('#main-nav, #workspace-tools-nav')) {
     if (button) setView(button.dataset.view);
   });
 }
-workspaceHomeButton.addEventListener('click', () => {
-  if (state.view !== 'home') setView('home');
-});
-workspaceHome.addEventListener('click', event => {
-  const destination = event.target.closest('[data-home-view]')?.dataset.homeView;
-  if (!destination) return;
-  setView(destination);
-  if (event.detail === 0) $('#page-title').focus({preventScroll:true});
+const fileWorkspaceButton = $('#open-file-workspace');
+fileWorkspaceButton.classList.toggle('hidden', !native || nativeDragOut);
+fileWorkspaceButton.addEventListener('click', () => { void showFileWorkspace().catch(error); });
+workspaceBar.querySelector('[data-workspace-mode="files"]').addEventListener('click', () => {
+  void showFileWorkspace().catch(error);
 });
 const folderSearch = $('#folder-search');
 folderSearch.addEventListener('input', renderLibraryTree);
@@ -2121,7 +2342,7 @@ $('#libraries').addEventListener('click', event => {
   if (folder) openFolder(folder.dataset.library, folder.dataset.folder);
 });
 $('#breadcrumbs').addEventListener('click', event => {
-  if (event.target.closest('[data-crumb-home]')) return setView('home');
+  if (event.target.closest('[data-crumb-root]')) return setView('all');
   const folder = event.target.closest('[data-crumb-folder]');
   if (folder) openFolder(state.library, folder.dataset.crumbFolder);
 });
@@ -2238,8 +2459,20 @@ function renderGridSize(options) {
   custom.textContent = state.gridZoom ? `自定 · ${Math.round(state.gridZoom)} px` : '自定';
   control.value = state.gridZoom ? 'custom' : state.density;
   control.disabled = state.layout === 'list';
+  renderAssetThumbnailFit();
   assetMasonry.sync(options);
 }
+function renderAssetThumbnailFit() {
+  const control = $('#asset-thumbnail-fit');
+  control.value = state.thumbnailFit;
+  control.disabled = state.layout === 'list';
+  $('#asset-grid').dataset.thumbnailFit = state.thumbnailFit;
+}
+$('#asset-thumbnail-fit').addEventListener('change', event => {
+  state.thumbnailFit = event.target.value;
+  libraryPreferences.setItem(assetThumbnailFitKey,state.thumbnailFit);
+  renderAssetThumbnailFit();
+});
 $('#view-density').addEventListener('change', event => {
   if (event.target.value === 'custom') return;
   state.density = event.target.value;
@@ -2273,6 +2506,8 @@ $('#asset-grid').addEventListener('click', event => {
   }
 });
 $('#asset-grid').addEventListener('click', event => {
+  const source = event.target.closest('[data-reveal-source]');
+  if (source) return openAssetSourceInFolder(source.dataset.revealSource).catch(error);
   const star = event.target.closest('[data-favorite]');
   if (star) return favorite(star.dataset.favorite).catch(error);
   const checkbox = event.target.closest('[data-mark]');
@@ -2308,12 +2543,14 @@ for (const id of ['#asset-name', '#asset-tag-input', '#asset-notes', '#asset-rat
 function setConflict(message) {
   $('#team-edit-conflict-message').textContent = message;
   $('#team-edit-conflict').classList.toggle('hidden', !message);
+  $('#team-reload-asset').hidden = !selected();
 }
 
-async function writeMetadata(asset, patch, revision = asset.revision) {
+async function writeMetadata(asset, patch, revision = asset.revision, expectedMetadata) {
   if (!isTeamAsset(asset)) {
-    Object.assign(asset, await api('patch_asset', {id: asset.id, patch}));
+    Object.assign(asset, await api('patch_asset', {id: asset.id, patch, expectedMetadata}));
     navSummary = null;
+    refreshExplorerCatalog();
     return;
   }
   const result = await api('team_edit', {id: asset.id, patch: {...patch, revision}});
@@ -2322,6 +2559,7 @@ async function writeMetadata(asset, patch, revision = asset.revision) {
     const {name, tags, notes, rating, workflow, revision: serverRevision, editedBy} = result;
     Object.assign(current, {name, tags, notes, rating, workflow, revision: serverRevision, editedBy});
     navSummary = null;
+    refreshExplorerCatalog();
   }
   if ((patch.rating !== undefined && (result.rating || 0) !== patch.rating) ||
       (patch.workflow !== undefined && (result.workflow || 'unset') !== patch.workflow)) {
@@ -2374,7 +2612,7 @@ $('#send-asset').addEventListener('click', async () => {
   const session = state.sessions.find(item => item.id === $('#target-session').value);
   if (!asset) return;
   if (!session || needsBlenderMaxBridge(session, asset)) {
-    dccConnections.show(session ? '请更新 Blender 桥接并重启 Blender 后导入 MAX。' : undefined);
+    dccConnections.show(session ? '桥接同步完成后，重开 Blender 即可导入 MAX。' : undefined);
     return;
   }
   if (usesC4dSceneDialog(session, asset)) {
@@ -2441,7 +2679,7 @@ smartImportForm.addEventListener('submit', async event => {
     if (smartImportDialog.open) $('#smart-import-save').focus({preventScroll:true});
   }
 });
-$('#reveal-file').addEventListener('click',()=>api('reveal_asset',{id:state.selected}).catch(error));
+$('#reveal-file').addEventListener('click',()=>openAssetSourceInFolder(state.selected).catch(error));
 const dccConnections = initDccConnections({
   hosts: dccs,
   native,
@@ -2450,25 +2688,104 @@ const dccConnections = initDccConnections({
   getSessions: () => state.sessions,
   escape,
   icon,
-  toast,
   open: () => openDialog('#connections-dialog'),
   openImportSettings: showSmartImportSettings,
-  onUpdates: teamAssetMessages.setDccUpdates,
 });
-const topTools = $('#top-tools');
+if (!detachedWindow) void dccConnections.refresh();
+const assetToolbarTools = $('#top-tools');
+const fileWorkspaceMenu = $('#file-workspace-menu');
+const topTools = nativeDragOut ? fileWorkspaceMenu : assetToolbarTools;
+const topToolsTrigger = topTools.querySelector('summary');
+if (nativeDragOut) {
+  fileWorkspaceMenu.append(assetToolbarTools.querySelector('.workspace-tools-panel'));
+  assetToolbarTools.hidden = true;
+  fileWorkspaceMenu.hidden = false;
+}
 function closeTopTools(restoreFocus = false) {
   if (!topTools.open) return;
   topTools.open = false;
-  if (restoreFocus) topTools.querySelector('summary').focus({preventScroll: true});
+  if (restoreFocus) topToolsTrigger.focus({preventScroll:true});
 }
+initFolderSystemIntegration({api,enabled:nativeDragOut,closeMenu:() => closeTopTools(true)});
+const filePreferences = initFileWorkspacePreferences({
+  apply:preferences => {
+    if (nativeDragOut) renderNewTabPreference(preferences.newTabAction);
+    return localExplorer.applyPreferences?.(preferences);
+  },
+  resetSidebar:() => fileSidebar?.reset(),
+  clearFrequent:() => localExplorer.clearRecentFolders(),
+  openDefaultManager:() => $('#folder-system-integration').click(),
+  focusNewTabControl:() => (newTabMenu.hidden ? newTabTrigger : newTabMenu).focus({preventScroll:true}),
+  report:toast,
+});
+initWorkspaceSettingsSearch(topTools, closeTopTools);
+initWorkspaceGuide(topTools, closeTopTools);
+const projectDependencies = initProjectDependencies({api,async reveal(path) {
+  revealFileWorkspace();
+  await localExplorer.openPath(path);
+}});
+const workspaceHandoff = initWorkspaceHandoff({capture:captureWorkspaceHandoff,open:openWorkspaceHandoff,notify:toast});
+$('#workspace-handoff-export').addEventListener('click', () => {
+  closeTopTools(true);
+  void workspaceHandoff.showExport();
+});
+$('#workspace-handoff-import').addEventListener('click', () => {
+  closeTopTools(true);
+  void workspaceHandoff.showImport();
+});
+fileWorkspaceMenu.addEventListener('click', async event => {
+  const button = event.target.closest('button[data-asset-workspace-required]');
+  if (!button || (assetWorkspaceReady && !appRoot.classList.contains('app-starting'))) return;
+  event.stopPropagation();
+  closeTopTools(true);
+  try {
+    await ensureAssetWorkspace();
+    if (!$('dialog[open]') && !button.hidden && !button.classList.contains('hidden')) button.click();
+  } catch (failure) { error(failure); }
+}, {capture:true});
+fileWorkspaceMenu.addEventListener('click',async event => {
+  const command = event.target.closest('[data-file-workspace-command]')?.dataset.fileWorkspaceCommand;
+  if (!command) return;
+  closeTopTools(true);
+  try {
+    switch (command) {
+      case 'shortcut':
+        toast(await invoke('create_desktop_shortcut'));
+        break;
+      case 'feedback':
+        await api('subscription_open',{url:'https://github.com/Jugui-Lin/nexus-assets/issues/new'});
+        break;
+      case 'updates':
+        openDialog('#about-dialog');
+        nexusUpdater.checkNow();
+        showTeamServiceVersion();
+        break;
+      case 'preferences':
+        filePreferences?.open();
+        break;
+      case 'tab-preferences':
+        filePreferences?.openTabSettings(() => topToolsTrigger.focus({preventScroll:true}));
+        break;
+      case 'quit':
+        workspaceBar.querySelector('[data-window-action="close"]')?.click();
+        break;
+    }
+  } catch (failure) { error(failure); }
+});
 document.addEventListener('pointerdown', event => {
   if (!topTools.contains(event.target)) closeTopTools();
 });
 topTools.addEventListener('focusout', event => {
   if (event.relatedTarget && !topTools.contains(event.relatedTarget)) closeTopTools();
 });
+topTools.addEventListener('toggle', () => {
+  if (!topTools.open) {
+    for (const section of topTools.querySelectorAll('.workspace-tools-section[open]')) section.open = false;
+  }
+});
 topTools.addEventListener('keydown', event => {
   if (event.key === 'Escape' && topTools.open) {
+    event.preventDefault();
     event.stopPropagation();
     closeTopTools(true);
   }
@@ -2487,10 +2804,11 @@ for (const selector of ['#settings', '#connection-summary']) {
 const releaseNotes = initNexusReleaseNotes({dialog:$('#nexus-release-notes'),button:$('#about-release-notes')});
 const nexusUpdater = initNexusUpdater({
   api, enabled:native, panel:$('#nexus-updater'),
-  indicators:[topTools.querySelector('summary'), $('#about-button'), $('#sidebar-version')],
+  indicators:[topToolsTrigger,$('#about-button'),$('#sidebar-version')],
   rememberReleaseNotes:releaseNotes.remember,
   canRestart() {
     return !pendingNativeRequests && !editor.dirty && !editor.saving &&
+      !fileInspector?.hasUnsavedChanges?.() &&
       !folderScan && !ingestBusy && !publishing &&
       !whiteboard.busyForUpdate() && !workbenchTabs.busy() &&
       !$('dialog[open]:not(#about-dialog), .asset-menu:not(.hidden), #files-drop-overlay:not(.hidden), .dragging-assets, .marquee-selecting');
@@ -2552,9 +2870,7 @@ async function showClientVersion() {
   }
 }
 const clientVersion = showClientVersion();
-for (const selector of ['#import-button', '#add-library-small']) {
-  $(selector).addEventListener('click', () => showAssetImport());
-}
+$('#add-library-small').addEventListener('click', () => showAssetImport());
 $$('.close-modal').forEach(b=>b.addEventListener('click',()=>b.closest('dialog').close()));
 let pickedFolderPaths = null;
 let folderScan = null;
@@ -2614,6 +2930,7 @@ const folderBrowser = initFolderBrowser({
 initBaiduCloud({
   api,
   native,
+  closeMenu: () => closeTopTools(true),
   copy: copyWorkspaceText,
   log: runtimeLog.add,
   workspace: () => ({scope:collectionScope(), teamId:team.active ? team.info.team.id : null}),
@@ -2809,11 +3126,15 @@ function updateCollectionForm() {
   $('#collection-name').required = creating || mode === 'edit';
   $('#collection-submit').textContent = mode === 'edit' ? '保存名称' : mode === 'new' ? '创建合集' : creating ? '创建并加入' : '加入合集';
 }
-function showCollectionDialog(mode, ids = [], collection = currentCollection()) {
+function showCollectionDialog(mode, ids = [], collection = currentCollection(), files) {
   if (mode === 'edit' && !collection) return;
-  collectionDialog = {mode, ids, scope:collectionScope(), id:collection?.id};
+  collectionDialog = {mode, ids, scope:collectionScope(), id:collection?.id, files};
   $('#collection-dialog-title').textContent = mode === 'add' ? '加入合集' : mode === 'edit' ? '管理合集' : '新建合集';
-  $('#collection-dialog-description').textContent = mode === 'add'
+  $('#collection-dialog-description').textContent = files
+    ? `已选 ${files.total} 个文件，${ids.length} 项已入库。${files.pending.length ? team.active
+      ? `${files.pending.length} 个新文件将复制到所选团队目录后加入合集。`
+      : `${files.pending.length} 个新文件将先在原路径建立索引。` : ''}`
+    : mode === 'add'
     ? `将 ${ids.length} 项资产的引用加入${team.active ? '团队' : ''}合集。`
     : team.active ? '团队成员可以一起整理和使用这些合集。' : '在本机整理来自不同文件夹的资产。';
   $('#collection-status').textContent = '';
@@ -2821,6 +3142,15 @@ function showCollectionDialog(mode, ids = [], collection = currentCollection()) 
   $('#collection-picker').innerHTML = state.collections.map(item =>
     `<option value="${escape(item.id)}">${escape(item.name)}</option>`
   ).join('') + '<option value="">新建合集…</option>';
+  const importField = $('#collection-import-target-field');
+  const importTarget = $('#collection-import-target');
+  const targets = files?.targets || [];
+  const needsTarget = Boolean(team.active && files?.pending.length);
+  importField.classList.toggle('hidden', !needsTarget);
+  importTarget.required = needsTarget;
+  importTarget.disabled = !needsTarget;
+  importTarget.replaceChildren(new Option('选择团队目录',''), ...targets.map(({label},index) => new Option(label,index)));
+  importTarget.value = files?.preferred ?? '';
   $('#collection-delete-confirm').classList.add('hidden');
   $('#delete-collection').classList.toggle('hidden', mode !== 'edit');
   updateCollectionForm();
@@ -2840,12 +3170,21 @@ $('#collect-asset').addEventListener('click', () => {
 $('#collection-picker').addEventListener('change', updateCollectionForm);
 $('#collection-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const {mode, scope, id, ids} = collectionDialog;
+  const draft = collectionDialog;
+  const {mode, scope, id, files} = draft;
   if (scope !== collectionScope()) return;
   const button = $('#collection-submit');
-  button.disabled = true;
+  if (button.disabled) return;
+  const dialog = $('#collection-dialog');
+  const controls = [...dialog.querySelectorAll('button, input, select')].filter(control => !control.disabled);
+  const cancelClose = event => event.preventDefault();
+  dialog.addEventListener('cancel',cancelClose);
+  for (const control of controls) control.disabled = true;
   try {
     const name = $('#collection-name').value.trim();
+    if ($('#collection-name').required && !name) throw Error('请输入合集名称');
+    const ids = files ? await resolveExplorerCollectionFiles(draft) : draft.ids;
+    if (scope !== collectionScope() || collectionDialog !== draft) return;
     if (mode === 'edit') {
       await collectionRequest('rename_collection', {id,name}, scope);
     } else {
@@ -2864,7 +3203,8 @@ $('#collection-form').addEventListener('submit', async event => {
       }
       if (mode === 'add') {
         await collectionRequest('set_collection_membership', {id:target,assetIds:ids,include:true}, scope);
-        toast(`已加入 ${ids.length} 项资产`);
+        const skipped = files ? files.total - ids.length : 0;
+        toast(`已加入 ${ids.length} 项资产${skipped > 0 ? `，${skipped} 个文件待索引或关联` : ''}`, skipped > 0);
         markedAssets.clear();
       }
       if (mode === 'new') {
@@ -2873,9 +3213,12 @@ $('#collection-form').addEventListener('submit', async event => {
       }
     }
     await loadCollections();
-    $('#collection-dialog').close();
+    dialog.close();
   } catch (e) { $('#collection-status').textContent = String(e?.message || e); }
-  finally { button.disabled = false; }
+  finally {
+    for (const control of controls) control.disabled = false;
+    dialog.removeEventListener('cancel',cancelClose);
+  }
 });
 $('#delete-collection').addEventListener('click', () => $('#collection-delete-confirm').classList.remove('hidden'));
 $('#confirm-delete-collection').addEventListener('click', async event => {
@@ -3013,7 +3356,9 @@ const quickVideoControls = initVideoControls(quickVideoPlayer, quickVideo);
 const quickPlayer = $('#quick-open-player');
 const quickMessage = $('#quick-preview-message');
 const quickDialog = $('#quick-preview-dialog');
-const quickImagePreview = initQuickImagePreview({viewport:$('#quick-preview-image-viewport'), image:$('#quick-preview-image')});
+const quickImageBackground = $('#quick-image-background');
+const quickImagePreview = initQuickImagePreview({viewport:$('#quick-preview-image-viewport'), image:$('#quick-preview-image'),
+  background:quickImageBackground});
 let quickVideoFallback;
 let quickBufferTimer;
 function resetQuickVideo() {
@@ -3036,12 +3381,12 @@ function playQuickVideo(url) {
   // The open action is user-initiated. Keep the controls usable if autoplay is blocked.
   quickVideo.play().catch(() => {});
 }
-function showQuickPreview(id) {
+function showQuickPreview(id, queue) {
   const asset = assetsById.get(id);
   if (!asset) return;
-  runtimeLog.add(`打开快速预览 · ${asset.name}`);
+  runtimeLog.add(`打开快速预览 · ${asset.name}`, 'info', 'preview');
   videoHover?.stop();
-  quickAssets = displayedAssetRows.map(item => item.id);
+  quickAssets = queue ? [...new Set(queue)].filter(id => assetsById.has(id)) : displayedAssetRows.map(item => item.id);
   quickIndex = quickAssets.indexOf(id);
   if (quickIndex < 0) {
     quickAssets = [id];
@@ -3121,6 +3466,11 @@ function nextQuick(step) {
   renderQuickPreview();
 }
 $('#open-preview').addEventListener('click', () => showQuickPreview(state.selected));
+$('#preview-marked-assets').addEventListener('click', () => {
+  if (!isAssetView()) return;
+  const ids = [...markedAssets].filter(id => assetsById.has(id));
+  if (ids.length) showQuickPreview(ids.includes(state.selected) ? state.selected : ids[0], ids);
+});
 let quickBackdropPress = false;
 function isQuickBackdrop(event) {
   if (event.target !== quickDialog || event.button !== 0) return false;
@@ -3142,7 +3492,7 @@ quickDialog.addEventListener('close', () => {
   resetQuickVideo();
 });
 quickDialog.addEventListener('keydown', event => {
-  if (quickVideoPlayer.contains(event.target)) return;
+  if (quickVideoPlayer.contains(event.target) || event.target === quickImageBackground) return;
   if (!['ArrowLeft','ArrowRight'].includes(event.key)) return;
   event.preventDefault();
   nextQuick(event.key === 'ArrowLeft' ? -1 : 1);
@@ -3196,6 +3546,7 @@ function loadLibraryPreferences() {
   const density = libraryPreferences.getItem('nexus-grid-density');
   const resolution = Number(libraryPreferences.getItem(thumbnailSizeKey));
   state.layout = preferredAssetLayout(libraryPreferences);
+  state.thumbnailFit = preferredAssetThumbnailFit(libraryPreferences);
   state.density = ['compact', 'normal', 'large'].includes(density) ? density : 'normal';
   state.gridZoom = zoom >= gridZoomLimits.min && zoom <= gridZoomLimits.max ? zoom : 0;
   state.sort = defaultAssetSort(state.view);
@@ -3497,6 +3848,28 @@ async function refreshTeamCovers() {
   }
 }
 
+function updateTeamCatalog(data, force = false) {
+  if (!data.assets) return;
+  state.definedTags = data.definedTags || [];
+  for (const asset of data.assets) {
+    if (force || previewChanged(assetsById.get(asset.id), asset)) {
+      thumbCacheBytes -= thumbCache.get(asset.id)?.length || 0;
+      thumbCache.delete(asset.id);
+    }
+  }
+  team.catalog = {assets: data.assets, libraries: data.libraries};
+  team.allLibraries = data.allLibraries || data.libraries;
+  team.sharedHiddenFolders = data.hiddenFolders || [];
+  team.linkedFolders = data.linkedFolders || [];
+}
+
+function showRemovedAssetDraft(message) {
+  setConflict(message);
+  $('#save-metadata').disabled = true;
+  $('#send-asset').disabled = true;
+  $('#reveal-file').disabled = true;
+}
+
 function applyTeamCatalog(data, { force = false, entering = false } = {}) {
   const previousRevision = team.revision;
   const previousName = team.info?.team.name;
@@ -3514,29 +3887,13 @@ function applyTeamCatalog(data, { force = false, entering = false } = {}) {
     workspaceNavigation.refreshTeamQuickAccess();
   }
 
-  if (data.assets) {
-    state.definedTags = data.definedTags || [];
-    const previous = assetsById;
-    for (const asset of data.assets) {
-      if (force || previewChanged(previous.get(asset.id), asset)) {
-        thumbCacheBytes -= thumbCache.get(asset.id)?.length || 0;
-        thumbCache.delete(asset.id);
-      }
-    }
-    team.catalog = {assets: data.assets, libraries: data.libraries};
-    team.allLibraries = data.allLibraries || data.libraries;
-    team.sharedHiddenFolders = data.hiddenFolders || [];
-    team.linkedFolders = data.linkedFolders || [];
-  }
+  updateTeamCatalog(data,force);
   if (team.catalog && (data.assets || scopeChanged)) {
     refreshVisibleTeamCatalog();
     // Keep a removed asset's draft on screen until the member switches selection.
     const asset = selected();
     if (!asset && editor.dirty && editor.id === state.selected) {
-      setConflict('这项资产已从团队目录移除。你可以复制草稿。');
-      $('#save-metadata').disabled = true;
-      $('#send-asset').disabled = true;
-      $('#reveal-file').disabled = true;
+      showRemovedAssetDraft('这项资产已从团队目录移除。你可以复制草稿。');
     } else {
       if (!asset) state.selected = state.library ? filtered()[0]?.id || null : null;
       renderInspector(Boolean(state.library) && (force || previewChanged(oldSelected, selected()))).catch(error);
@@ -3591,7 +3948,7 @@ function enterTeam(data, {cached = false} = {}) {
   refreshTeamCovers();
   if (cached) {
     setTeamSyncStatus('已加载本地索引');
-    runtimeLog.add(`加载团队本地索引完成 · ${data.assets?.length || 0} 项资产`);
+    runtimeLog.add(`加载团队本地索引完成 · ${data.assets?.length || 0} 项资产`, 'info', 'team');
   }
   refreshTeamPresence();
   teamAssetMessages.refresh();
@@ -4014,16 +4371,16 @@ async function checkFiles(ids) {
     renderAssets();
     renderInspector(false);
     const summary = `检查了 ${ids.length} 项 · ${missing} 项缺失 · ${unavailable} 项无法访问`;
-    runtimeLog.add(summary);
+    runtimeLog.add(summary, 'info', 'folders');
     toast(summary, Boolean(missing || unavailable));
   } finally {
     button.disabled = false;
   }
 }
 
-async function relinkFile(id) {
+async function relinkFile(id, candidatePath) {
   if (!native || team.active) return;
-  const result = await api('relink_asset_file', {id});
+  const result = await api('relink_asset_file', {id,...(candidatePath && {candidatePath})});
   if (!result) return;
   fileStates.delete(id);
   thumbCacheBytes -= thumbCache.get(id)?.length || 0;
@@ -4033,7 +4390,86 @@ async function relinkFile(id) {
     if (!team.active && state.selected === id) await renderInspector();
   }
   toast('已重新关联「' + result.name + '」');
+  return true;
 }
+
+let relinkDraft;
+const relinkDialog = $('#asset-relink-dialog');
+const relinkCandidates = $('#asset-relink-candidates');
+const relinkStatus = $('#asset-relink-status');
+const relinkSubmit = $('#asset-relink-submit');
+const relinkPick = $('#asset-relink-pick');
+const relinkClose = relinkDialog.querySelector('.close-modal');
+
+async function showRelinkSuggestions(id) {
+  const asset = assetsById.get(id);
+  if (!asset || team.active || relinkDialog.open) return;
+  if (fileStates.get(id) !== 'missing') return relinkFile(id);
+  const draft = relinkDraft = {id,scope:collectionScope(),candidates:[]};
+  $('#asset-relink-original').textContent = asset.path;
+  relinkCandidates.replaceChildren();
+  relinkCandidates.disabled = true;
+  relinkSubmit.disabled = true;
+  relinkStatus.textContent = '正在查找可能的新位置…';
+  relinkDialog.showModal();
+  try {
+    const {candidates,truncated} = await api('suggest_asset_relinks', {id});
+    if (relinkDraft !== draft || !relinkDialog.open) return;
+    draft.candidates = candidates;
+    relinkCandidates.replaceChildren(...candidates.map(({name,path,matchFactors},index) => {
+      const label = document.createElement('label');
+      const choice = document.createElement('input');
+      choice.type = 'radio';
+      choice.name = 'replacement';
+      choice.value = String(index);
+      const info = document.createElement('span');
+      const title = document.createElement('strong');
+      const location = document.createElement('small');
+      const evidence = document.createElement('small');
+      title.textContent = name;
+      location.textContent = path;
+      evidence.textContent = matchFactors.join(' · ');
+      info.append(title,location,evidence);
+      label.append(choice,info);
+      return label;
+    }));
+    relinkCandidates.disabled = !candidates.length;
+    relinkStatus.textContent = candidates.length
+      ? '请核对路径和匹配依据，再确认关联。' + (truncated ? '已显示限定范围内的结果。' : '')
+      : '未在限定范围内找到候选，可手动选择文件。';
+  } catch (failure) {
+    if (relinkDraft === draft && relinkDialog.open) relinkStatus.textContent = String(failure?.message || failure);
+  }
+}
+
+relinkCandidates.addEventListener('change', () => {
+  relinkSubmit.disabled = !relinkCandidates.querySelector(':checked');
+});
+relinkDialog.addEventListener('cancel',event => {
+  if (relinkDraft?.saving) event.preventDefault();
+});
+relinkPick.addEventListener('click', () => {
+  const draft = relinkDraft;
+  relinkDialog.close();
+  if (draft?.scope === collectionScope()) void relinkFile(draft.id).catch(error);
+});
+$('#asset-relink-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const draft = relinkDraft;
+  const selection = relinkCandidates.querySelector(':checked');
+  const path = selection && draft?.candidates[Number(selection.value)]?.path;
+  if (!path || draft.scope !== collectionScope() || relinkSubmit.disabled) return;
+  draft.saving = true;
+  relinkSubmit.disabled = relinkPick.disabled = relinkCandidates.disabled = relinkClose.disabled = true;
+  try {
+    if (await relinkFile(draft.id,path) && relinkDraft === draft) relinkDialog.close();
+  } catch (failure) {
+    if (relinkDraft === draft) relinkStatus.textContent = String(failure?.message || failure);
+  } finally {
+    draft.saving = false;
+    relinkSubmit.disabled = relinkPick.disabled = relinkCandidates.disabled = relinkClose.disabled = false;
+  }
+});
 
 async function changeCover(id, clear) {
   if (!native) return;
@@ -4373,7 +4809,7 @@ const workspaceDrag = initWorkspaceDrag({
     const result = await api('start_asset_drag', {assetIds});
     if (result.bridgeRequired) {
       if (scope === collectionScope()) {
-        runtimeLog.add(result.bridgeRequired, 'error');
+        runtimeLog.add(result.bridgeRequired, 'error', 'transfer');
         dccConnections.show(result.bridgeRequired);
       }
       return;
@@ -4392,7 +4828,7 @@ const workspaceDrag = initWorkspaceDrag({
       if (scope !== collectionScope()) throw Error('工作空间已切换，请重新拖动资产');
       const {sessionId, assetIds: reachedIds} = result.c4dImport;
       c4dDropImport.show(reachedIds, sessionId);
-      if (messages.length) runtimeLog.add(messages.join(' · '), 'error');
+      if (messages.length) runtimeLog.add(messages.join(' · '), 'error', 'transfer');
     } else if (messages.length) {
       toast(messages.join(' · '), Boolean(result.skipped.length));
     } else if (result.releasedBeforeStart && assetIds.some(id => assetsById.get(id)?.ext === 'max')) {
@@ -4461,7 +4897,7 @@ function closeAssetMenu(restoreFocus = false) {
   menuView = null;
 }
 
-function renderAssetMenuRows() {
+function renderAssetMenuRows(preferredAction) {
   const {sections, context, label, section, query, x, y} = menuView;
   const term = value => value.normalize('NFKC').toLowerCase();
   const terms = term(query.trim()).split(/\s+/).filter(Boolean);
@@ -4478,6 +4914,10 @@ function renderAssetMenuRows() {
   // Reserve the header, search and paging rows, including the group dividers.
   const pageSize = Math.max(1, Math.min(12, Math.floor((innerHeight - 105) / 35)));
   const pageCount = Math.max(1, Math.ceil(itemCount / pageSize));
+  if (preferredAction) {
+    const index = result.flatMap(([,entries]) => entries).findIndex(([action]) => action === preferredAction);
+    if (index >= 0) menuView.page = Math.floor(index / pageSize);
+  }
   menuView.page = Math.min(menuView.page, pageCount - 1);
   let offset = menuView.page * pageSize;
   let remaining = pageSize;
@@ -4715,7 +5155,10 @@ function showAssetCardMenu(event) {
 
   if (ids.length >= 2 && ids.length <= 4) preview.push(['compare', 'compare', '并排对比']);
   if (indexedAssetFolder(asset)) preview.push(['jump-folder', 'locate', '跳转到文件夹']);
-  if (local && !fileStates.has(asset.id)) preview.push(['reveal', 'folder', '在文件夹中显示']);
+  if (local && !fileStates.has(asset.id)) {
+    if (nativeDragOut && explorerAssetFile(asset)) preview.push(['file-workspace-reveal', 'locate', '定位原文件']);
+    preview.push(['reveal', 'folder', '在系统资源管理器中显示']);
+  }
   if (ids.length === 1 && supportsPinterestLens(asset)) preview.push(['pinterest-lens', 'search', 'Pinterest 以图找图…']);
   if (whiteboardMediaIds(ids).length) files.push(['copy-whiteboard-reference', 'copy', '复制白板引用', 'Ctrl+C']);
   if (ids.length > 1) organize.push(['batch', 'sliders', '批量整理']);
@@ -4729,6 +5172,9 @@ function showAssetCardMenu(event) {
     if (customCovers.has(asset.id)) covers.push(['cover-reset', 'refresh', '恢复自动封面']);
     covers.push(['versions', 'clock', '文件版本…']);
     if (fileStates.has(asset.id) && !isTeamAsset(asset)) files.push(['relink', 'link', '重新关联文件…']);
+    if (nativeDragOut && ids.length === 1 && asset.ext === 'gltf' && !isTeamAsset(asset) && explorerAssetFile(asset)) {
+      files.push(['project-dependencies', 'link', '检查与替换 glTF 依赖…']);
+    }
   }
   if (local && !fileStates.has(asset.id)) {
     if (asset.ext === 'max') {
@@ -4773,7 +5219,7 @@ $('#asset-grid').addEventListener('keydown', event => {
   if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') showAssetCardMenu(event);
 });
 function showWorkspaceMenu(event) {
-  if (event.defaultPrevented || event.target.closest('input, textarea, [contenteditable="true"]')) return;
+  if (!fileWorkspace.hidden || event.defaultPrevented || event.target.closest('input, textarea, [contenteditable="true"]')) return;
   event.preventDefault();
   if (!event.target.closest('.main-content') || $('dialog[open]')) return;
   closeAssetMenu();
@@ -4838,7 +5284,7 @@ assetMenu.addEventListener('click', event => {
   if (action === 'refresh-workspace') {
     closeAssetMenu(true);
     if (state.view === 'subscriptions') creativeSubscriptions.refresh();
-    else if (state.view === 'sites') siteNavigation.render();
+    else if (state.view === 'sites') siteNavigation.refresh();
     else if (state.view === 'whiteboard') whiteboard.refresh();
     else refreshCurrentWorkspace();
     return;
@@ -4864,12 +5310,17 @@ assetMenu.addEventListener('click', event => {
   else if (action === 'recycle') assetRecycle.confirm(draggedIds(id));
   else if (action === 'delete-source') assetRecycle.confirm(draggedIds(id), 'delete');
   else if (action === 'check') checkFiles(draggedIds(id)).catch(error);
-  else if (action === 'relink') relinkFile(id).catch(error);
+  else if (action === 'relink') showRelinkSuggestions(id).catch(error);
+  else if (action === 'project-dependencies') {
+    const source = explorerAssetFile(assetsById.get(id));
+    if (source) void projectDependencies.show(source.path);
+  }
   else if (action === 'cover') changeCover(id, false).catch(error);
   else if (action === 'cover-screenshot' && assetsById.has(id)) screenshotCover.show(assetsById.get(id));
   else if (action === 'cover-reset') changeCover(id, true).catch(error);
   else if (action === 'versions') showVersions(id).catch(error);
   else if (action === 'favorite') favorite(id).catch(error);
+  else if (action === 'file-workspace-reveal') openAssetSourceInFolder(id).catch(error);
   else if (action === 'reveal') api('reveal_asset', {id}).catch(error);
   else if (action.startsWith('c4d-project:')) queueC4dProject(id, action.slice('c4d-project:'.length)).catch(error);
   else if (action.startsWith('send:')) sendAssets(draggedIds(id), action.slice(5)).catch(error);
@@ -4878,8 +5329,9 @@ function showAssetMenuSection(section) {
   const prior = menuView.section;
   Object.assign(menuView, {section, query:'', page:0});
   assetMenu.querySelector('#asset-menu-search').value = '';
-  renderAssetMenuRows();
-  focusAssetMenuItem(section ? undefined : 'group:' + prior);
+  const returningTo = section ? undefined : 'group:' + prior;
+  renderAssetMenuRows(returningTo);
+  focusAssetMenuItem(returningTo);
 }
 function filterAssetMenu(value) {
   Object.assign(menuView, {query:value, page:0});
@@ -5161,6 +5613,10 @@ $('#team-drop-link').addEventListener('click', async () => {
 });
 
 async function onFileDrop({payload}) {
+  if (!fileWorkspace.hidden) {
+    if (!$('dialog[open]')) await explorerFileDrop?.handleNative(payload);
+    return;
+  }
   if (workspaceDrag.isDraggingOut() || $('dialog[open]:not(#import-dialog)')) return;
   const {type, paths} = payload;
   if (state.view === 'whiteboard') {
@@ -5211,6 +5667,18 @@ async function ingestLocalPaths(paths) {
 
 if (native) {
   window.__TAURI__.webview.getCurrentWebview().onDragDropEvent(event => onFileDrop(event).catch(error)).catch(error);
+  window.__TAURI__.event.listen('nexus-personal-catalog-changed', ({payload}) => {
+    if (!assetWorkspaceReady || team.active) return;
+    void assetWorkspaceReady.then(() => {
+      if (team.active) return;
+      if (payload) {
+        const {libraryId,from,to} = payload;
+        workspaceNavigation.relocateFolder(libraryId,from,to);
+        folderAppearance.move(libraryId,from,to);
+      }
+      return refresh();
+    }).catch(error);
+  }).catch(error);
   window.__TAURI__.event.listen('drop-ingest-progress', ({payload}) => {
     if (ingestBusy) filesLabel.textContent = '正在索引 · 已处理 ' + payload + ' 项资产';
   }).catch(error);
@@ -5219,7 +5687,7 @@ if (native) {
   }).catch(error);
 }
 
-const workspaceLayout = initWorkspaceLayout(libraryPreferences);
+const workspaceLayout = initWorkspaceLayout(libraryPreferences,sharedSidebar);
 const sidebarZones = initSidebarZones(libraryPreferences);
 let priorTeamOrganization = null;
 const teamOrganization = initTeamOrganization({
@@ -5237,6 +5705,7 @@ const teamOrganization = initTeamOrganization({
     priorTeamOrganization = {key, favorites, collections};
     if (favoritesChanged) teamOrganization.applyFavorites(state.assets);
     if (collectionsChanged) state.collections = snapshot.collections;
+    refreshExplorerCatalog();
     navSummary = null;
     if (state.collection && !currentCollection()) setView('all');
     else {
@@ -5250,12 +5719,35 @@ function openWebsite(url) {
   if (native) return api('subscription_open', {url}).catch(error);
   window.open(url, '_blank', 'noopener,noreferrer');
 }
+let videoReferenceDropTarget;
+const teamReferenceDrop = {
+  available: () => team.active && teamAssetMessages.videoReferencesEnabled() &&
+    team.online.some(member => !member.self),
+  targetAt: (x,y) => document.elementFromPoint(x,y)?.closest(
+    '#online-members [data-team-message-recipient], #online-members [data-team-message-overflow]'),
+  highlight(target) {
+    if (target === videoReferenceDropTarget) return;
+    videoReferenceDropTarget?.classList.remove('video-reference-drop-target');
+    videoReferenceDropTarget = target;
+    target?.classList.add('video-reference-drop-target');
+  },
+  async drop(target, entry, scope) {
+    if (scope !== collectionScope()) throw Error('工作空间已切换，请重新拖动');
+    const recipientId = target.dataset.teamMessageRecipient;
+    if (!recipientId) return;
+    const member = team.active && team.online.find(item => item.id === recipientId && !item.self);
+    if (!member) throw Error('该成员已离线，请重新选择');
+    if (!Number.isSafeInteger(entry?.revision) || !entry.referenceKey) throw Error('视频同步到团队后即可分享');
+    await teamAssetMessages.sendVideoReference(member, entry.referenceKey);
+  },
+};
 const creativeSubscriptions = initCreativeSubscriptions({
   api, native, icon, escape, log:runtimeLog.add, notify:toast,
   subscriptionScope: () => team.active ? {teamId:team.info?.team?.id, cacheKey:collectionScope()} : null,
   personalScope: () => personalWorkspace.id,
   preferences: libraryPreferences,
   openWeb: openWebsite,
+  teamReferenceDrop,
   whiteboardLinkDrop: {
     scope: collectionScope,
     available: () => Boolean($('#workspace-pane-deck .workspace-pane-preview [data-whiteboard-project] .whiteboard-stage')),
@@ -5267,6 +5759,8 @@ const creativeSubscriptions = initCreativeSubscriptions({
 const siteNavigation = initBrowserSites({
   navigate: openWebsite,
   readMetadata: native ? url => api('browser_site_metadata', {url}) : undefined,
+  readTeam: native ? args => api('team_browser_sites', args) : undefined,
+  writeTeam: native ? args => api('team_save_browser_sites', args) : undefined,
   log: runtimeLog.add,
   scope: libraryScope(),
   onSubscribe(source) {
@@ -5326,6 +5820,7 @@ const workspacePicker = initWorkspacePicker({
   } : null,
   onEnterTeam: openTeamWorkspace,
   onTeam: openTeamDialog,
+  onImport: showAssetImport,
   onPersonalRenamed(current) {
     if (current?.id !== personalWorkspace.id) return;
     personalWorkspace = current;
@@ -5345,6 +5840,10 @@ const workspacePicker = initWorkspacePicker({
     }
   },
   canSwitch: () => {
+    if (fileInspector?.hasUnsavedChanges?.()) {
+      toast('请先保存或取消文件预览窗格中的资产编辑');
+      return false;
+    }
     if (editor.saving) {
       toast('资产信息正在保存，请稍后切换');
       return false;
@@ -5370,16 +5869,35 @@ async function scanWorkspaceLibrary(library) {
   return result;
 }
 
-async function scanWorkspaceFolder(library, folder) {
+async function refreshCurrentAssetsView() {
+  if (!fileWorkspace.hidden || !state.library || !isAssetView()) return;
   const scope = collectionScope();
   const shared = team.active;
-  const args = {libraryId:library.id, folder};
-  const result = shared
-    ? await api('team_rescan_folder', {...args, teamId:team.info.team.id})
-    : await api('scan_workspace_folder', args);
-  if (shared && scope === collectionScope()) await team.pending?.catch(() => {});
-  if (scope === collectionScope()) await (shared ? refreshTeam() : refresh());
-  return result;
+  const epoch = team.epoch;
+  const location = () => JSON.stringify([workbenchTabs.activeId(),state.view,state.library,state.folder,state.collection]);
+  const requestedLocation = location();
+  const data = await api(shared ? 'team_cached_catalog' : 'get_state');
+  if (!fileWorkspace.hidden || scope !== collectionScope() || epoch !== team.epoch || requestedLocation !== location()) return;
+
+  const previous = selected();
+  if (!shared) applyPersonalCatalog(data);
+  else if (data?.team?.id === team.info.team.id && data.member?.id === team.info.member.id &&
+      data.assets && data.revision >= team.revision) {
+    updateTeamCatalog(data);
+    refreshVisibleTeamCatalog();
+  }
+  renderNav();
+  const rows = renderAssets();
+  const asset = selected();
+  if (!asset && state.selected && editor.dirty && editor.id === state.selected) {
+    showRemovedAssetDraft('这项资产已从当前索引移除。你可以复制草稿。');
+    return;
+  }
+  if (state.selected && !editor.dirty && !editor.saving && !rows.some(item => item.id === state.selected)) {
+    await selectAsset(null);
+    return;
+  }
+  await renderInspector(Boolean(asset && previewChanged(previous,asset)));
 }
 
 let folderMovePending = false;
@@ -5461,53 +5979,29 @@ const workspaceNavigation = initWorkspaceNavigation({
   onLocatePinnedFolder: locatePinnedFolder,
   onApplySearch: applySavedSearch,
   onNotify: toast,
-  onRescanFolder: native ? scanWorkspaceFolder : null,
+  onRefreshAssets: refreshCurrentAssetsView,
   canMoveFolder,
   moveFolder,
 });
-const folderAddress = initFolderAddress({
-  getLocation: () => ({scope:`${collectionScope()}:${workbenchTabs.activeId()}`, libraryId:state.library, folder:state.folder, hidden:!isAssetView()}),
-  getLibraries: () => state.libraries,
+const assetFolderHistory = initAssetFolderHistory({
+  getLocation: () => ({
+    scope: `${collectionScope()}:${workbenchTabs.activeId()}`,
+    libraryId: state.library,
+    folder: state.folder,
+    hidden: !fileWorkspace.hidden || !isAssetView(),
+  }),
   findFolder: (id, path) => findFolder(folderTrees.get(id), path),
   openFolder,
   goHome: () => setView('all'),
-  browseFolder: native ? path => api('open_folder_location', {path}) : undefined,
-  openAddressMenu(anchor, event, {browse, copy}) {
-    closeAssetMenu();
-    menuCard = anchor;
-    const rect = anchor.getBoundingClientRect();
-    const actions = [['link', '复制地址', copy]];
-    if (browse) actions.unshift(['folder', '在资源管理器中打开', browse]);
-    showWorkspaceActions(actions, event.clientX || rect.left, event.clientY || rect.bottom + 4, '文件夹地址操作');
-  },
-  copyAddress: path => copyFolderPath({diskPath:path}),
-  async onUnknownPath(path, match) {
-    if (team.active) {
-      const library = state.libraries.find(item => item.id === match?.libraryId && item.watching);
-      if (!library) {
-        showAssetImport([path]);
-        return;
-      }
-      const scope = collectionScope();
-      await scanWorkspaceLibrary(library);
-      if (scope !== collectionScope()) return;
-      const node = findFolder(folderTrees.get(library.id), match.folder);
-      if (node) openFolder(library.id, node.path);
-      else toast('此文件夹未出现在团队索引里，请检查 NAS 路径', true);
-      return;
-    }
-    if (folderScan) {
-      toast('当前目录正在后台索引，请稍后再添加文件夹');
-      return;
-    }
-    pickedFolderPaths = [path];
-    $('#library-path').value = path;
-    showAssetImport();
-  },
-  notify: toast,
 });
 const workbenchTabs = initWorkspaceTabs({
   getScope: collectionScope,
+  onReveal:nativeDragOut ? () => !fileWorkspace.hidden && showAssetWorkspace() : undefined,
+  onRestoreReveal:nativeDragOut ? () => !fileWorkspace.hidden && showAssetWorkspace({ensureTab:false}) : undefined,
+  onEmpty:nativeDragOut ? () => { void showFileWorkspace().catch(error); } : undefined,
+  onDetachTab:nativeDragOut ? tab => openDetachedTab('assets',tab) : undefined,
+  canDetachActive:() => !editor.dirty && !editor.saving && !whiteboard.busyForUpdate(),
+  doubleClickCloseEnabled:() => nativeDragOut && filePreferences?.get().doubleClickCloseTab,
   capture: captureWorkbenchPage,
   restore: restoreWorkbenchPage,
   onPaneLayout: context => workspaceLayout?.setInspectorContext(context),
@@ -5529,16 +6023,109 @@ const workbenchTabs = initWorkspaceTabs({
     }
     return !editor.dirty || confirmDiscardWorkspaceEdits(false, true);
   },
-  onDuplicate: () => folderAddress.render(),
-  goHome() {
+  onDuplicate: () => assetFolderHistory.recordLocation(),
+  goHome(view = 'all') {
     editor.dirty = false;
     state.selected = null;
-    setView('home');
+    setView(view);
     renderInspector(false).catch(error);
   },
   icon,
   onError: error,
 });
+shouldConfirmDesktopClose = () => fileInspector?.hasUnsavedChanges?.()
+  ? '文件预览窗格里有尚未保存的资产编辑。要关闭这个窗口吗？'
+  : filePreferences?.get().confirmCloseTabs &&
+    localExplorer.getTabCount() + (assetWorkspaceReady ? workbenchTabs.getTabCount() : 0) > 1;
+
+function renderNewTabPreference(action) {
+  const choice = newTabOptions.querySelector('[data-new-tab="'+action+'"]');
+  const label = choice ? '新建标签页 · ' + choice.textContent.trim() : '新建标签页';
+  newTabTrigger.title = label + ' (Ctrl+T)';
+  newTabTrigger.setAttribute('aria-label',label);
+  if (choice) newTabTrigger.removeAttribute('popovertarget');
+  else newTabTrigger.setAttribute('popovertarget',newTabOptions.id);
+  newTabMenu.hidden = !choice;
+}
+
+if (nativeDragOut) {
+  const originalAddFile = workspaceBar.querySelector('[data-explorer-add-tab]');
+  initWorkspaceTabManagement({bar:workspaceBar,files:localExplorer,assets:workbenchTabs,onError:error});
+  const filesOption = newTabOptions.querySelector('[data-new-tab="files"]');
+  const currentOption = newTabOptions.querySelector('[data-new-tab="current"]');
+  const hasAssetView = () => Boolean(assetWorkspaceReady && workbenchTabs.getTabCount() && !appRoot.classList.contains('app-starting'));
+  const canDuplicateCurrent = () => fileWorkspace.hidden ? hasAssetView() : localExplorer.canDuplicateActive();
+  renderNewTabPreference(filePreferences.get().newTabAction);
+  newTabOptions.addEventListener('beforetoggle',event => {
+    if (event.newState !== 'open') return;
+    newTabOptions.style.setProperty('--new-tab-left',newTabTrigger.getBoundingClientRect().left + 'px');
+    filesOption.disabled = originalAddFile.disabled;
+    currentOption.hidden = fileWorkspace.hidden ? !hasAssetView() : !localExplorer.getTabCount();
+    currentOption.disabled = !canDuplicateCurrent();
+  });
+  async function openNewTab(action) {
+    if (action === 'settings') {
+      filePreferences.openTabSettings();
+      return;
+    }
+    if (action === 'files') {
+      revealFileWorkspace();
+      await localExplorer.addTab();
+      return;
+    }
+    if (action === 'current') {
+      if (!canDuplicateCurrent()) return;
+      if (fileWorkspace.hidden) workbenchTabs.duplicateActive();
+      else localExplorer.duplicateActive();
+      return;
+    }
+    await showAssetWorkspace({ensureTab:false});
+    if (!fileWorkspace.hidden) return;
+    await workbenchTabs.openView(viewLabel(action),action);
+  }
+  newTabTrigger.addEventListener('click',() => {
+    const action = filePreferences.get().newTabAction;
+    if (action === 'menu') return;
+    if ((action === 'files' && originalAddFile.disabled) ||
+        (action === 'current' && !canDuplicateCurrent())) newTabMenu.click();
+    else void openNewTab(action).catch(error);
+  });
+  newTabOptions.addEventListener('click',event => {
+    const option = event.target.closest('[data-new-tab]');
+    if (!option || option.disabled) return;
+    newTabOptions.hidePopover();
+    void openNewTab(option.dataset.newTab).catch(error);
+  });
+  window.addEventListener('keydown',event => {
+    if (event.defaultPrevented || event.isComposing || event.shiftKey || event.altKey ||
+        !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 't' ||
+        $('dialog[open], .local-explorer-context-menu:not([hidden])')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) newTabTrigger.click();
+  },{capture:true});
+}
+
+let lastWorkspaceWheel = -Infinity;
+if (nativeDragOut) workspaceBar.addEventListener('wheel',event => {
+  if (!filePreferences?.get().wheelSwitchTabs || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
+      !event.deltaY || Math.abs(event.deltaX) > Math.abs(event.deltaY) ||
+      !event.target.closest('[data-explorer-tabs],.nexus-asset-tabs')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.timeStamp - lastWorkspaceWheel < 140) return;
+  const tabs = [...workspaceBar.querySelectorAll('.local-explorer-tab-select, .workspace-tab-trigger')]
+    .filter(tab => tab.getClientRects().length);
+  const selected = workspaceBar.dataset.activeWorkspace === 'files'
+    ? workspaceBar.querySelector('.local-explorer-tab-select[aria-current="page"]')
+    : workspaceBar.querySelector('.workspace-tab-list[data-pane-focused] .workspace-tab-trigger[aria-selected="true"]');
+  const index = tabs.indexOf(selected);
+  const next = index < 0 ? null : tabs[index + Math.sign(event.deltaY)];
+  if (next) {
+    lastWorkspaceWheel = event.timeStamp;
+    next.click();
+  }
+},{capture:true,passive:false});
 
 function diskFolderPath(library, path) {
   if (!library.path || !path) return library.path || null;
@@ -5905,12 +6492,12 @@ const assetCompare = initAssetCompare({
   describeAsset: asset => [asset.ext.toUpperCase(), displayAssetType(asset), bytes(asset.size)].filter(Boolean).join(' · '),
 });
 document.addEventListener('keydown', event => {
-  if (event.defaultPrevented || event.altKey) return;
+  if (!fileWorkspace.hidden || event.defaultPrevented || event.altKey) return;
   if (event.key === 'F5' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'r')) {
     event.preventDefault();
     if (!event.repeat && !$('dialog[open]')) {
       if (state.view === 'subscriptions') creativeSubscriptions.refresh();
-      else if (state.view === 'sites') siteNavigation.render();
+      else if (state.view === 'sites') siteNavigation.refresh();
       else if (state.view === 'whiteboard') whiteboard.refresh();
       else refreshCurrentWorkspace();
     }
@@ -5922,10 +6509,7 @@ document.addEventListener('keydown', event => {
   if (state.view === 'whiteboard') return;
   if (event.ctrlKey || event.metaKey) {
     if (event.key.toLowerCase() === 'f') {
-      event.preventDefault();
-      if (state.view === 'subscriptions') creativeSubscriptions.focusSearch();
-      else if (state.view === 'sites') $('#browser-site-filter').focus();
-      else focusAssetSearch({select:true});
+      if (focusWorkspaceSearch({select:true})) event.preventDefault();
     } else if (event.key.toLowerCase() === 'a' && active?.closest('#asset-grid')) {
       event.preventDefault();
       $('#select-visible').click();
@@ -5941,12 +6525,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (editing) return;
-  if (event.key === '/') {
-    event.preventDefault();
-    if (state.view === 'subscriptions') creativeSubscriptions.focusSearch();
-    else if (state.view === 'sites') $('#browser-site-filter').focus();
-    else focusAssetSearch();
-  }
+  if (event.key === '/' && focusWorkspaceSearch()) event.preventDefault();
   if (!isAssetView()) return;
   if (event.key === 'Escape') {
     if (workspaceDrag.cancelActive()) {
@@ -6058,14 +6637,667 @@ async function restoreWorkspace() {
   await renderInspector(false);
 }
 
-try {
-  await restoreWorkspace();
-} catch (e) {
-  $('#footer-status').textContent = '加载工作台失败';
-  error(e);
-} finally {
-  $('#app').classList.remove('app-starting');
-  $('#startup-status').classList.add('hidden');
+function ensureAssetWorkspace() {
+  if (!assetWorkspaceReady) {
+    if (fileWorkspace.hidden) startupStatus.classList.remove('hidden');
+    assetWorkspaceReady = restoreWorkspace().catch(failure => {
+      assetWorkspaceReady = null;
+      $('#footer-status').textContent = '加载工作台失败';
+      throw failure;
+    }).finally(() => {
+      appRoot.classList.remove('app-starting');
+      startupStatus.classList.add('hidden');
+      if (assetWorkspaceReady) refreshExplorerCatalog();
+    });
+  }
+  return assetWorkspaceReady;
 }
+
+function revealAssetWorkspace(ensureTab = true) {
+  fileWorkspace.hidden = true;
+  explorerFileDrop?.clear();
+  renderWorkspaceMode();
+  appRoot.classList.remove('hidden');
+  if (appRoot.classList.contains('app-starting')) startupStatus.classList.remove('hidden');
+  if (ensureTab) workbenchTabs.ensureOpen();
+}
+
+async function showAssetWorkspace({ensureTab = true} = {}) {
+  const returningFromFiles = !fileWorkspace.hidden;
+  revealAssetWorkspace(ensureTab);
+  await ensureAssetWorkspace();
+  if (returningFromFiles && fileWorkspace.hidden)
+    (assetWorkspaceFocus?.isConnected ? assetWorkspaceFocus : $('#page-title')).focus({preventScroll:true});
+}
+
+function explorerAssetFile(asset) {
+  if (!asset?.path || asset.demo || fileStates.has(asset.id) || isTeamAsset(asset) && !asset.teamMounted) return null;
+  return matchFolderAddress(asset.path,[]) ? asset : null;
+}
+
+async function readExplorerDriveDetails(path) {
+  const details = await invoke('local_explorer_drive_details',{path});
+  const drive = /^[a-z]:/i.exec(path)?.[0].toLowerCase();
+  const share = matchFolderAddress(details?.label,[])?.path;
+  if (drive && share?.startsWith('\\\\') && explorerDriveAliases.get(drive) !== share) {
+    explorerDriveAliases.set(drive,share);
+    explorerAssetPathIndexScope = null;
+  }
+  return details;
+}
+
+function explorerCatalogAddress(path) {
+  const normal = path && matchFolderAddress(path,[])?.path;
+  if (!normal) return null;
+  const remote = explorerDriveAliases.get(normal.slice(0,2).toLowerCase());
+  return remote ? remote + normal.slice(2) : normal;
+}
+
+function explorerPathKey(path) {
+  const normal = explorerCatalogAddress(path);
+  return normal && (/^[a-z]:|^\\\\/i.test(normal) ? normal.replace(/\\+$/,'').toLowerCase() : normal);
+}
+
+let explorerAssetPathIndex;
+let explorerAssetPathIndexScope;
+let explorerAmbiguousPaths;
+function indexedExplorerFile(path, {unique = false} = {}) {
+  if (explorerAssetPathIndexScope !== assetsById) {
+    explorerAssetPathIndexScope = assetsById;
+    explorerAssetPathIndex = new Map();
+    explorerAmbiguousPaths = new Set();
+    for (const asset of assetsById.values()) {
+      const file = explorerAssetFile(asset);
+      if (!file) continue;
+      const key = explorerPathKey(file.path);
+      if (explorerAssetPathIndex.has(key)) explorerAmbiguousPaths.add(key);
+      else explorerAssetPathIndex.set(key,file.id);
+    }
+  }
+  const key = explorerPathKey(path);
+  if (unique && explorerAmbiguousPaths.has(key)) return null;
+  return explorerAssetFile(assetsById.get(explorerAssetPathIndex.get(key)));
+}
+
+function refreshExplorerCatalog() {
+  localExplorer.refreshAssetDetails?.();
+  fileInspector?.refreshMetadata?.();
+}
+
+function lookupExplorerAssets(paths) {
+  if (!assetWorkspaceReady || appRoot.classList.contains('app-starting')) return null;
+  return paths.map(path => {
+    const asset = indexedExplorerFile(path);
+    if (!asset) return null;
+    const {id,favorite,tags,rating,workflow,libraryId} = asset;
+    return {id,favorite:Boolean(favorite),tags,rating,workflow,
+      library:state.libraries.find(library => library.id === libraryId)?.name || ''};
+  });
+}
+
+async function toggleExplorerFavorite({id,path,favorite:value}) {
+  const asset = indexedExplorerFile(path, {unique:true});
+  if (!asset || asset.id !== id) throw Error('文件对应的资产已变化，请刷新后重试');
+  const scope = collectionScope();
+  await favorite(id, value);
+  if (scope !== collectionScope()) throw Error('工作空间已切换');
+  return Boolean(assetsById.get(id)?.favorite);
+}
+
+function metadataFields(asset) {
+  return {name:asset.name,tags:asset.tags || [],notes:asset.notes || '',rating:asset.rating || 0,
+    workflow:asset.workflow || 'unset'};
+}
+
+function explorerMetadataRecord(asset, path) {
+  const fields = metadataFields(asset);
+  return {id:asset.id,path,...fields,
+    revision:isTeamAsset(asset) ? asset.revision : JSON.stringify(fields),
+    collectionLabel:state.libraries.find(library => library.id === asset.libraryId)?.name || '',canReadVersions:true,
+    writable:!isTeamAsset(asset) || !team.fromLocalIndex && $('#team-sync-status').dataset.offline !== 'yes'};
+}
+
+function verifyExplorerVersionSource(record, scope) {
+  const asset = indexedExplorerFile(record.path, {unique:true});
+  if (scope !== collectionScope() || !asset || asset.id !== record.id) throw Error('文件对应的资产已变化');
+  return asset;
+}
+
+function readExplorerVersions(record, scope) {
+  return api('list_asset_versions', {id:verifyExplorerVersionSource(record, scope).id});
+}
+
+async function exportExplorerVersion(record, versionId, scope) {
+  const asset = verifyExplorerVersionSource(record, scope);
+  const result = await api('export_asset_version', {id:asset.id,versionId});
+  if (result) toast('已另存版本到 ' + result.path);
+}
+
+function readExplorerReferences(record, scope) {
+  const asset = verifyExplorerVersionSource(record, scope);
+  const collections = state.collections.filter(collection => collection.assetIds.includes(asset.id));
+  const boards = isTeamAsset(asset) ? [] : whiteboard.findPersonalAssetReferences(scope,asset.id);
+  return [
+    ...collections.map(({id,name}) => ({kind:'collection',id,name})),
+    ...boards.map(({id,name}) => ({kind:'whiteboard',id,name})),
+  ];
+}
+
+async function openExplorerReference(record, reference, scope) {
+  const references = readExplorerReferences(record, scope);
+  if (!references.some(({kind,id}) => kind === reference.kind && id === reference.id)) throw Error('这条引用已移除');
+  if (editor.saving || editor.dirty && !await confirmDiscardWorkspaceEdits(true)) return;
+  if (scope !== collectionScope()) return;
+  editor.dirty = false;
+  revealAssetWorkspace();
+  if (reference.kind === 'collection') {
+    openCollection(reference.id);
+  } else {
+    setView('whiteboard');
+    await whiteboard.restoreProject(reference.id);
+  }
+}
+
+async function lookupExplorerMetadata(entries) {
+  await ensureAssetWorkspace();
+  const scope = collectionScope();
+  const assets = [];
+  for (const {path,isDirectory} of entries) {
+    const asset = !isDirectory && indexedExplorerFile(path, {unique:true});
+    if (asset) assets.push(explorerMetadataRecord(asset, path));
+  }
+  return {scope,assets};
+}
+
+async function saveExplorerMetadata({scope,updates}) {
+  if (scope !== collectionScope()) throw Error('工作空间已切换，请重新选择文件');
+  const assets = [], errors = [];
+  for (const {id,path,revision,patch} of updates) {
+    try {
+      if (scope !== collectionScope()) throw Error('工作空间已切换');
+      const asset = indexedExplorerFile(path, {unique:true});
+      if (!asset || asset.id !== id) throw Error('文件对应的资产已变化');
+      if (editor.id === id && (editor.dirty || editor.saving)) throw Error('请先保存资产详情中的编辑');
+      const record = explorerMetadataRecord(asset, path);
+      if (!record.writable) throw Error('团队库离线，暂时无法保存');
+      if (record.revision !== revision) throw Error('资产资料已更新，请重新载入');
+      const expected = isTeamAsset(asset) ? undefined : {...metadataFields(asset),path:asset.path};
+      const {name,tags,notes,rating,workflow} = patch;
+      const next = Object.fromEntries(Object.entries({name,tags,notes,rating,workflow})
+        .filter(([,value]) => value !== undefined));
+      await writeMetadata(asset, next, revision, expected);
+      const current = scope === collectionScope() && assetsById.get(id);
+      if (current) assets.push(explorerMetadataRecord(current, path));
+    } catch (failure) {
+      errors.push(`${path}\n${String(failure?.message || failure)}`);
+    }
+  }
+  if (scope === collectionScope() && assets.length) {
+    renderNav();
+    renderAssets();
+    if (!editor.dirty && !editor.saving) void renderInspector(false).catch(error);
+  }
+  return {assets,errors};
+}
+
+function indexedExplorerFolder(path) {
+  if (!path) return null;
+  const libraries = state.libraries.map(library => ({id:library.id,path:explorerCatalogAddress(library.path)}));
+  const match = matchFolderAddress(explorerCatalogAddress(path),libraries)?.match;
+  const folder = match && findFolder(folderTrees.get(match.libraryId),match.folder);
+  return folder ? {libraryId:match.libraryId,folder:folder.path} : null;
+}
+
+function searchFolderShelf(query, limit, directory = null) {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const directoryKey = directory && explorerPathKey(directory);
+  const prefix = directoryKey && directoryKey.replace(/[/\\]+$/,'') + (directoryKey.startsWith('/') ? '/' : '\\');
+  const matches = [];
+  for (const asset of state.assets) {
+    if (terms.length) {
+      const text = [asset.name,asset.ext,asset.subtitle,asset.path,...(asset.tags || [])].join(' ').toLowerCase();
+      if (!terms.every(term => text.includes(term))) continue;
+    }
+    if (!explorerAssetFile(asset)) continue;
+    if (prefix && !explorerPathKey(asset.path)?.startsWith(prefix)) continue;
+    matches.push(asset);
+    if (matches.length >= limit) break;
+  }
+  return matches;
+}
+
+async function searchExplorerCatalog({query,limit}) {
+  await ensureAssetWorkspace();
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return {results:[],truncated:false};
+  const libraries = new Map(state.libraries.map(library => [library.id,library.name]));
+  const results = [];
+  const seen = new Set();
+  const cap = Math.min(40,Math.max(1,limit || 40));
+  for (const asset of state.assets) {
+    const library = libraries.get(asset.libraryId) || '';
+    const text = [asset.name,asset.path,asset.id,asset.ext,library,...(asset.tags || [])].join(' ').toLowerCase();
+    if (!terms.every(term => text.includes(term)) || !explorerAssetFile(asset)) continue;
+    const key = explorerPathKey(asset.path);
+    if (seen.has(key)) continue;
+    if (results.length === cap) return {results,truncated:true};
+    seen.add(key);
+    results.push({id:asset.id,name:asset.name,path:asset.path,library});
+  }
+  return {results,truncated:false};
+}
+
+async function browseFolderAssets({path,isDirectory,selectedPath,selectedPaths}) {
+  const currentDirectory = localExplorer.getCurrentDirectory();
+  if (isDirectory && selectedPaths?.length && explorerPathKey(path) === explorerPathKey(currentDirectory)) {
+    return browseCurrentFolderAsAssets(path, {selectedPath,selectedPaths});
+  }
+  const stillOpen = () => !fileWorkspace.hidden &&
+    localExplorer.getCurrentDirectory() === currentDirectory;
+  await ensureAssetWorkspace();
+  if (!stillOpen()) return;
+  if (!isDirectory) {
+    const asset = indexedExplorerFile(path);
+    if (!asset) { toast('此文件尚未在当前资产库中索引'); return; }
+    return jumpToIndexedAsset(asset.id, stillOpen, revealAssetWorkspace);
+  }
+  const match = indexedExplorerFolder(path);
+  if (!match) { toast('此目录尚未在当前资产库中索引'); return; }
+  const scope = collectionScope();
+  if (editor.saving) throw Error('正在保存资产详情，请稍后再试');
+  if (editor.dirty && !await confirmDiscardWorkspaceEdits(true)) return;
+  if (scope !== collectionScope() || !stillOpen()) return;
+  editor.dirty = false;
+  const asset = selectedPath && indexedExplorerFile(selectedPath);
+  const id = asset?.libraryId === match.libraryId && asset.id || null;
+  revealAssetWorkspace();
+  showFolderTree(match.libraryId,match.folder);
+  openFolder(match.libraryId,match.folder,id);
+  if (id) await selectAsset(id);
+  centerFolderInTree(match.libraryId,match.folder);
+}
+
+const linkedWorkspaceTabs = new Map();
+
+function linkedAssetSelection(libraryId, {selectedPath,selectedPaths}) {
+  const paths = [...new Map(selectedPaths.map(path => [explorerPathKey(path), path])).values()];
+  const assets = paths.map(path => indexedExplorerFile(path, {unique:true}))
+    .filter(asset => asset?.libraryId === libraryId);
+  const lead = indexedExplorerFile(selectedPath, {unique:true})?.id;
+  return {ids:[...new Set(assets.map(asset => asset.id))], lead, total:paths.length};
+}
+
+async function applyLinkedAssetSelection({ids,lead,total}) {
+  if (!total) return;
+  const scope = collectionScope();
+  const tab = workbenchTabs.activeId();
+  const location = JSON.stringify([state.library,state.folder,state.collection,state.selected]);
+  const chosen = new Set(ids);
+  const visible = displayedAssetRows.filter(asset => chosen.has(asset.id)).map(asset => asset.id);
+  const id = visible.includes(lead) ? lead : visible[0];
+  if (!id) {
+    clearMarkedAssets();
+    toast('当前视图未显示所选文件对应的资产，请检查筛选或入库状态');
+    return;
+  }
+  if (editor.saving || editor.dirty && state.selected !== id && !await confirmDiscardWorkspaceEdits(true)) return;
+  if (!fileWorkspace.hidden || !assetsById.has(id) || scope !== collectionScope() || tab !== workbenchTabs.activeId() ||
+      location !== JSON.stringify([state.library,state.folder,state.collection,state.selected])) return;
+  if (state.selected !== id) editor.dirty = false;
+  markedAssets.clear();
+  if (total > 1) for (const assetId of visible) markedAssets.add(assetId);
+  markedAnchor = markedAssets.has(id) ? id : null;
+  const cardSelector = `#asset-grid .asset-card[data-id="${CSS.escape(id)}"]`;
+  if (!$(cardSelector)) {
+    state.assetWindowAnchor = id;
+    renderAssets();
+  } else updateMarks();
+  const preview = state.selected === id ? null : selectAsset(id);
+  $(cardSelector)?.scrollIntoView({block:'nearest'});
+  $(cardSelector)?.focus({preventScroll:true});
+  if (total > visible.length) toast(`已定位 ${visible.length} 项。${total - visible.length} 个文件未入库、对应多条记录或受筛选限制`);
+  await preview;
+}
+
+function handoffCatalogId() {
+  return team.active ? `team:${team.info.team.id}` : personalWorkspace.id;
+}
+
+async function captureWorkspaceHandoff() {
+  if (!fileWorkspace.hidden) {
+    const path = localExplorer.getCurrentDirectory();
+    if (!path) throw Error('请先打开具体的文件夹');
+    return {workspace:{kind:'files',path,name:path.split(/[/\\]/).filter(Boolean).at(-1)},
+      assets:localExplorer.getSelectedEntries().filter(item => !item.isDirectory)
+        .map(({path,name}) => ({path,name}))};
+  }
+  await ensureAssetWorkspace();
+  const library = currentLibrary();
+  const collection = currentCollection();
+  const projectId = state.view === 'whiteboard' ? whiteboard.captureProject() : null;
+  const view = projectId ? 'whiteboard' : collection ? 'collection' : library ? 'folder'
+    : ['favorites','recent'].includes(state.view) ? state.view : 'all';
+  const workspace = {kind:'assets',name:$('#page-title').textContent,view,catalogId:handoffCatalogId()};
+  if (view === 'folder') Object.assign(workspace,{path:diskFolderPath(library,state.folder),libraryId:library.id,folder:state.folder});
+  if (view === 'collection') workspace.collectionId = collection.id;
+  if (view === 'whiteboard') workspace.projectId = projectId;
+  const ids = markedAssets.size ? [...markedAssets] : state.selected ? [state.selected] : [];
+  return {workspace,assets:ids.map(id => assetsById.get(id)).filter(Boolean).map(asset => ({
+    id:asset.id,name:asset.name,path:explorerAssetFile(asset)?.path,
+  }))};
+}
+
+async function openWorkspaceHandoff({workspace,assets}) {
+  if (workspace.kind === 'files') {
+    if (!nativeDragOut) throw Error('请在 Windows 客户端打开这个文件夹交接');
+    const directoryKey = explorerPathKey(workspace.path);
+    const first = assets.find(item => item.path &&
+      explorerPathKey(item.path.replace(/[^/\\]+$/,'')) === directoryKey);
+    const previousTabCount = localExplorer.getTabCount();
+    revealFileWorkspace();
+    await localExplorer.addTab(first?.path || workspace.path);
+    if (localExplorer.getTabCount() === previousTabCount) throw Error('文件夹标签已满，请先关闭一页');
+    if (explorerPathKey(localExplorer.getCurrentDirectory()) !== directoryKey) throw Error('无法打开交接目录，请核对路径或挂载');
+    return {message:'已打开交接目录'};
+  }
+
+  await ensureAssetWorkspace();
+  const sameCatalog = !workspace.catalogId || workspace.catalogId === handoffCatalogId();
+  const scope = collectionScope();
+  let folder;
+  if (workspace.view === 'folder') {
+    const node = sameCatalog && findFolder(folderTrees.get(workspace.libraryId),workspace.folder);
+    folder = node ? {libraryId:workspace.libraryId,folder:node.path} : indexedExplorerFolder(workspace.path);
+    if (!folder) throw Error('当前资产库找不到交接目录，请核对路径或打开对应资产库');
+  }
+  if (workspace.view === 'collection' && (!sameCatalog || !state.collections.some(item => item.id === workspace.collectionId))) {
+    throw Error('当前资产库找不到这个合集');
+  }
+  if (workspace.view === 'whiteboard' && !sameCatalog) throw Error('请先打开白板所在的资产库');
+
+  const tab = await workbenchTabs.openLinkedView(workspace.name || '工作交接');
+  if (!tab || scope !== collectionScope()) throw Error('未打开交接视图');
+  revealAssetWorkspace(false);
+  if (folder) openFolder(folder.libraryId,folder.folder);
+  else if (workspace.view === 'collection') openCollection(workspace.collectionId);
+  else setView(workspace.view);
+  if (workspace.view === 'whiteboard') {
+    if (!await whiteboard.restoreProject(workspace.projectId)) throw Error('当前工作空间找不到这个白板项目');
+    return {message:'已打开交接白板'};
+  }
+  const ids = new Set(assets.map(({id,path}) => sameCatalog && assetsById.has(id) ? id
+    : path && indexedExplorerFile(path,{unique:true})?.id).filter(Boolean));
+  if (ids.size) {
+    const matches = filtered().filter(asset => ids.has(asset.id));
+    for (const asset of matches) markedAssets.add(asset.id);
+    if (matches.length) await selectAsset(matches[0].id);
+    renderAssets();
+    return {message:`已打开交接视图，定位 ${matches.length} 项资产`};
+  }
+  return {message:assets.length ? '已打开交接视图，当前库未找到所选资产引用' : '已打开交接视图'};
+}
+
+async function browseCurrentFolderAsAssets(path = localExplorer.getCurrentDirectory(), selection = null) {
+  if (!path || fileWorkspace.hidden) return;
+  const fileTab = localExplorer.getTabIdentity?.();
+  await ensureAssetWorkspace();
+  if (fileWorkspace.hidden || path !== localExplorer.getCurrentDirectory() || fileTab !== localExplorer.getTabIdentity?.()) return;
+  const match = indexedExplorerFolder(path);
+  if (!match) { toast('此目录尚未在当前资产库中索引'); return; }
+  const files = selection || {
+    selectedPath:localExplorer.getSelectedEntry()?.path,
+    selectedPaths:localExplorer.getSelectedEntries().filter(item => !item.isDirectory).map(item => item.path),
+  };
+  if (!fileTab) return browseFolderAssets({path,isDirectory:true,selectedPath:localExplorer.getSelectedPath()});
+  const scope = collectionScope();
+  const key = JSON.stringify([scope,fileTab,explorerPathKey(path)]);
+  const linked = linkedWorkspaceTabs.get(key);
+  const stillOpen = () => scope === collectionScope() && !fileWorkspace.hidden &&
+    fileTab === localExplorer.getTabIdentity() && explorerPathKey(path) === explorerPathKey(localExplorer.getCurrentDirectory());
+  if (linked && workbenchTabs.hasTab(linked.assetTab)) {
+    const activated = await workbenchTabs.activateLinkedView(linked.assetTab);
+    if (!activated || !stillOpen()) return;
+    if (state.library === match.libraryId && state.folder === match.folder && !state.collection) {
+      const targets = linkedAssetSelection(match.libraryId,files);
+      revealAssetWorkspace(false);
+      $('#asset-folder-file-view').focus({preventScroll:true});
+      return applyLinkedAssetSelection(targets);
+    }
+  }
+  const assetTab = await workbenchTabs.openLinkedView(match.folder.split('/').at(-1) || '资产视图');
+  if (!assetTab || !stillOpen()) return;
+  linkedWorkspaceTabs.set(key,{assetTab,fileTab,scope,path:explorerPathKey(path)});
+  if (linkedWorkspaceTabs.size > 96) linkedWorkspaceTabs.delete(linkedWorkspaceTabs.keys().next().value);
+  const targets = linkedAssetSelection(match.libraryId,files);
+  const id = targets.ids.includes(targets.lead) ? targets.lead : targets.ids[0];
+  revealAssetWorkspace(false);
+  showFolderTree(match.libraryId,match.folder);
+  openFolder(match.libraryId,match.folder,id || null);
+  centerFolderInTree(match.libraryId,match.folder);
+  if (targets.total) return applyLinkedAssetSelection(targets);
+  $('#asset-folder-file-view').focus({preventScroll:true});
+}
+
+async function browseCurrentAssetsAsFiles() {
+  const library = currentLibrary();
+  const path = diskFolderPath(library || {},state.folder);
+  if (!path || !isAssetView()) return;
+  const asset = explorerAssetFile(selected());
+  const selectedFile = asset?.libraryId === library.id &&
+    explorerPathKey(assetSourceDirectory(asset.path)) === explorerPathKey(path) ? asset.path : null;
+  await revealAssetFileLocation(selectedFile || path,path);
+}
+
+$('#asset-folder-file-view').addEventListener('click', () => browseCurrentAssetsAsFiles().catch(error));
+if (nativeDragOut) window.addEventListener('keydown',event => {
+  if (event.defaultPrevented || event.repeat || event.isComposing || event.altKey || !event.ctrlKey ||
+      !event.shiftKey || event.key.toLowerCase() !== 'l' || $('dialog[open]')) return;
+  let action;
+  if (!fileWorkspace.hidden) {
+    if (localExplorer.getCurrentDirectory()) action = browseCurrentFolderAsAssets;
+  } else if (!$('#asset-folder-file-view').hidden) action = browseCurrentAssetsAsFiles;
+  else if (isAssetView() && explorerAssetFile(selected())) action = () => openAssetSourceInFolder(state.selected);
+  if (!action) return;
+  event.preventDefault();
+  Promise.resolve(action()).catch(error);
+},{capture:true});
+
+async function addExplorerSourceToAssets({path,isDirectory}) {
+  const directory = localExplorer.getCurrentDirectory();
+  await ensureAssetWorkspace();
+  if (fileWorkspace.hidden || localExplorer.getCurrentDirectory() !== directory) return;
+  if (!isDirectory && indexedExplorerFile(path)) return browseFolderAssets({path,isDirectory});
+  revealAssetWorkspace();
+  if (team.active && !isDirectory) return handleTeamDrop([path]);
+  if (!isDirectory) return ingestLocalPaths([path]);
+  if (!team.active) {
+    pickedFolderPaths = [path];
+    $('#library-path').value = path;
+  }
+  showAssetImport([path]);
+}
+
+async function collectExplorerFiles(entries) {
+  const directory = localExplorer.getCurrentDirectory();
+  const paths = [...new Set(entries.filter(entry => !entry.isDirectory).map(entry => entry.path))];
+  if (!paths.length) return;
+  await ensureAssetWorkspace();
+  if (fileWorkspace.hidden || localExplorer.getCurrentDirectory() !== directory || $('dialog[open]')) return;
+  const assets = paths.map(path => indexedExplorerFile(path, {unique:true})).filter(Boolean);
+  const ids = [...new Set(assets.map(asset => asset.id))];
+  const pending = paths.filter(path => !indexedExplorerFile(path));
+  const targets = team.active && pending.length ? state.libraries.filter(item => item.watching && item.path)
+    .map(item => ({libraryId:item.id,folder:'',label:item.name})) : [];
+  const matched = indexedExplorerFolder(directory);
+  let preferred = '';
+  const rootIndex = targets.findIndex(item => item.libraryId === matched?.libraryId);
+  if (rootIndex >= 0 && matched.folder) {
+    targets.unshift({...matched,label:`${targets[rootIndex].label} / ${matched.folder}`});
+    preferred = '0';
+  } else if (rootIndex >= 0 || targets.length === 1) preferred = String(Math.max(0,rootIndex));
+  if (team.active && pending.length && !targets.length) throw Error('请先链接一个可写入的团队目录');
+  if (!ids.length && !pending.length) throw Error('这些文件关联了多个资产，请先在资产库中选择记录');
+  showCollectionDialog('add', ids, currentCollection(), {paths,pending,targets,preferred,total:paths.length,
+    libraryId:matched?.libraryId || null});
+}
+
+async function resolveExplorerCollectionFiles({scope,files}) {
+  if (ingestBusy) throw Error('已有导入任务，请稍后再试');
+  const pending = files.paths.filter(path => !indexedExplorerFile(path));
+  if (pending.length && !files.receipt) {
+    ingestBusy = true;
+    $('#collection-status').textContent = team.active ? '正在导入并索引新文件…' : '正在索引新文件…';
+    try {
+      if (team.active) {
+        const select = $('#collection-import-target');
+        const target = select.value !== '' && files.targets[Number(select.value)];
+        if (!target) throw Error('请选择团队目录');
+        const result = await api('team_import_paths', {
+          teamId:team.info.team.id,libraryId:target.libraryId,folder:target.folder,paths:pending,
+        });
+        files.receipt = {libraryId:target.libraryId,paths:result.files || [],errors:result.errors || []};
+        $('#collection-import-target-field').classList.add('hidden');
+        select.required = false;
+      } else {
+        const result = await api('ingest_drop', {paths:pending,libraryId:files.libraryId});
+        files.receipt = {errors:result.errors || []};
+      }
+    } finally { ingestBusy = false; }
+  }
+  if (scope !== collectionScope()) throw Error('工作空间已切换');
+  if (files.receipt) {
+    if (team.active) await refreshTeam(true);
+    else await refresh();
+  }
+  if (scope !== collectionScope()) throw Error('工作空间已切换');
+  const ids = new Set(files.paths.map(path => indexedExplorerFile(path, {unique:true})?.id).filter(Boolean));
+  const receipt = files.receipt;
+  if (receipt?.paths?.length) {
+    const imported = new Set(receipt.paths);
+    for (const asset of assetsByLibrary.get(receipt.libraryId) || []) {
+      if (imported.has(asset.relativePath)) ids.add(asset.id);
+    }
+  }
+  if (!ids.size) throw Error(receipt?.errors[0] || '未找到可加入合集的资产。如果正在同步，请稍后再试。');
+  return [...ids];
+}
+
+async function openAssetSourceInFolder(id) {
+  if (!nativeDragOut) return api('reveal_asset',{id});
+  const asset = explorerAssetFile(assetsById.get(id));
+  const directory = asset && assetSourceDirectory(asset.path);
+  if (!directory) throw Error('当前无法访问这项资产的原文件');
+  await revealAssetFileLocation(asset.path,directory);
+}
+
+function assetSourceDirectory(path) {
+  const normalized = matchFolderAddress(path,[])?.path;
+  const parent = normalized?.replace(/[\\/][^\\/]+$/,'');
+  return parent !== normalized ? matchFolderAddress(parent || '/',[])?.path : null;
+}
+
+async function revealAssetFileLocation(path,directory) {
+  const scope = collectionScope();
+  const assetTab = workbenchTabs.activeId();
+  const directoryKey = explorerPathKey(directory);
+  const assetDirectoryKey = explorerPathKey(diskFolderPath(currentLibrary() || {},state.folder));
+  const existing = [...linkedWorkspaceTabs.values()].findLast(item => item.assetTab === assetTab &&
+    item.scope === scope && item.path === directoryKey);
+  revealFileWorkspace();
+  if (!await localExplorer.revealSource(path,{directory,preferredTab:existing?.fileTab})) return;
+  const fileTab = localExplorer.getTabIdentity();
+  if (!fileTab || !assetTab || fileWorkspace.hidden || scope !== collectionScope() ||
+      assetDirectoryKey !== directoryKey || explorerPathKey(localExplorer.getCurrentDirectory()) !== directoryKey) return;
+  const key = JSON.stringify([scope,fileTab,directoryKey]);
+  linkedWorkspaceTabs.delete(key);
+  linkedWorkspaceTabs.set(key,{scope,fileTab,assetTab,path:directoryKey});
+  if (linkedWorkspaceTabs.size > 96) linkedWorkspaceTabs.delete(linkedWorkspaceTabs.keys().next().value);
+}
+
+function revealFileWorkspace() {
+  if (!fileWorkspace.hidden) return;
+  if (appRoot.contains(document.activeElement)) assetWorkspaceFocus = document.activeElement;
+  closeAssetMenu();
+  closeTopTools();
+  filesOverlay.classList.add('hidden');
+  appRoot.classList.add('hidden');
+  fileWorkspace.hidden = false;
+  renderWorkspaceMode();
+  fileWorkspaceShown = true;
+  startupStatus.classList.add('hidden');
+}
+
+function renderWorkspaceMode() {
+  const files = !fileWorkspace.hidden;
+  workspaceBar.hidden = !native || (!files && !nativeDragOut);
+  workspaceBar.dataset.activeWorkspace = files ? 'files' : 'assets';
+  workspaceBar.querySelector('[data-workspace-mode="files"]').setAttribute('aria-pressed',String(files));
+  workspaceBar.querySelector('[data-workspace-mode="assets"]').setAttribute('aria-pressed',String(!files));
+}
+
+async function showFileWorkspace() {
+  revealFileWorkspace();
+  await localExplorer.show();
+}
+
+async function openDetachedTab(kind,tab) {
+  const restored = await invoke('open_detached_workspace_tab',{payload:{kind,tab}});
+  if (!restored) toast('新窗口未能恢复此标签页，原标签页已保留',true);
+  return restored === true;
+}
+
+async function restoreDetachedWindow() {
+  const payload = await invoke('take_detached_workspace_tab');
+  if (!payload) return showFileWorkspace();
+  let restored = false;
+  try {
+    if (payload.kind === 'files') {
+      revealFileWorkspace();
+      restored = await localExplorer.restoreDetachedTab(payload.tab);
+    } else if (payload.kind === 'assets') {
+      await showAssetWorkspace();
+      restored = await workbenchTabs.restoreDetachedTab(payload.tab,whiteboard.restoreProject);
+    }
+  } finally {
+    await invoke('finish_detached_workspace_tab',{restored});
+  }
+}
+
+let folderLaunchesReady = false;
+let pendingFolderLaunch = false;
+let openingFolderLaunches = false;
+async function openShellFolders() {
+  if (!nativeDragOut) return;
+  pendingFolderLaunch = true;
+  if (!folderLaunchesReady || openingFolderLaunches) return;
+  openingFolderLaunches = true;
+  try {
+    while (pendingFolderLaunch) {
+      pendingFolderLaunch = false;
+      const paths = await invoke('take_shell_folder_launches');
+      if (!Array.isArray(paths) || !paths.length) continue;
+      revealFileWorkspace();
+      for (const path of paths) {
+        if (fileWorkspace.hidden) break;
+        await localExplorer.openPath(path);
+      }
+    }
+  } catch (failure) {
+    error(failure);
+  } finally {
+    openingFolderLaunches = false;
+  }
+}
+
+if (detachedWindow) {
+  await restoreDetachedWindow().catch(error);
+} else if (nativeDragOut) {
+  await window.__TAURI__.event.listen('nexus-local-folder-request', openShellFolders).catch(error);
+  folderLaunchesReady = true;
+  await openShellFolders();
+  if (!fileWorkspaceShown) {
+    const openStartupWorkspace = filePreferences.get().startWorkspace === 'files' ? showFileWorkspace : showAssetWorkspace;
+    await openStartupWorkspace().catch(error);
+  }
+} else await showAssetWorkspace().catch(error);
 void clientVersion.then(version => { if (version) releaseNotes.activate(version); });
-void dccConnections.refresh();

@@ -79,6 +79,15 @@ const optionalResults = new Set([
 
 const pickerOperations = new Set(['choose_bridge_executable', 'pick_c4d_converter']);
 
+function categoryFor(command) {
+  if (/^(?:start_asset_drag|(?:team_)?(?:link_folders|import_|ingest_drop)|scan_library$)/.test(command)) return 'transfer';
+  if (/^(?:read_preview|start_cover_capture|set_clipboard_cover|change_asset_cover|open_asset_video)$/.test(command)) return 'preview';
+  if (/^(?:queue_import|place_asset|.*bridge|.*c4d)/.test(command)) return 'dcc';
+  if (/^(?:team_|cloud_mount_|baidu_cloud|.*hosted_team|export_team_for_nas)/.test(command)) return 'team';
+  if (/folder|asset|library|collection|tag/.test(command)) return 'folders';
+  return 'other';
+}
+
 function logText(value) {
   return String(value?.message || value || '未知错误')
     .replace(/\b(?:https?|smb|sftp|ftp|davs?|file):\/\/[^\s<>"']+/gi, '[网址已隐藏]')
@@ -154,6 +163,11 @@ export function initRuntimeLog({copy}) {
   const button = document.querySelector('#open-runtime-log');
   const dialog = document.querySelector('#runtime-log-dialog');
   const view = document.querySelector('#runtime-log-entries');
+  const category = dialog.querySelector('#runtime-log-category');
+  const errorsOnly = dialog.querySelector('#runtime-log-errors-only');
+  const guide = dialog.querySelector('#runtime-log-guide');
+  const copyButton = dialog.querySelector('#copy-runtime-log');
+  const status = dialog.querySelector('#runtime-log-status');
   const entries = [];
   const pendingMounts = new Set();
   let authorizationPhase = null;
@@ -163,41 +177,55 @@ export function initRuntimeLog({copy}) {
     return `${entry.time}  ${entry.message}${entry.count > 1 ? `（${entry.count} 次）` : ''}`;
   }
 
+  function visibleEntries() {
+    return entries.filter(matchesFilters);
+  }
+
+  function matchesFilters(entry) {
+    return (!category.value || entry.category === category.value) && (!errorsOnly.checked || entry.level === 'error');
+  }
+
   function render(follow = false) {
     if (!dialog.open) return;
     const bottom = follow || view.scrollHeight - view.scrollTop - view.clientHeight < 24;
-    view.replaceChildren(...entries.map(entry => {
+    const visible = visibleEntries();
+    copyButton.disabled = !visible.length;
+    copyButton.textContent = category.value || errorsOnly.checked ? '复制筛选结果' : '复制日志';
+    guide.dataset.workspaceGuide = category.value && category.value !== 'other' ? category.value : 'logs';
+    view.replaceChildren(...visible.map(entry => {
       const row = document.createElement('div');
       row.textContent = rowText(entry);
       if (entry.level === 'error') row.className = 'runtime-log-error';
       return row;
     }));
+    if (!visible.length) view.textContent = '没有符合筛选条件的日志';
     if (bottom) view.scrollTop = view.scrollHeight;
   }
 
-  function add(message, level = 'info') {
-    const entry = {time:stamp.format(new Date()), message:logText(message), level, count:1};
+  function addEntry(message, level = 'info', group = 'other') {
+    const entry = {time:stamp.format(new Date()), message:logText(message), level, category:group, count:1};
     const previous = entries.at(-1);
-    if (previous?.message === entry.message && previous.level === level) {
+    let removed;
+    if (previous?.message === entry.message && previous.level === level && previous.category === group) {
       previous.time = entry.time;
       previous.count++;
     } else {
       entries.push(entry);
-      if (entries.length > 480) entries.shift();
+      if (entries.length > 480) removed = entries.shift();
     }
-    render();
+    if (dialog.open && (matchesFilters(entry) || (removed && matchesFilters(removed)))) render();
   }
 
   function start(command, args = {}) {
     if (command === 'baidu_cloud' && args.action?.kind === 'start') {
       authorizationPhase = null;
-      add('开始百度网盘授权');
+      addEntry('开始百度网盘授权', 'info', 'team');
       return;
     }
     if (!longerOperations.has(command)) return;
     const paths = args.paths;
     const count = Array.isArray(paths) && paths.length ? ` · ${paths.length} 个来源` : '';
-    add(`开始${labelFor(command, args)}${operationScope(command, args)}${count}`);
+    addEntry(`开始${labelFor(command, args)}${operationScope(command, args)}${count}`, 'info', categoryFor(command));
   }
 
   function jobResult(job) {
@@ -205,10 +233,10 @@ export function initRuntimeLog({copy}) {
     const label = job.projectExport ? 'Cinema 4D 工程转换' : host + ' 导入';
     if (job.status === 'done') {
       const counts = typeof job.message === 'string' && /^已导入 (\d{1,8}) 个对象、(\d{1,8}) 个材质/.exec(job.message);
-      add(label + '完成' + (counts ? ` · ${counts[1]} 个对象、${counts[2]} 个材质` : ''));
+      addEntry(label + '完成' + (counts ? ` · ${counts[1]} 个对象、${counts[2]} 个材质` : ''), 'info', 'dcc');
     } else if (job.status === 'failed' || job.status === 'interrupted') {
       const summary = job.status === 'failed' ? '失败' : '中断';
-      add(label + summary + (job.error ? ' · ' + logText(job.error) : ''), 'error');
+      addEntry(label + summary + (job.error ? ' · ' + logText(job.error) : ''), 'error', 'dcc');
     }
   }
 
@@ -222,8 +250,8 @@ export function initRuntimeLog({copy}) {
       const count = targets.filter(target => target?.status === status).length;
       return count ? [`${title} ${count} 个版本`] : [];
     });
-    add(label + '完成 · ' + (counts.length ? counts.join(' · ') : '未检测到支持的版本'),
-      targets.some(target => target?.status === 'conflict') ? 'error' : 'info');
+    addEntry(label + '完成 · ' + (counts.length ? counts.join(' · ') : '未检测到支持的版本'),
+      targets.some(target => target?.status === 'conflict') ? 'error' : 'info', 'dcc');
   }
 
   function recordBaidu(action, label, result) {
@@ -232,37 +260,39 @@ export function initRuntimeLog({copy}) {
         : result.verificationUrl || authorizationPhase === 'ready' ? 'ready' : 'waiting';
       if (authorizationPhase === next) return;
       authorizationPhase = next;
-      if (next === 'connected') add('百度网盘授权完成');
-      else if (next === 'ready') add('百度授权网页已准备 · 等待用户确认');
-      else if (next === 'waiting') add('已启动百度网盘授权 · 正在准备授权网页');
-      else add('百度网盘授权未完成', 'error');
+      if (next === 'connected') addEntry('百度网盘授权完成', 'info', 'team');
+      else if (next === 'ready') addEntry('百度授权网页已准备 · 等待用户确认', 'info', 'team');
+      else if (next === 'waiting') addEntry('已启动百度网盘授权 · 正在准备授权网页', 'info', 'team');
+      else addEntry('百度网盘授权未完成', 'error', 'team');
       return;
     }
     if (action === 'status') {
       if (result?.available === false) {
-        add(result.upgradeRequired ? '百度网盘暂不可用 · 请先更新团队 NAS 服务' : '百度网盘在当前环境不可用', 'error');
+        addEntry(result.upgradeRequired ? '百度网盘暂不可用 · 请先更新团队 NAS 服务' : '百度网盘在当前环境不可用', 'error', 'team');
       }
       return;
     }
     if (action === 'links' || action === 'download' && !result?.saved) return;
     if (action === 'cancel') authorizationPhase = null;
     const count = Array.isArray(result?.entries) ? ` · ${result.entries.length} 项` : '';
-    add(`${label}完成${count}`);
+    addEntry(`${label}完成${count}`, 'info', 'team');
   }
 
   function recordMount(result) {
     const drive = /^[d-z]:$/i.test(result?.drive) ? ` · ${result.drive}` : '';
     if (result?.status === 'starting') {
       if (result.id) pendingMounts.add(result.id);
-      add(`已启动网盘挂载${drive} · 等待盘符就绪`);
+      addEntry(`已启动网盘挂载${drive} · 等待盘符就绪`, 'info', 'team');
     } else if (result?.status === 'connected') {
-      add(`网盘挂载完成${drive}`);
+      addEntry(`网盘挂载完成${drive}`, 'info', 'team');
     } else {
-      add(`网盘挂载未就绪${drive}`, 'error');
+      addEntry(`网盘挂载未就绪${drive}`, 'error', 'team');
     }
   }
 
   function operation(command, args = {}, result, error = null) {
+    const category = categoryFor(command);
+    const add = (message, level) => addEntry(message, level, category);
     if (command === 'cloud_mount_list') {
       for (const mount of result?.mounts ?? []) {
         if (mount.status !== 'starting' && pendingMounts.delete(mount.id)) recordMount(mount);
@@ -408,18 +438,21 @@ export function initRuntimeLog({copy}) {
   }
 
   button.addEventListener('click', () => {
-    document.querySelector('#runtime-log-status').textContent = '';
+    status.textContent = '';
     if (!dialog.open) dialog.showModal();
     render(true);
     view.focus();
   });
-  document.querySelector('#copy-runtime-log').addEventListener('click', async () => {
-    const status = document.querySelector('#runtime-log-status');
+  for (const filter of [category, errorsOnly]) filter.addEventListener('change', () => {
+    status.textContent = '';
+    render(true);
+  });
+  copyButton.addEventListener('click', async () => {
     try {
-      await copy(entries.map(rowText).join('\n'));
+      await copy(visibleEntries().map(rowText).join('\n'));
       status.textContent = '已复制';
     } catch (error) { status.textContent = logText(error); }
   });
-  add('Nexus 工作台已启动');
-  return {add, start, operation, jobResult};
+  addEntry('Nexus 工作台已启动');
+  return {add:addEntry, start, operation, jobResult};
 }

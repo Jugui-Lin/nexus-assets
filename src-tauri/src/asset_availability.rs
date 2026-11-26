@@ -4,11 +4,11 @@ use rusqlite::{params, ErrorCode, OptionalExtension, Transaction, TransactionBeh
 use serde::Serialize;
 use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 use tauri::{State, WebviewWindow};
 
@@ -157,6 +157,12 @@ struct Replacement {
     thumbnail: Option<String>,
 }
 
+fn matches_relink_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
 fn prepare_replacement(file: &Path, previous: &Asset) -> Result<Replacement, String> {
     if !file.is_absolute() {
         return Err("请选择绝对路径下的文件".into());
@@ -168,11 +174,7 @@ fn prepare_replacement(file: &Path, previous: &Asset) -> Result<Replacement, Str
     if !metadata.is_file() {
         return Err("请选择一个资产文件".into());
     }
-    if !path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case(&previous.ext))
-    {
+    if !matches_relink_extension(&path, &previous.ext) {
         return Err(format!("请选择相同格式的 .{} 文件", previous.ext));
     }
     let modified = metadata
@@ -233,6 +235,302 @@ fn relink_file(
     Ok(updated)
 }
 
+const RELINK_ENTRY_LIMIT: usize = 1200;
+const RELINK_DIRECTORY_LIMIT: usize = 40;
+const RELINK_DEPTH_LIMIT: usize = 3;
+const RELINK_RESULT_LIMIT: usize = 12;
+const RELINK_TIME_LIMIT: Duration = Duration::from_millis(450);
+
+#[derive(Default, Serialize)]
+pub(crate) struct RelinkSuggestions {
+    candidates: Vec<RelinkCandidate>,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelinkCandidate {
+    path: String,
+    name: String,
+    match_factors: Vec<&'static str>,
+    #[serde(skip)]
+    score: u8,
+}
+
+#[cfg(windows)]
+fn fixed_relink_drive(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return false;
+    };
+    let (Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = prefix.kind() else {
+        return false;
+    };
+    crate::folder_browser::windows_drive_kind(&[u16::from(letter), b':' as u16, b'\\' as u16, 0])
+        == "fixed"
+}
+
+#[cfg(not(windows))]
+fn fixed_relink_drive(_path: &Path) -> bool {
+    false
+}
+
+fn real_relink_directory(path: &Path) -> Result<bool, String> {
+    let ancestors: Vec<_> = path.ancestors().collect();
+    for directory in ancestors.into_iter().rev() {
+        let metadata = match fs::symlink_metadata(directory) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(format!("无法访问查找目录（{error}）")),
+        };
+        if crate::workspace_folder_move::link_or_reparse(&metadata) {
+            return Err("位置经过链接或重分析点，请手动选择资产的新位置".into());
+        }
+        if !metadata.is_dir() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn collect_relink_candidates(
+    previous: &Asset,
+    root: &Path,
+    max_depth: usize,
+) -> Result<RelinkSuggestions, String> {
+    let deadline = Instant::now() + RELINK_TIME_LIMIT;
+    let old_path = Path::new(&previous.path);
+    let old_parent = old_path.parent().ok_or("资产原位置不完整")?;
+    if !root.is_absolute() || !fixed_relink_drive(root) {
+        return Err("候选查找适用于本机固定磁盘中已索引的目录".into());
+    }
+    let original_depth = old_parent
+        .strip_prefix(root)
+        .map_err(|_| "原文件不在当前资产库登记的位置")?
+        .components()
+        .count();
+    if !real_relink_directory(root)? {
+        return Err("原资产库目录不可访问，请恢复连接或手动选择新位置".into());
+    }
+    let parent_exists = old_parent == root || real_relink_directory(old_parent)?;
+    if parent_exists {
+        match fs::symlink_metadata(old_path) {
+            Ok(_) => return Err("原文件仍在，请刷新文件状态".into()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("无法确认原文件是否缺失（{error}）")),
+        }
+    }
+    let mut result = RelinkSuggestions::default();
+    let mut pending = VecDeque::from([(root.to_path_buf(), 0)]);
+    if parent_exists && old_parent != root {
+        // Look beside the old file first, then consider the registered library.
+        pending.push_front((old_parent.to_path_buf(), original_depth));
+    }
+    let mut visited = HashSet::new();
+    let mut examined = 0;
+    'search: while let Some((directory, depth)) = pending.pop_front() {
+        if Instant::now() >= deadline || visited.len() >= RELINK_DIRECTORY_LIMIT {
+            result.truncated = true;
+            break;
+        }
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
+        if !real_relink_directory(&directory).unwrap_or(false) {
+            result.truncated = true;
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            result.truncated = true;
+            continue;
+        };
+        for entry in entries {
+            if examined >= RELINK_ENTRY_LIMIT || Instant::now() >= deadline {
+                result.truncated = true;
+                break 'search;
+            }
+            examined += 1;
+            let Ok(entry) = entry else {
+                result.truncated = true;
+                continue;
+            };
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir()
+                && (!file_type.is_file() || !matches_relink_extension(&path, &previous.ext))
+            {
+                continue;
+            }
+            let Some(metadata) = entry
+                .metadata()
+                .ok()
+                .filter(|entry| !crate::workspace_folder_move::link_or_reparse(entry))
+            else {
+                continue;
+            };
+            if metadata.is_dir() {
+                if depth < max_depth && visited.len() + pending.len() < RELINK_DIRECTORY_LIMIT {
+                    pending.push_back((path, depth + 1));
+                } else if max_depth > 0 {
+                    result.truncated = true;
+                }
+                continue;
+            }
+            if !metadata.is_file() || !file_type.is_file() || metadata.len() != previous.size {
+                continue;
+            }
+            let same_name = old_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|old| old.eq_ignore_ascii_case(&name));
+            let same_time = previous.modified.as_u64().is_some_and(|old| {
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .is_some_and(|time| time.as_secs() == old)
+            });
+            let same_folder = directory == old_parent;
+            let mut match_factors = vec!["扩展名相同", "文件大小相同"];
+            if same_name {
+                match_factors.push("原文件名相同");
+            }
+            if same_time {
+                match_factors.push("修改时间相同");
+            }
+            if same_folder {
+                match_factors.push("位于原文件夹");
+            }
+            result.candidates.push(RelinkCandidate {
+                path: clean_path(&path),
+                name,
+                match_factors,
+                score: 4 * u8::from(same_name) + 2 * u8::from(same_time) + u8::from(same_folder),
+            });
+        }
+    }
+    result
+        .candidates
+        .sort_unstable_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+    Ok(result)
+}
+
+fn suggest_relinks(state: &AppState, id: &str) -> Result<RelinkSuggestions, String> {
+    let (previous, root, max_depth, catalog_dir) = {
+        let catalog = lock_db(state)?;
+        let previous = catalog.asset(id)?;
+        if previous.demo
+            || previous.size == 0
+            || nexus_core::kind(&previous.ext) != Some(previous.kind.as_str())
+        {
+            return Ok(RelinkSuggestions::default());
+        }
+        let registered: Option<String> = catalog
+            .conn
+            .query_row(
+                "SELECT path FROM libraries WHERE id=?1",
+                [&previous.library_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let (root, max_depth) = match registered {
+            Some(path) => (PathBuf::from(path), RELINK_DEPTH_LIMIT),
+            None if previous.library_id == "loose" => (
+                Path::new(&previous.path)
+                    .parent()
+                    .ok_or("资产原位置不完整")?
+                    .to_path_buf(),
+                0,
+            ),
+            None => return Err("当前个人库已无法确认此资产的原目录".into()),
+        };
+        (previous, root, max_depth, catalog.dir.clone())
+    };
+    let mut result = collect_relink_candidates(&previous, &root, max_depth)?;
+    let catalog = lock_db(state)?;
+    let current = catalog.asset(id)?;
+    if catalog.dir != catalog_dir
+        || current.path != previous.path
+        || current.library_id != previous.library_id
+        || current.size != previous.size
+    {
+        return Err("资产位置或个人库已更改，请刷新后重试".into());
+    }
+    let mut indexed = catalog
+        .conn
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM assets WHERE path=?1)")
+        .map_err(|error| error.to_string())?;
+    let mut available = Vec::new();
+    for candidate in result.candidates.drain(..) {
+        let already_indexed: bool = indexed
+            .query_row([&candidate.path], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if already_indexed {
+            continue;
+        }
+        if available.len() >= RELINK_RESULT_LIMIT {
+            result.truncated = true;
+            break;
+        }
+        available.push(candidate);
+    }
+    result.candidates = available;
+    Ok(result)
+}
+
+fn prepare_confirmed_relink(
+    state: &AppState,
+    previous: &Asset,
+    path: &str,
+) -> Result<Replacement, String> {
+    let suggestions = suggest_relinks(state, &previous.id)?;
+    if !suggestions
+        .candidates
+        .iter()
+        .any(|candidate| candidate.path == path)
+    {
+        return Err("该候选文件已不符合条件，请重新查找或手动选择".into());
+    }
+    let candidate = Path::new(path);
+    let metadata =
+        fs::symlink_metadata(candidate).map_err(|error| format!("无法读取候选文件（{error}）"))?;
+    if crate::workspace_folder_move::link_or_reparse(&metadata) {
+        return Err("候选文件已被链接替换，请重新查找".into());
+    }
+    let replacement = prepare_replacement(candidate, previous)?;
+    if clean_path(&replacement.path) != path || replacement.size != previous.size {
+        return Err("候选文件已变化，请重新查找".into());
+    }
+    Ok(replacement)
+}
+
+#[tauri::command]
+pub(crate) async fn suggest_asset_relinks(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<RelinkSuggestions, String> {
+    if id.starts_with("team:") {
+        return Err("候选查找适用于个人资产库".into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || suggest_relinks(&state, &id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub(crate) async fn check_asset_files(
     state: State<'_, AppState>,
@@ -255,6 +553,7 @@ pub(crate) async fn relink_asset_file(
     state: State<'_, AppState>,
     window: WebviewWindow,
     id: String,
+    candidate_path: Option<String>,
 ) -> Result<Option<Asset>, String> {
     if id.starts_with("team:") {
         return Err("重新链接适用于个人资产库".into());
@@ -263,6 +562,10 @@ pub(crate) async fn relink_asset_file(
     tauri::async_runtime::spawn_blocking(move || {
         let _workspace = crate::workspaces::lock_io(&state)?;
         let previous = lock_db(&state)?.asset(&id)?;
+        if let Some(path) = candidate_path {
+            let replacement = prepare_confirmed_relink(&state, &previous, &path)?;
+            return relink_file(&*lock_db(&state)?, &previous, replacement).map(Some);
+        }
         let mut dialog = rfd::FileDialog::new()
             .set_parent(&window)
             .set_title("选择资产的新位置")
@@ -422,5 +725,93 @@ mod tests {
             .contains("已在个人资产库里建立索引"));
         assert_eq!(catalog.asset(&asset.id).unwrap().path, asset.path);
         assert_eq!(catalog.asset(&occupied.id).unwrap().path, occupied.path);
+    }
+
+    #[cfg(windows)]
+    fn suggestion_fixture(registered: bool) -> (tempfile::TempDir, AppState, PathBuf, Asset) {
+        use std::sync::{Arc, Mutex};
+
+        let scratch = tempfile::tempdir().unwrap();
+        fs::create_dir(scratch.path().join("模型库")).unwrap();
+        let root = fs::canonicalize(scratch.path().join("模型库")).unwrap();
+        let root = PathBuf::from(clean_path(&root));
+        let catalog = Catalog::open(&scratch.path().join("database")).unwrap();
+        let library = if registered {
+            catalog.register_library(&root, None, "local").unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            "loose".to_owned()
+        };
+        let original = index(&catalog, &root.join("模型.obj"), &library);
+        let state = AppState {
+            db: Arc::new(Mutex::new(catalog)),
+            root: scratch.path().to_path_buf(),
+            workspace_io: Arc::new(Mutex::new(())),
+            placement: crate::placement::PlacementTickets::default(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            token: String::new(),
+            port: 0,
+        };
+        (scratch, state, root, original)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ranks_local_candidates_without_modifying_or_returning_other_indexed_assets() {
+        let (scratch, state, root, original) = suggestion_fixture(true);
+        assert!(suggest_relinks(&state, &original.id).is_err());
+        let moved = root.join("交付").join("模型.OBJ");
+        fs::create_dir(moved.parent().unwrap()).unwrap();
+        fs::rename(&original.path, &moved).unwrap();
+        fs::write(root.join("同大小.obj"), b"v 0 0 0\n").unwrap();
+        fs::write(root.join("尺寸不符.obj"), b"unequal size").unwrap();
+        fs::write(root.join("格式不符.fbx"), b"v 0 0 0\n").unwrap();
+        fs::write(scratch.path().join("外部.obj"), b"v 0 0 0\n").unwrap();
+        let indexed = root.join("其他资产.obj");
+        fs::write(&indexed, b"v 0 0 0\n").unwrap();
+        lock_db(&state)
+            .unwrap()
+            .add_file(&indexed, &original.library_id)
+            .unwrap();
+
+        let result = suggest_relinks(&state, &original.id).unwrap();
+        assert_eq!(result.candidates.len(), 2);
+        assert_eq!(result.candidates[0].path, clean_path(&moved));
+        assert!(result.candidates[0].match_factors.contains(&"原文件名相同"));
+        assert!(result.candidates[0].match_factors.contains(&"修改时间相同"));
+        assert!(result.candidates[1].match_factors.contains(&"位于原文件夹"));
+        assert_eq!(
+            lock_db(&state).unwrap().asset(&original.id).unwrap().path,
+            original.path
+        );
+
+        assert!(prepare_confirmed_relink(&state, &original, &clean_path(&indexed)).is_err());
+        let replacement = prepare_confirmed_relink(&state, &original, &clean_path(&moved)).unwrap();
+        let updated = relink_file(&*lock_db(&state).unwrap(), &original, replacement).unwrap();
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.path, clean_path(&moved));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn caps_results_and_keeps_loose_assets_in_their_original_directory() {
+        let (_scratch, state, root, original) = suggestion_fixture(false);
+        fs::remove_file(&original.path).unwrap();
+        fs::create_dir(root.join("子目录")).unwrap();
+        fs::write(root.join("子目录/模型.obj"), b"v 0 0 0\n").unwrap();
+        let result = suggest_relinks(&state, &original.id).unwrap();
+        assert!(result.candidates.is_empty());
+        assert!(!result.truncated);
+        for number in 0..=RELINK_RESULT_LIMIT {
+            fs::write(root.join(format!("候选{number}.obj")), b"v 0 0 0\n").unwrap();
+        }
+        let result = suggest_relinks(&state, &original.id).unwrap();
+        assert_eq!(result.candidates.len(), RELINK_RESULT_LIMIT);
+        assert!(result.truncated);
+        let candidate = &result.candidates[0].path;
+        fs::write(candidate, b"new contents and size").unwrap();
+        assert!(prepare_confirmed_relink(&state, &original, candidate).is_err());
     }
 }

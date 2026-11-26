@@ -4,7 +4,7 @@ const checkPeriod = 60 * minute;
 const retryPeriod = 5 * minute;
 
 export function initNexusUpdater({api, enabled, panel, indicators, canRestart, rememberReleaseNotes}) {
-  if (!enabled) return {opened() {}};
+  if (!enabled) return {opened() {},checkNow() {}};
   panel.hidden = false;
   const button = panel.querySelector('button');
   const installNow = panel.querySelector('#nexus-install-now');
@@ -155,5 +155,8 @@ export function initNexusUpdater({api, enabled, panel, indicators, canRestart, r
   });
   setTimeout(tick, 3500);
   setInterval(tick, 15_000);
-  return {opened() { if (performance.now() - lastCheck > 15 * minute) check(true); }};
+  return {
+    opened() { if (performance.now() - lastCheck > 15 * minute) check(true); },
+    checkNow: () => check(true),
+  };
 }

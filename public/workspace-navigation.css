@@ -122,13 +122,19 @@
   white-space: nowrap;
 }
 
-.workspace-search-actions,
-.workspace-folder-actions {
+.workspace-search-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 4px 9px;
+}
+
+.workspace-folder-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 4px;
 }
 
 .workspace-save-search {
@@ -138,24 +144,34 @@
 }
 
 .workspace-save-search svg,
-.workspace-pin-folder svg {
+.workspace-pin-folder svg,
+.workspace-folder-view svg {
   width: 14px;
   height: 14px;
 }
 
 .workspace-folder-button {
-  width: 27px;
-  height: 26px;
+  width: 21px;
+  height: 21px;
   padding: 0;
-  border: 1px solid #343a49;
-  color: #a9b1c9;
+  color: var(--accent);
 }
 
-.workspace-rescan-folder {
-  font-size: 17px;
+.workspace-refresh-assets svg { width: 14px; height: 14px; }
+
+.workspace-folder-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-block-size: 21px;
+  padding: 0 4px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
-.workspace-rescan-folder[aria-disabled="true"] {
+.workspace-folder-view:hover { background: var(--card); }
+
+.workspace-refresh-assets[aria-disabled="true"] {
   cursor: progress;
   opacity: .6;
 }

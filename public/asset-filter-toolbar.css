@@ -3,6 +3,33 @@
   display: block;
 }
 
+.workspace-asset-controls, #asset-view-navigation-slot { container: asset-view-controls / inline-size; }
+#asset-view-navigation-slot { display: flex; justify-content: flex-end; padding-block: 4px 6px; }
+#asset-view-navigation-slot:empty { display: none; }
+.asset-view-navigation {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-inline-size: 100%;
+}
+.asset-view-navigation .nav-item {
+  flex: none;
+  width: auto;
+  min-width: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 0 7px;
+  gap: 5px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.asset-view-navigation .nav-item.active { border-color: #4f746d; }
+.asset-view-navigation svg { width: 15px; height: 15px; }
+.asset-view-navigation .nav-count { margin: 0; padding: 0 3px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.asset-view-navigation .nav-count:empty { display: none; }
+
 .asset-filter-strip.filter-bar {
   flex-wrap: nowrap;
   align-items: center;
@@ -16,8 +43,26 @@
 
 .asset-filter-strip > :is(button, .view-controls, .toolbar-connection),
 :is(#asset-pinned-filters, [data-pane-source="asset-pinned-filters"]) { flex-shrink: 0; }
-.asset-filter-strip .view-controls { margin-inline-start: auto; }
+.asset-filter-strip .view-controls { margin-inline-start: auto; align-items: center; }
 .asset-filter-strip #view-density { display: block; }
+.asset-search-toggle {
+  flex: none;
+  border: 1px solid var(--line);
+}
+.asset-search-toggle:is([aria-expanded="true"], .has-query) { color: var(--accent); border-color: #4f746d; }
+#asset-filter-toolbar > .asset-search {
+  position: absolute;
+  z-index: 6;
+  min-width: 0;
+  height: 30px;
+  padding-inline: 8px;
+  background: var(--panel);
+  border-color: var(--line);
+  box-shadow: 0 3px 12px #0005;
+}
+#asset-filter-toolbar > .asset-search:focus-within { border-color: var(--accent); }
+.asset-search input { padding-block: 4px; font-size: 12px; }
+.asset-search[hidden], .workspace-pane-asset-preview .asset-search { display: none; }
 .asset-filter-strip .toolbar-connection {
   display: inline-flex;
   align-items: center;
@@ -34,6 +79,18 @@
 
 :is(#asset-pinned-filters, [data-pane-source="asset-pinned-filters"]) { display: flex; gap: 3px; }
 :is(#asset-pinned-filters, [data-pane-source="asset-pinned-filters"]):empty { display: none; }
+
+@container asset-view-controls (max-width: 890px) {
+  .asset-view-navigation .folder-label { display: none; }
+  .asset-view-navigation .nav-item { justify-content: center; padding-inline: 5px; }
+  .asset-filter-strip.filter-bar { flex-wrap: wrap; overflow: visible; }
+  .asset-filter-strip :is(.view-controls, #asset-pinned-filters, [data-pane-source="asset-pinned-filters"]) {
+    min-width: 0;
+    max-width: 100%;
+    flex-shrink: 1;
+    flex-wrap: wrap;
+  }
+}
 
 .asset-filter-trigger {
   display: inline-flex;

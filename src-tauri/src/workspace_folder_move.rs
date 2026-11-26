@@ -47,7 +47,7 @@ fn contained_by(path: &Path, root: &Path) -> bool {
         .any(|ancestor| Handle::from_path(ancestor).is_ok_and(|entry| entry == root))
 }
 
-fn link_or_reparse(entry: &Metadata) -> bool {
+pub(crate) fn link_or_reparse(entry: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -327,7 +327,7 @@ fn move_to_empty_path(source: &Path, target: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         core::PCWSTR,
@@ -444,7 +444,7 @@ fn update_assets(connection: &rusqlite::Connection, plan: &MovePlan) -> Result<(
     Ok(())
 }
 
-fn move_local_folder(
+pub(crate) fn move_local_folder(
     catalog: &Catalog,
     app_data: &Path,
     library_id: &str,

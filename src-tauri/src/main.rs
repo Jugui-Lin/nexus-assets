@@ -11,7 +11,7 @@ use nexus_core::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -36,12 +36,20 @@ mod collection_desktop;
 mod drop_ingest;
 mod folder_browser;
 mod folder_deletion;
+mod folder_shell;
 mod library_visibility;
+mod local_explorer;
+mod desktop_shortcut;
+mod local_explorer_clipboard;
+mod local_explorer_details;
+mod local_explorer_drop;
+mod local_explorer_new;
 mod mesh_preview;
 mod native_drag;
 mod nexus_updater;
 mod personal_tags;
 mod placement;
+mod project_dependencies;
 mod subscription_feed;
 mod subscription_open;
 mod team_avatar_picker;
@@ -56,6 +64,7 @@ mod workspace_asset_deletion;
 mod workspace_data;
 mod workspace_files;
 mod workspace_folder_move;
+mod workspace_windows;
 mod workspaces;
 #[cfg(windows)]
 mod youtube_player;
@@ -200,11 +209,29 @@ async fn patch_asset(
     state: tauri::State<'_, AppState>,
     id: String,
     patch: Value,
+    expected_metadata: Option<Value>,
 ) -> Result<Value, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(json!(lock_db(&state)?.patch(&id, patch)?)))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let catalog = lock_db(&state)?;
+        if let Some(expected) = expected_metadata {
+            let asset = catalog.asset(&id)?;
+            let current = json!({
+                "path": asset.path,
+                "name": asset.name,
+                "tags": asset.tags,
+                "notes": asset.notes,
+                "rating": asset.rating,
+                "workflow": asset.workflow,
+            });
+            if current != expected {
+                return Err("资产资料或路径已变化，请载入最新信息".into());
+            }
+        }
+        Ok(json!(catalog.patch(&id, patch)?))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn pick_folder(purpose: Option<String>) -> Result<Option<String>, String> {
@@ -248,20 +275,24 @@ async fn open_folder_location(path: PathBuf) -> Result<(), String> {
         if !path.is_absolute() || !path.is_dir() {
             return Err("无法访问此文件夹".into());
         }
-        #[cfg(windows)]
-        let program = "explorer.exe";
-        #[cfg(target_os = "macos")]
-        let program = "open";
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let program = "xdg-open";
-        std::process::Command::new(program)
-            .arg(path)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        Ok(())
+        launch_folder_location(&path)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+fn launch_folder_location(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    let program = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let program = "xdg-open";
+    std::process::Command::new(program)
+        .arg(path)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn scan_selected_folders(
@@ -654,13 +685,13 @@ async fn queue_import(
     if let Some(options) = &smart_options {
         options.validate()?;
         if options.scene_overrides() && session["sceneImportOptions"] != true {
-            return Err("请在 DCC 连接中心更新 Cinema 4D 桥接并重启 Cinema 4D 后使用模型导入选项。".into());
+            return Err("请在 DCC 连接中心查看同步状态，重开 Cinema 4D 后使用模型导入选项。".into());
         }
     }
     let mut project_export = project_export;
     if let Some(project) = &mut project_export {
         if host != "c4d" || session["projectExport"] != true {
-            return Err("请从 DCC 连接中心更新 Cinema 4D 桥接并重启宿主。".into());
+            return Err("请在 DCC 连接中心查看同步状态，重开 Cinema 4D 后再转换。".into());
         }
         project.check(&a.ext)?;
     } else if smart_options.is_some() {
@@ -718,14 +749,14 @@ async fn queue_import(
                     }
                 }
             } else if workspace != "personal:personal" {
-                return Err("请在 DCC 连接中心更新 Cinema 4D 桥接并重启 Cinema 4D，以使用当前资产库的导入设置。".into());
+                return Err("请在 DCC 连接中心查看同步状态，重开 Cinema 4D 后使用当前资产库的导入设置。".into());
             }
         }
     }
     if host == "c4d" && session["maxTextureBindings"] != true && j["projectExport"].is_null() {
         let saved_mode = j["c4dPreferences"]["settings"]["maxMode"].as_str();
         if smart_options.as_ref().is_some_and(|options| options.direct_max_textures(&a.ext, saved_mode)) {
-            return Err("当前 Cinema 4D 会话还在运行旧桥接。请保存工程，在 DCC 连接中心更新桥接，完全退出并重开 Cinema 4D 后再导入 MAX 贴图。".into());
+            return Err("当前 Cinema 4D 会话还在运行旧桥接。请保存工程，待 DCC 连接中心同步完成后重开 Cinema 4D，再导入 MAX 贴图。".into());
         }
     }
     lock_db(&state)?.put_job(&j)?;
@@ -922,14 +953,131 @@ async fn bridge_import_progress(
     }
     Ok(Json(json!({"ok":true})))
 }
+#[derive(Clone, Default)]
+struct FolderLaunches(Arc<Mutex<VecDeque<String>>>);
+
+impl FolderLaunches {
+    fn push(&self, path: String) {
+        if let Ok(mut paths) = self.0.lock() {
+            if paths.back() == Some(&path) {
+                return;
+            }
+            if paths.len() == 24 {
+                paths.pop_front();
+            }
+            paths.push_back(path);
+        }
+    }
+
+    fn pending(&self) -> bool {
+        self.0.lock().is_ok_and(|paths| !paths.is_empty())
+    }
+}
+
+#[tauri::command]
+fn take_shell_folder_launches(
+    launches: tauri::State<'_, FolderLaunches>,
+) -> Result<Vec<String>, String> {
+    let mut paths = launches.0.lock().map_err(|_| "无法读取待打开的文件夹")?;
+    Ok(paths.drain(..).collect())
+}
+
+fn shell_folder_argument(args: &[String]) -> Option<String> {
+    let [_, command, path] = args else { return None };
+    (command == "--open-folder")
+        .then(|| local_explorer::shell_folder_address(path))
+        .flatten()
+}
+
+#[cfg(windows)]
+fn configure_main_window_frame(window: &tauri::WebviewWindow) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+    let configured = window.hwnd().ok().is_some_and(|handle| unsafe {
+        let corner = DWMWCP_ROUND;
+        let border = 0x0042_403c_u32;
+        DwmSetWindowAttribute(
+            handle,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&corner).cast(),
+            size_of_val(&corner) as u32,
+        )
+        .and_then(|_| {
+            DwmSetWindowAttribute(
+                handle,
+                DWMWA_BORDER_COLOR,
+                std::ptr::from_ref(&border).cast(),
+                size_of_val(&border) as u32,
+            )
+        })
+        .is_ok()
+    });
+    if !configured {
+        let _ = window.set_shadow(false);
+    }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn shell_folder_argument_accepts_drive_and_unicode_paths() {
+    let run = |flag: &str, path: &str| {
+        shell_folder_argument(&["nexus-assets.exe".into(), flag.into(), path.into()])
+    };
+    assert_eq!(run("--open-folder", r"C:\\."), Some(r"C:\".into()));
+    assert_eq!(
+        run("--open-folder", r"D:\项目 文件夹\."),
+        Some(r"D:\项目 文件夹".into())
+    );
+    assert_eq!(run("--open-folder", "shell:Downloads"), None);
+    assert_eq!(run("--open-folder", "relative"), None);
+    assert_eq!(run("--unrelated", r"C:\"), None);
+}
+
 fn main() {
-    let result = tauri::Builder::default()
+    let args: Vec<_> = std::env::args_os().collect();
+    #[cfg(windows)]
+    if args.len() == 2 && args[1] == "--restore-system-folders" {
+        let status = if folder_shell::restore_for_uninstall().is_ok() { 0 } else { 1 };
+        std::process::exit(status);
+    }
+
+    let launches = FolderLaunches::default();
+    if let Ok(args) = args.into_iter().map(|arg| arg.into_string()).collect::<Result<Vec<_>, _>>() {
+        if let Some(path) = shell_folder_argument(&args) {
+            launches.push(path);
+        }
+    }
+
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = {
+        let forwarded = launches.clone();
+        builder.plugin(tauri_plugin_single_instance::init(move |app, args, _| {
+            let folder = shell_folder_argument(&args);
+            let requested_folder = folder.is_some();
+            if let Some(path) = folder {
+                forwarded.push(path);
+            }
+            workspace_windows::focus_after_relaunch(app, requested_folder);
+        }))
+    };
+    let result = builder
+        .manage(launches)
+        .manage(workspace_windows::WorkspaceWindows::default())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                workspace_windows::discard_window(window.app_handle(), window.label());
+            }
+        })
         .setup(|app| {
             nexus_updater::register(app)?;
             // Reserve the bridge endpoint before a second instance can touch the catalog.
             let listener = std::net::TcpListener::bind(("127.0.0.1", 47821))?;
             listener.set_nonblocking(true)?;
-            nexus_updater::install_cached_on_startup(app.handle());
+            if !app.state::<FolderLaunches>().pending() {
+                nexus_updater::install_cached_on_startup(app.handle());
+            }
             let root = app.path().app_data_dir()?;
             let global_catalog = Catalog::open(&root).map_err(std::io::Error::other)?;
             let token = global_catalog.token().map_err(std::io::Error::other)?;
@@ -951,19 +1099,7 @@ fn main() {
             app.manage(browser_capture.clone());
             let video_streams = asset_video::stream::VideoStreams::new(state.port);
             app.manage(video_streams.clone());
-            if let Some(config) = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|config| config.label == "main")
-            {
-                let _window = tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
-                #[cfg(windows)]
-                if let Err(error) = youtube_player::install(&_window, &app.config().identifier) {
-                    eprintln!("Could not initialize the YouTube player: {error}");
-                }
-            }
+            workspace_windows::initialize_main(app.handle())?;
             let expiring_placements = state.placement.clone();
             let expiring_videos = video_streams.clone();
             tauri::async_runtime::spawn(async move {
@@ -996,6 +1132,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            workspace_windows::open_detached_workspace_tab,
+            workspace_windows::take_detached_workspace_tab,
+            workspace_windows::finish_detached_workspace_tab,
             nexus_updater::check_nexus_update,
             nexus_updater::install_nexus_update,
             nexus_updater::prepare_nexus_update,
@@ -1024,13 +1163,19 @@ fn main() {
             asset_ai::asset_ai_models,
             asset_ai::suggest_asset_ai,
             subscription_open::subscription_open,
+            team_desktop::browser_sites::team_browser_sites,
+            team_desktop::browser_sites::team_save_browser_sites,
             team_desktop::asset_messages::team_send_asset_message,
+            team_desktop::asset_messages::team_send_video_reference_message,
             team_desktop::asset_messages::team_send_poke,
             team_desktop::asset_messages::team_asset_messages,
             team_desktop::creative_subscriptions::team_creative_subscriptions,
             team_desktop::creative_subscriptions::team_create_creative_subscription,
             team_desktop::creative_subscriptions::team_update_creative_subscription,
             team_desktop::creative_subscriptions::team_delete_creative_subscription,
+            team_desktop::creative_subscriptions::team_creative_video_references,
+            team_desktop::creative_subscriptions::team_save_creative_video_reference,
+            team_desktop::creative_subscriptions::team_delete_creative_video_reference,
             team_desktop::organization::team_organization,
             team_desktop::organization::team_local_organization,
             team_desktop::organization::team_set_favorite,
@@ -1071,6 +1216,27 @@ fn main() {
             pick_folder,
             pick_asset_folders,
             folder_browser::list_import_folders,
+            local_explorer::list_local_files,
+            local_explorer::local_explorer_tree_children,
+            local_explorer_new::local_explorer_new_templates,
+            local_explorer_new::local_explorer_create_item,
+            local_explorer::local_explorer_selection,
+            local_explorer_details::local_explorer_entry_details,
+            local_explorer::local_explorer_places,
+            desktop_shortcut::create_desktop_shortcut,
+            local_explorer::local_explorer_drive_details,
+            local_explorer_drop::local_explorer_drop_files,
+            local_explorer_drop::local_explorer_file_action,
+            local_explorer_clipboard::local_explorer_clipboard,
+            thumbnail_desktop::local_explorer_thumbnail,
+            thumbnail_desktop::local_explorer_folder_thumbnail,
+            thumbnail_desktop::local_explorer_file_icon,
+            local_explorer::open_local_file,
+            local_explorer::reveal_local_file,
+            take_shell_folder_launches,
+            folder_shell::folder_shell_status,
+            folder_shell::enable_folder_shell,
+            folder_shell::restore_folder_shell,
             folder_deletion::delete_workspace_folder,
             cloud_mounts::cloud_mount_list,
             cloud_mounts::cloud_mount_remotes,
@@ -1090,6 +1256,7 @@ fn main() {
             asset_video::generate_system_video_thumbnail,
             asset_video::open_asset_video,
             native_drag::start_asset_drag,
+            native_drag::start_local_file_drag,
             native_drag::wait_asset_drag_exit,
             drop_ingest::ingest_drop,
             asset_files::copy_asset_files,
@@ -1097,7 +1264,11 @@ fn main() {
             asset_versions::create_asset_version,
             asset_versions::export_asset_version,
             asset_availability::check_asset_files,
+            asset_availability::suggest_asset_relinks,
             asset_availability::relink_asset_file,
+            project_dependencies::inspect_project_dependencies,
+            project_dependencies::pick_project_dependency_file,
+            project_dependencies::write_project_dependency_copy,
             asset_cover::change_asset_cover,
             asset_cover::set_clipboard_cover,
             asset_cover::start_cover_capture,
@@ -1105,6 +1276,7 @@ fn main() {
             bridge_install::bridge_install_status,
             bridge_install::choose_bridge_executable,
             bridge_install::install_bridge,
+            bridge_install::sync_bridges,
             workspaces::personal_workspaces,
             workspaces::change_personal_workspace,
             workspace_files::create_library_folder,

@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::MutexGuard,
 };
-use tauri::{State, WebviewWindow};
+use tauri::{Manager, State, WebviewWindow};
 use tempfile::{NamedTempFile, TempDir};
 use uuid::Uuid;
 
@@ -693,6 +693,9 @@ pub async fn change_personal_workspace(
                 "open" | "activate" => snapshot(&state.root, &current).map(Some),
                 _ => Err("请选择与当前资料库不同的空目录。".into()),
             };
+        }
+        if crate::workspace_windows::has_multiple_workspace_windows(window.app_handle()) {
+            return Err("请关闭其他 Nexus 工作区窗口后再切换资料库。".into());
         }
         require_idle(&current)?;
         if name.is_some() {

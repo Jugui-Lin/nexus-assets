@@ -264,7 +264,10 @@ fn install_when_safe(
         return Ok(false);
     };
     let queued_cutoff = nexus_core::now().saturating_sub(crate::DCC_JOB_QUEUE_TIMEOUT);
-    if catalog.has_pending_dcc_jobs(queued_cutoff)? || (wait_for_idle && !user_is_idle()) {
+    if catalog.has_pending_dcc_jobs(queued_cutoff)?
+        || (wait_for_idle && !user_is_idle())
+        || crate::workspace_windows::has_multiple_workspace_windows(app)
+    {
         return Ok(false);
     }
     // The last activity checks and launching the already verified installer
@@ -316,16 +319,28 @@ pub(crate) async fn install_nexus_update(
     app: tauri::AppHandle,
     version: String,
 ) -> Result<(), String> {
+    use crate::workspace_windows::has_multiple_workspace_windows;
+
+    const OPEN_WINDOWS: &str = "请关闭其他 Nexus 工作区窗口后再安装更新。";
+    if has_multiple_workspace_windows(&app) {
+        return Err(OPEN_WINDOWS.into());
+    }
     let installation = app
         .try_state::<UpdateInstall>()
         .ok_or("当前版本未配置 GitHub 更新")?;
     let _installing = installation.0.try_lock().map_err(|_| "正在安装更新")?;
     let update = expected_update(&app, &version).await?;
 
-    update
-        .download_and_install(|_, _| {}, || {})
+    let installer = update
+        .download(|_, _| {}, || {})
         .await
-        .map_err(|error| format!("下载、验证或安装更新失败（{error}）"))?;
+        .map_err(|error| format!("下载或验证更新失败（{error}）"))?;
+    if has_multiple_workspace_windows(&app) {
+        return Err(OPEN_WINDOWS.into());
+    }
+    update
+        .install(installer)
+        .map_err(|error| format!("安装更新失败（{error}）"))?;
     // On Windows the updater exits after starting NSIS, which restarts the app.
     #[cfg(not(target_os = "windows"))]
     app.request_restart();

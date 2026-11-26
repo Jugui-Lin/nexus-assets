@@ -29,6 +29,8 @@ mod folder_links;
 mod baidu_cloud_client;
 #[path = "team_asset_messages.rs"]
 pub(crate) mod asset_messages;
+#[path = "team_browser_sites.rs"]
+pub(crate) mod browser_sites;
 #[path = "team_creative_subscriptions.rs"]
 pub(crate) mod creative_subscriptions;
 #[path = "team_organization_desktop.rs"]
@@ -1297,17 +1299,11 @@ impl Desktop {
         let mut local = as_asset(&asset, Some(&clean_path(&source)), false);
         let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
         if asset.kind != "texture" {
-            let dir = source.parent().ok_or("资产路径无效")?;
-            local.thumbnail = [
-                source.with_extension("jpg"),
-                source.with_extension("png"),
-                dir.join("preview.jpg"),
-                dir.join("preview.png"),
-            ]
-            .iter()
-            .filter_map(|p| std::fs::canonicalize(p).ok())
-            .find(|p| p.starts_with(&canonical_root) && p.is_file())
-            .map(|p| clean_path(&p));
+            local.thumbnail = nexus_core::asset_thumbnail_candidates(&source)
+                .into_iter()
+                .filter_map(|p| std::fs::canonicalize(p).ok())
+                .find(|p| p.starts_with(&canonical_root) && p.is_file())
+                .map(|p| clean_path(&p));
         }
         // Keep the established cache file naming and DCC job IDs portable.
         local.id = format!("team-{}", asset.id);

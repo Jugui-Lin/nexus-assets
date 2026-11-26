@@ -185,7 +185,8 @@ function normalizedWorks(items, {preserveOrder = false} = {}) {
 }
 
 export function initCreativeSubscriptions({api, native, icon, escape, openWeb, log, notify = () => {},
-  subscriptionScope = () => null, personalScope = () => 'personal', preferences = localStorage, whiteboardLinkDrop}) {
+  subscriptionScope = () => null, personalScope = () => 'personal', preferences = localStorage, whiteboardLinkDrop,
+  teamReferenceDrop}) {
   const get = id => document.getElementById(id);
   const section = get('creative-subscriptions');
   const overview = get('creator-overview');
@@ -267,7 +268,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
   const creatorMoveEasing = 'cubic-bezier(.2, .8, .2, 1)';
   const videoReferences = initCreativeVideoReferences({
     panel:get('creator-video-references'), preferences, describe:describeVideoReference, play:playWork, openWeb:openUrl,
-    icon, escape, notify, whiteboardLinkDrop,
+    icon, escape, notify, whiteboardLinkDrop, teamReferenceDrop, teamApi:native ? api : null,
     readMetadata: native ? async entry => {
       if (entry.platform === '哔哩哔哩') {
         const metadata = await api('creative_video_reference_metadata',{url:entry.url});
@@ -493,8 +494,9 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
   }
 
   async function syncTeam() {
+    const videos = videoReferences.syncTeam();
     const workspace = teamWorkspace;
-    if (!native || !workspace?.teamId || workspace.read || workspace.writing) return;
+    if (!native || !workspace?.teamId || workspace.read || workspace.writing) return videos;
     const read = {};
     workspace.read = read;
     const current = () => workspace === teamWorkspace && workspace.read === read;
@@ -516,6 +518,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
         render();
       }
     }
+    await videos;
   }
 
   function setWorkspace() {
@@ -529,7 +532,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     finishCreatorDrop();
     workspaceEpoch++;
     personalKey = nextPersonalKey;
-    videoReferences.reload();
+    videoReferences.reload(context);
     creatorOrder = readCreatorOrder();
     workLayout = readWorkLayout();
     updateWorkLayout();
@@ -1398,7 +1401,8 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     openUrl(url);
   });
   section.addEventListener('error', event => {
-    if (event.target.matches?.('.creator-avatar-image, .creator-work-image')) event.target.hidden = true;
+    if (event.target.matches?.('.creator-avatar-image, .creator-work-image') &&
+      !event.target.closest('.creator-reference-card')) event.target.hidden = true;
   }, true);
   for (const button of workViews) {
     button.addEventListener('click', () => setWorkLayout(button.dataset.workLayout));
@@ -1428,6 +1432,18 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
 
   return {
     addFromLink: source => showEditor(null, source),
+    async locateVideoReference(key, stillOpen, beforeOpen) {
+      setWorkspace();
+      const epoch = workspaceEpoch;
+      await videoReferences.syncTeam();
+      if (epoch !== workspaceEpoch || !stillOpen()) return;
+      if (!videoReferences.hasShared(key)) throw Error('这条视频引用已移除，或暂时无法同步。');
+      beforeOpen();
+      selected = null;
+      selectedWork = '';
+      render();
+      videoReferences.locate(key);
+    },
     captureLocation() {
       return {selected, selectedWork, creatorSearch:creatorSearch.value, platform:platform.value, workSearch:workSearch.value, overviewScroll};
     },

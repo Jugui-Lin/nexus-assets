@@ -552,6 +552,108 @@ test('team creator subscriptions persist across members and reject stale changes
   }
 });
 
+test('team video references and site navigation are shared across members and survive restart', {timeout: 25_000}, async () => {
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-team-navigation-test-'));
+  const database = path.join(scratch, 'db');
+  const cli = async (...args) => (await exec(binary, ['--data', database, ...args], {windowsHide:true})).stdout;
+  const videos = 'creative-video-references';
+  const sites = 'browser-sites';
+  let server;
+  try {
+    const first = credentials(await cli('init', '共享导航', '管理员'));
+    const second = credentials(await cli('member-add', '成员乙'));
+    let running = await startTeamServer(database);
+    server = running.server;
+    let request = teamRequest(running.address);
+    assert.equal((await request('GET', videos)).status, 401);
+    assert.equal((await request('GET', sites)).status, 401);
+    assert.deepEqual((await request('GET', videos, second)).json, {available:true,revision:0,references:[]});
+    assert.deepEqual((await request('GET', sites, second)).json, {available:true,revision:0,navigation:null});
+
+    const video = {
+      url:'https://www.bilibili.com/video/BV1cXVz67EaF/',
+      title:'景深效果',
+      coverUrl:'https://i0.hdslb.com/bfs/archive/sample.jpg',
+    };
+    const added = await request('PUT', videos, first, {reference:video,migration:true});
+    assert.equal(added.status, 200);
+    const [row] = added.json.references;
+    assert.deepEqual(row, {...video,key:row.key,revision:1});
+    assert.deepEqual((await request('GET', videos, second)).json, added.json);
+    const duplicate = {...video,url:'https://m.bilibili.com/video/BV1cXVz67EaF?from=share'};
+    assert.deepEqual((await request('PUT', videos, second, {reference:duplicate,migration:true})).json, added.json);
+    const updated = await request('PUT', videos, second, {reference:{...video,title:'扭曲的模糊景深'},revision:row.revision});
+    assert.equal(updated.status, 200);
+    assert.equal(updated.json.references[0].title, '扭曲的模糊景深');
+    assert.equal((await request('DELETE', videos, first, {url:video.url,revision:row.revision})).status, 409);
+    const removed = await request('DELETE', videos, first, {url:video.url,revision:updated.json.references[0].revision});
+    assert.deepEqual(removed.json, {available:true,revision:3,references:[]});
+    assert.deepEqual((await request('PUT', videos, second, {reference:duplicate,migration:true})).json, removed.json);
+    assert.equal((await request('PUT', videos, first, {reference:{url:'file:///C:/private'}})).status, 400);
+    const restored = await request('PUT', videos, second, {reference:video});
+    assert.equal(restored.status, 200);
+    assert.equal(restored.json.revision, 4);
+    const inbox = 'asset-messages?videoReferences=true';
+    const sendVideo = 'creative-video-reference-messages';
+    const locate = {recipientId:second.id,referenceKey:row.key};
+    assert.equal((await request('POST', sendVideo, null, locate)).status, 401);
+    assert.equal((await request('POST', sendVideo, first, {...locate,recipientId:first.id})).status, 400);
+    assert.equal((await request('POST', sendVideo, first, {...locate,referenceKey:'not-in-team'})).status, 404);
+    assert.deepEqual((await request('POST', sendVideo, first, locate)).json, {accepted:true});
+    assert.deepEqual((await request('POST', sendVideo, first, locate)).json, {accepted:true});
+    assert.deepEqual((await request('GET', 'asset-messages', second)).json.messages, []);
+    assert.deepEqual((await request('GET', inbox, first)).json.messages, []);
+    const received = (await request('GET', inbox, second)).json;
+    assert.equal(received.videoReferencesAvailable, true);
+    assert.equal(received.messages.length, 1);
+    const notice = received.messages[0];
+    assert.equal(notice.kind, 'creative-video-reference');
+    assert.deepEqual(notice.videoReference, {key:row.key,title:video.title});
+    assert.deepEqual((await request('DELETE', 'asset-messages/' + notice.id, first)).json, {removed:false});
+
+    const navigation = {
+      categories:['常见CG资产下载','视频'],
+      newSiteCategory:'常见CG资产下载',
+      sites:[
+        {id:'custom',name:'团队参考站',url:'https://example.com/reference',category:'常见CG资产下载'},
+        {id:'vimeo',name:'Vimeo',url:'https://vimeo.com/',category:'视频'},
+      ],
+    };
+    const initial = await request('PUT', sites, first, {revision:0,navigation});
+    assert.equal(initial.status, 200);
+    assert.equal(initial.json.revision, 1);
+    assert.deepEqual((await request('GET', sites, second)).json, initial.json);
+    const reordered = {...initial.json.navigation,categories:['视频','常见CG资产下载']};
+    const arranged = await request('PUT', sites, second, {revision:1,navigation:reordered});
+    assert.deepEqual(arranged.json, {available:true,revision:2,navigation:reordered});
+    assert.equal((await request('PUT', sites, first, {revision:1,navigation})).status, 409);
+    assert.equal((await request('PUT', sites, first, {revision:2,navigation:{
+      ...reordered,sites:[{...navigation.sites[0],url:'javascript:alert(1)'}],
+    }})).status, 400);
+
+    const other = {...video,url:'https://vimeo.com/123456789'};
+    const otherAdded = await request('PUT', videos, first, {reference:other});
+    const otherKey = otherAdded.json.references[0].key;
+    assert.deepEqual((await request('POST',sendVideo,first,{...locate,referenceKey:otherKey})).json, {accepted:true});
+    const otherRemoved = await request('DELETE', videos, first, {url:other.url,revision:otherAdded.json.references[0].revision});
+    await stopTeamServer(server);
+    running = await startTeamServer(database);
+    server = running.server;
+    request = teamRequest(running.address);
+    assert.deepEqual((await request('GET', sites, first)).json, arranged.json);
+    assert.deepEqual((await request('GET', videos, second)).json, otherRemoved.json);
+    assert.deepEqual((await request('PUT', videos, second, {reference:other,migration:true})).json, otherRemoved.json);
+    assert.deepEqual((await request('GET', inbox, second)).json, received);
+    assert.equal((await request('PUT', videos, second, {reference:other})).status, 200);
+    assert.deepEqual((await request('GET', inbox, second)).json, received);
+    assert.deepEqual((await request('DELETE', 'asset-messages/' + notice.id, second)).json, {removed:true});
+    assert.deepEqual((await request('GET', inbox, second)).json.messages, []);
+  } finally {
+    await stopTeamServer(server);
+    await fs.rm(scratch, {recursive:true, force:true});
+  }
+});
+
 test('team favorites and collections synchronize independent member edits', {timeout: 25_000}, async () => {
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-team-test-'));
   const database = path.join(scratch, 'db');

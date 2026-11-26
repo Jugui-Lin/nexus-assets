@@ -1,4 +1,4 @@
-import {initWhiteboard} from './whiteboard.js';
+import {initWhiteboard, personalBoardReferencesAsset} from './whiteboard.js';
 import {listWhiteboardImageCache, readWhiteboardImageCache, clearSyncedWhiteboardImageCache} from './whiteboard-images.js';
 
 const directoryKey = 'nexus-whiteboard-projects-v1:';
@@ -611,11 +611,12 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
 
   async function refreshProjects() {
     const target = scope;
-    if (!visible || activeProject || !target?.teamId || target.request || target.saving) return;
-    const request = {};
+    if (!visible || activeProject || !target?.teamId || target.saving) return;
+    if (target.request) return target.request.wait.catch(() => {});
+    const request = {wait:api('team_whiteboard_projects', {teamId:target.teamId})};
     target.request = request;
     try {
-      const snapshot = await api('team_whiteboard_projects', {teamId:target.teamId});
+      const snapshot = await request.wait;
       if (scope !== target || target.request !== request) return;
       if (!Array.isArray(snapshot?.projects)) throw Error('项目列表不可用');
       const projects = cleanProjects(snapshot.projects);
@@ -758,7 +759,17 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
     },
     showProjects,
     openProject,
+    async restoreProject(id) {
+      if (!scope?.projects.some(project => project.id === id)) await refreshProjects();
+      if (activeProject !== id) openProject(id,false);
+      return activeProject === id;
+    },
     captureProject() { return activeProject; },
+    findPersonalAssetReferences(key, assetId) {
+      if (scope?.key !== key || scope?.teamId) return [];
+      return scope.projects.filter(project => personalBoardReferencesAsset(
+        project.id === defaultProject.id ? key : JSON.stringify([key, project.id]), assetId));
+    },
     fileFolder() { return readFileFolder(scope?.teamId); },
     busyForUpdate() { return board.busyForUpdate(); },
     dropNativeImages(paths, position) { return Boolean(activeProject) && board.dropNativeImages(paths, position); },

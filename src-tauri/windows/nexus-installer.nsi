@@ -532,6 +532,8 @@ LangString choowHowToInstall 0 ""
 {{#each language_files}}
   !include "{{this}}"
 {{/each}}
+LangString nexusFolderRestoreFailed ${LANG_SIMPCHINESE} "无法恢复原来的文件夹打开方式。请在 Nexus 的「默认文件管理器」设置中恢复后重试卸载。"
+LangString nexusFolderRestoreFailed ${LANG_ENGLISH} "The previous folder handler could not be restored. Restore it in the Default File Manager settings in Nexus and try uninstalling again."
 
 Function .onInit
   ${GetOptions} $CMDLINE "/P" $PassiveMode
@@ -851,6 +853,20 @@ Section Uninstall
   !endif
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+
+  ; Restore the current user's folders before a removal, while the helper still exists.
+  ${If} $UpdateMode <> 1
+  ${AndIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    ClearErrors
+    ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --restore-system-folders' $0
+    ${If} ${Errors}
+    ${OrIf} $0 <> 0
+      DetailPrint "$(nexusFolderRestoreFailed)"
+      MessageBox MB_OK|MB_ICONSTOP "$(nexusFolderRestoreFailed)" /SD IDOK
+      SetErrorLevel 2
+      Abort
+    ${EndIf}
+  ${EndIf}
 
   ; Delete the app directory and its content from disk
   ; Copy main executable

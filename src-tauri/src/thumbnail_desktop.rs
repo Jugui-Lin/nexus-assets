@@ -11,6 +11,10 @@ use std::{
 };
 use tauri::Manager;
 
+mod explorer;
+#[cfg(windows)]
+mod file_icon;
+
 const MAX_BATCH: usize = 64;
 const MAX_RENDERED_IMAGE_BYTES: usize = 6 * 1024 * 1024;
 static IMAGE_PREVIEWS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
@@ -25,6 +29,38 @@ pub(super) fn checked_size(size: Option<u32>) -> Result<u32, String> {
         return Err("缩略图尺寸必须在 128 到 1024 像素之间".into());
     }
     Ok(size)
+}
+
+#[tauri::command]
+pub(super) async fn local_explorer_thumbnail(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    size: u32,
+) -> Result<Option<String>, String> {
+    explorer::read(state.inner().clone(), path, checked_size(Some(size))?).await
+}
+
+#[tauri::command]
+pub(super) async fn local_explorer_folder_thumbnail(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    size: u32,
+) -> Result<Option<String>, String> {
+    explorer::read_folder(state.inner().clone(), path, checked_size(Some(size))?).await
+}
+
+#[tauri::command]
+pub(super) async fn local_explorer_file_icon(
+    path: String,
+    size: u32,
+) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    return file_icon::read(path, size).await;
+    #[cfg(not(windows))]
+    {
+        let _ = (path, size);
+        Ok(None)
+    }
 }
 
 pub(super) struct PreviewSource {
@@ -106,10 +142,15 @@ impl PreviewSource {
         } else {
             let catalog = lock_db(state)?;
             let mut asset = catalog.asset(id)?;
-            asset_cover::apply_cover(&mut asset, &catalog.dir);
+            let data_dir = catalog.dir.clone();
+            drop(catalog);
+            if !asset.demo && nexus_core::is_houdini_scene_extension(&asset.ext) {
+                asset.thumbnail = nexus_core::asset_thumbnail(Path::new(&asset.path));
+            }
+            asset_cover::apply_cover(&mut asset, &data_dir);
             Ok(Self {
                 asset,
-                data_dir: catalog.dir.clone(),
+                data_dir,
                 team: None,
                 index_root: state.root.clone(),
             })

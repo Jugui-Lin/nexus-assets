@@ -1,4 +1,10 @@
-export function initTeamAssetMessages({api, context, asset, jump, formatDate, notify, onReceive, onPokeReceive, onAvailabilityChange, onError, openDccUpdates}) {
+function videoReference(message) {
+  const reference = message.kind === 'creative-video-reference' && message.videoReference;
+  return typeof reference?.key === 'string' && reference.key ? reference : null;
+}
+
+export function initTeamAssetMessages({api, context, asset, jump, jumpVideoReference, formatDate, notify,
+  onReceive, onPokeReceive, onAvailabilityChange, onError, openDccUpdates}) {
   const button = document.querySelector('#team-asset-messages');
   const count = document.querySelector('#team-asset-message-count');
   const dialog = document.querySelector('#team-asset-messages-dialog');
@@ -14,6 +20,7 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
   let dccUpdates = [];
   let available = null;
   let pokesAvailable = false;
+  let videoReferencesAvailable = false;
   let revision = 0;
   let pending = null;
   let action = null;
@@ -42,7 +49,8 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
     const cards = messages.map(message => ({
       id:message.id, sender:message.senderName, created:formatDate(message.created),
       poke:message.kind === 'poke',
-      entries:message.assetIds.map((id, index) => ({id, name:asset(id)?.name || `定位第 ${index + 1} 项资产`})),
+      videoReference:videoReference(message),
+      entries:(message.assetIds || []).map((id, index) => ({id, name:asset(id)?.name || `定位第 ${index + 1} 项资产`})),
     }));
     const signature = JSON.stringify([dccUpdates, cards]);
     if (displayed !== signature) {
@@ -83,6 +91,17 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
           open.textContent = entry.name;
           return open;
         }));
+        if (card.videoReference) {
+          const open = document.createElement('button');
+          open.type = 'button';
+          open.className = 'nav-item';
+          open.dataset.openNoticeVideoReference = card.videoReference.key;
+          const name = card.videoReference.title || '视频引用';
+          open.title = '定位视频 · ' + name;
+          open.setAttribute('aria-label',open.title);
+          open.textContent = name;
+          row.append(open);
+        }
         if (card.poke) {
           const body = document.createElement('p');
           body.className = 'team-asset-notice-poke';
@@ -109,15 +128,18 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
       const supported = result?.available !== false && Array.isArray(result?.messages);
       const wasChecked = available !== null;
       const supportsPokes = supported && result.pokesAvailable === true;
-      if (available !== supported || pokesAvailable !== supportsPokes) {
+      const supportsVideoReferences = supported && result.videoReferencesAvailable === true;
+      if (available !== supported || pokesAvailable !== supportsPokes || videoReferencesAvailable !== supportsVideoReferences) {
         available = supported;
         pokesAvailable = supportsPokes;
+        videoReferencesAvailable = supportsVideoReferences;
         onAvailabilityChange();
       }
       const previousIds = new Set(messages.map(message => message.id));
       // The server orders the inbox oldest first.
       messages = (supported ? result.messages : [])
-        .filter(message => Array.isArray(message.assetIds) && (message.assetIds.length || message.kind === 'poke'))
+        .filter(message => message && (message.kind === 'poke' || videoReference(message) ||
+          (Array.isArray(message.assetIds) && message.assetIds.length)))
         .reverse();
       render();
       if (wasChecked) {
@@ -128,7 +150,8 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
         if (received.length === 1 && pokes.length) {
           notify(`「${pokes[0].senderName}」拍了拍你`);
         } else if (received.length === 1) {
-          notify(`收到「${received[0].senderName}」分享的素材 · 点击右上角消息定位`);
+          const shared = videoReference(received[0]) ? '视频' : '素材';
+          notify(`收到「${received[0].senderName}」分享的${shared} · 点击右上角消息定位`);
         } else if (received.length > 1) {
           notify(`收到 ${received.length} 条团队消息`);
         }
@@ -148,6 +171,17 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
     if (ids.length > 20) throw Error('一次最多分享 20 项资产');
     await api('team_send_asset_message', {teamId:scope.teamId, recipientId:recipient.id, assetIds:ids});
     if (current(scope)) notify(`已向「${recipient.name}」分享 ${ids.length} 项资产`);
+  }
+
+  async function sendVideoReference(recipient, referenceKey) {
+    const scope = context();
+    if (!scope || !videoReferencesAvailable) throw Error('团队服务暂不可发送视频定位');
+    if (typeof referenceKey !== 'string' || !referenceKey) throw Error('视频同步到团队后即可分享');
+    const result = await api('team_send_video_reference_message', {
+      teamId:scope.teamId, recipientId:recipient.id, referenceKey,
+    });
+    if (result?.accepted !== true) throw Error('团队服务未确认视频定位消息');
+    if (current(scope)) notify(`已向「${recipient.name}」发送视频定位`);
   }
 
   async function poke(recipient) {
@@ -236,7 +270,7 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
     }
     const scope = context();
     if (!scope) return;
-    const {openNoticeAsset, dismissNotice} = control.dataset;
+    const {openNoticeAsset, openNoticeVideoReference, dismissNotice} = control.dataset;
     const operation = {};
     action = operation;
     status.textContent = '';
@@ -244,6 +278,8 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
     try {
       if (openNoticeAsset) {
         await jump(openNoticeAsset, () => current(scope) && dialog.open, () => dialog.close());
+      } else if (openNoticeVideoReference) {
+        await jumpVideoReference(openNoticeVideoReference, () => current(scope) && dialog.open, () => dialog.close());
       } else if (dismissNotice) {
         await api('team_dismiss_asset_message', {teamId:scope.teamId, messageId:dismissNotice});
         if (!current(scope)) return;
@@ -266,7 +302,8 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
   return {
     enabled: () => available === true,
     pokesEnabled: () => pokesAvailable,
-    refresh, render, send, poke,
+    videoReferencesEnabled: () => videoReferencesAvailable,
+    refresh, render, send, sendVideoReference, poke,
     setDccUpdates(updates) {
       dccUpdates = updates;
       render();
@@ -274,6 +311,7 @@ export function initTeamAssetMessages({api, context, asset, jump, formatDate, no
     reset() {
       available = null;
       pokesAvailable = false;
+      videoReferencesAvailable = false;
       pending = action = null;
       clearDraft = null;
       revision++;
