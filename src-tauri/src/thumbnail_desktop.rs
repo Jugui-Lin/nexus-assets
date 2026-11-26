@@ -7,6 +7,8 @@ use nexus_core::{thumbnail_cache, thumbnail_cache::ThumbnailState, Asset};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
+    fs::{self, File},
+    io::{Cursor, Read},
     path::{Path, PathBuf},
 };
 use tauri::Manager;
@@ -17,6 +19,9 @@ mod file_icon;
 
 const MAX_BATCH: usize = 64;
 const MAX_RENDERED_IMAGE_BYTES: usize = 6 * 1024 * 1024;
+const MAX_ORIGINAL_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
+const MAX_ORIGINAL_IMAGE_PIXELS: u64 = 40 * 1024 * 1024;
+const MAX_ORIGINAL_IMAGE_EDGE: u32 = 16_384;
 static IMAGE_PREVIEWS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) async fn image_slot() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
@@ -38,6 +43,15 @@ pub(super) async fn local_explorer_thumbnail(
     size: u32,
 ) -> Result<Option<String>, String> {
     explorer::read(state.inner().clone(), path, checked_size(Some(size))?).await
+}
+
+#[tauri::command]
+pub(super) async fn render_sequence_frame_preview(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    size: u32,
+) -> Result<Option<String>, String> {
+    explorer::read_render_frame(state.inner().clone(), path, checked_size(Some(size))?).await
 }
 
 #[tauri::command]
@@ -68,6 +82,52 @@ pub(super) struct PreviewSource {
     pub data_dir: PathBuf,
     team: Option<(Option<PathBuf>, String)>,
     index_root: PathBuf,
+}
+
+type OriginalImage = (String, Vec<u8>, (u32, u32));
+
+pub(super) fn read_original_pixels(asset: &Asset) -> Result<Option<OriginalImage>, String> {
+    use image::ImageFormat;
+
+    if asset.kind != "texture" {
+        return Ok(None);
+    }
+    let path = Path::new(&asset.path);
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    let format = match ext.to_ascii_lowercase().as_str() {
+        "png" => ImageFormat::Png,
+        "jpg" | "jpeg" | "jfif" => ImageFormat::Jpeg,
+        "webp" => ImageFormat::WebP,
+        "bmp" => ImageFormat::Bmp,
+        _ => return Ok(None),
+    };
+    let metadata = fs::metadata(path).map_err(|error| format!("无法访问原图（{error}）"))?;
+    if !metadata.is_file() {
+        return Err("原图路径不是文件".into());
+    }
+    let too_large = || "原图超过 24 MiB，已保留缩放预览".to_owned();
+    if metadata.len() > MAX_ORIGINAL_IMAGE_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)
+        .and_then(|file| file.take(MAX_ORIGINAL_IMAGE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("无法读取原图（{error}）"))?;
+    if bytes.len() as u64 > MAX_ORIGINAL_IMAGE_BYTES {
+        return Err(too_large());
+    }
+    if image::guess_format(&bytes).ok() != Some(format) {
+        return Err("原图内容与格式不符，已保留缩放预览".into());
+    }
+    let dimensions = image::ImageReader::with_format(Cursor::new(&bytes), format)
+        .into_dimensions()
+        .map_err(|error| format!("无法读取原图像素尺寸（{error}）"))?;
+    let (width, height) = dimensions;
+    if width == 0 || height == 0 || width.max(height) > MAX_ORIGINAL_IMAGE_EDGE ||
+        u64::from(width) * u64::from(height) > MAX_ORIGINAL_IMAGE_PIXELS {
+        return Err("原图像素尺寸超过 100% 预览范围，已保留缩放预览".into());
+    }
+    Ok(Some((format.to_mime_type().to_owned(), bytes, dimensions)))
 }
 
 pub(super) fn read_indexed_thumbnail(
@@ -460,6 +520,37 @@ mod tests {
             team: Some((Some(mount.to_owned()), "fixture-library".into())),
             index_root: root.to_owned(),
         }
+    }
+
+    #[test]
+    fn original_pixels_preserve_source_bytes_and_dims() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("texture.png");
+        RgbImage::new(1920, 42).save(&path).unwrap();
+        let preview = mounted_fixture(scratch.path(), scratch.path(), &path);
+
+        let (mime, bytes, dimensions) = read_original_pixels(&preview.asset).unwrap().unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(dimensions, (1920, 42));
+        assert_eq!(bytes, fs::read(&path).unwrap());
+        assert_eq!(read_original_pixels(&preview.asset).unwrap().unwrap().1, bytes);
+    }
+
+    #[test]
+    fn original_pixels_reject_mismatched_and_oversize_sources() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("texture.png");
+        RgbImage::new(24, 16).save(&path).unwrap();
+        let preview = mounted_fixture(scratch.path(), scratch.path(), &path);
+
+        RgbImage::new(MAX_ORIGINAL_IMAGE_EDGE + 1, 1).save(&path).unwrap();
+        assert!(read_original_pixels(&preview.asset).unwrap_err().contains("像素尺寸"));
+        fs::write(&path, b"not a PNG").unwrap();
+        assert!(read_original_pixels(&preview.asset).unwrap_err().contains("格式不符"));
+        let file = File::options().write(true).open(&path).unwrap();
+        file.set_len(MAX_ORIGINAL_IMAGE_BYTES + 1).unwrap();
+        drop(file);
+        assert!(read_original_pixels(&preview.asset).unwrap_err().contains("24 MiB"));
     }
 
     #[test]

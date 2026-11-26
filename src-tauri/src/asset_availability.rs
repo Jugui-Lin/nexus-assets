@@ -1,5 +1,5 @@
 use crate::{drop_ingest::library_at_folder, lock_db, AppState};
-use nexus_core::{asset_thumbnail, clean_path, now, Asset, Catalog};
+use nexus_core::{asset_thumbnail, clean_path, now, Asset, Catalog, FileFingerprint};
 use rusqlite::{params, ErrorCode, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use serde_json::json;
@@ -16,6 +16,12 @@ use tauri::{State, WebviewWindow};
 pub(crate) struct AvailabilityReport {
     missing: Vec<String>,
     unavailable: Vec<String>,
+    #[serde(skip_serializing_if = "is_zero")]
+    fingerprints: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 pub(crate) struct CheckItem {
@@ -155,6 +161,7 @@ struct Replacement {
     size: u64,
     modified: u64,
     thumbnail: Option<String>,
+    fingerprint: Option<FileFingerprint>,
 }
 
 fn matches_relink_extension(path: &Path, extension: &str) -> bool {
@@ -195,6 +202,7 @@ fn prepare_replacement(file: &Path, previous: &Asset) -> Result<Replacement, Str
         modified,
         thumbnail,
         size: metadata.len(),
+        fingerprint: None,
     })
 }
 
@@ -210,6 +218,13 @@ fn relink_file(
     let current = catalog.asset(&previous.id)?;
     if current.path != previous.path {
         return Err("资产路径已更改，请刷新后重试".into());
+    }
+    if let Some(fingerprint) = replacement.fingerprint {
+        if !fingerprint.still_matches(&replacement.path)
+            || recorded_fingerprint(catalog, &current)? != Some(fingerprint.digest)
+        {
+            return Err("候选文件或原有内容校验已变化，请重新查找".into());
+        }
     }
     let library_id = library_at_folder(catalog, folder)?.unwrap_or_else(|| "loose".to_owned());
     let file_data = json!({"size": replacement.size, "modified": replacement.modified,
@@ -231,6 +246,9 @@ fn relink_file(
         })?;
     catalog.record_indexed_asset_directory(&replacement.path)?;
     let updated = catalog.asset(&previous.id)?;
+    if let Some(fingerprint) = replacement.fingerprint {
+        store_fingerprint(catalog, &updated, fingerprint)?;
+    }
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(updated)
 }
@@ -240,11 +258,17 @@ const RELINK_DIRECTORY_LIMIT: usize = 40;
 const RELINK_DEPTH_LIMIT: usize = 3;
 const RELINK_RESULT_LIMIT: usize = 12;
 const RELINK_TIME_LIMIT: Duration = Duration::from_millis(450);
+pub(crate) const FINGERPRINT_FILE_LIMIT: u64 = 64 * 1024 * 1024;
+const FINGERPRINT_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+const FINGERPRINT_COUNT_LIMIT: usize = 8;
+const FINGERPRINT_SEARCH_COUNT_LIMIT: usize = 24;
 
 #[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RelinkSuggestions {
     candidates: Vec<RelinkCandidate>,
     truncated: bool,
+    has_content_fingerprint: bool,
 }
 
 #[derive(Serialize)]
@@ -258,7 +282,7 @@ struct RelinkCandidate {
 }
 
 #[cfg(windows)]
-fn fixed_relink_drive(path: &Path) -> bool {
+pub(crate) fn fixed_relink_drive(path: &Path) -> bool {
     use std::path::{Component, Prefix};
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return false;
@@ -271,11 +295,11 @@ fn fixed_relink_drive(path: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
-fn fixed_relink_drive(_path: &Path) -> bool {
+pub(crate) fn fixed_relink_drive(_path: &Path) -> bool {
     false
 }
 
-fn real_relink_directory(path: &Path) -> Result<bool, String> {
+pub(crate) fn real_relink_directory(path: &Path) -> Result<bool, String> {
     let ancestors: Vec<_> = path.ancestors().collect();
     for directory in ancestors.into_iter().rev() {
         let metadata = match fs::symlink_metadata(directory) {
@@ -427,8 +451,136 @@ fn collect_relink_candidates(
     Ok(result)
 }
 
+fn recorded_fingerprint(catalog: &Catalog, asset: &Asset) -> Result<Option<[u8; 32]>, String> {
+    let Some(modified) = asset.modified.as_u64() else {
+        return Ok(None);
+    };
+    let result: Option<Vec<u8>> = catalog
+        .conn
+        .query_row(
+            "SELECT digest FROM asset_relink_fingerprints
+             WHERE asset_id=?1 AND path=?2 AND size=?3 AND modified=?4",
+            params![asset.id, asset.path, asset.size, modified],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(result.and_then(|row| row.try_into().ok()))
+}
+
+fn store_fingerprint(
+    catalog: &Catalog,
+    asset: &Asset,
+    fingerprint: FileFingerprint,
+) -> Result<(), String> {
+    let Some(modified) = asset.modified.as_u64() else {
+        return Ok(());
+    };
+    catalog
+        .conn
+        .execute(
+            "INSERT INTO asset_relink_fingerprints (asset_id,path,size,modified,digest)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(asset_id) DO UPDATE SET path=excluded.path,size=excluded.size,
+                modified=excluded.modified,digest=excluded.digest",
+            params![
+                asset.id,
+                asset.path,
+                asset.size,
+                modified,
+                fingerprint.digest.as_slice()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn collect_source_fingerprints(state: &AppState, items: &[CheckItem]) -> Result<usize, String> {
+    let (catalog_dir, candidates) = {
+        let catalog = lock_db(state)?;
+        let candidates = items
+            .iter()
+            .take(250)
+            .filter_map(|item| {
+                let (path, _) = item.file.as_ref()?;
+                if item.restrict_to_anchor || !fixed_relink_drive(path) {
+                    return None;
+                }
+                let asset = catalog.asset(&item.id).ok()?;
+                (!asset.demo
+                    && asset.size > 0
+                    && asset.size <= FINGERPRINT_FILE_LIMIT
+                    && recorded_fingerprint(&catalog, &asset)
+                        .ok()
+                        .flatten()
+                        .is_none())
+                .then_some(asset)
+            })
+            .take(FINGERPRINT_COUNT_LIMIT)
+            .collect::<Vec<_>>();
+        (catalog.dir.clone(), candidates)
+    };
+    let mut remaining = FINGERPRINT_TOTAL_BYTES;
+    let mut verified = Vec::new();
+    for asset in candidates {
+        if asset.size > remaining {
+            continue;
+        }
+        let path = Path::new(&asset.path);
+        if !path
+            .parent()
+            .is_some_and(|parent| real_relink_directory(parent).unwrap_or(false))
+        {
+            continue;
+        }
+        let stamp = fs::symlink_metadata(path)
+            .ok()
+            .and_then(|info| info.modified().ok())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|time| time.as_secs());
+        if stamp.is_none() || stamp != asset.modified.as_u64() {
+            continue;
+        }
+        remaining -= asset.size;
+        let Ok(fingerprint) = FileFingerprint::read(path, asset.size) else {
+            continue;
+        };
+        // A replacement between the initial check and hashing must not label old content.
+        if !fingerprint.still_matches(path)
+            || fs::metadata(path)
+                .and_then(|info| info.modified())
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|time| time.as_secs())
+                != stamp
+        {
+            continue;
+        }
+        verified.push((asset, fingerprint));
+    }
+    let catalog = lock_db(state)?;
+    if catalog.dir != catalog_dir {
+        return Ok(0);
+    }
+    let mut saved = 0;
+    for (previous, fingerprint) in verified {
+        let Ok(current) = catalog.asset(&previous.id) else {
+            continue;
+        };
+        if current.path == previous.path
+            && current.size == previous.size
+            && current.modified == previous.modified
+            && fingerprint.still_matches(Path::new(&current.path))
+        {
+            store_fingerprint(&catalog, &current, fingerprint)?;
+            saved += 1;
+        }
+    }
+    Ok(saved)
+}
+
 fn suggest_relinks(state: &AppState, id: &str) -> Result<RelinkSuggestions, String> {
-    let (previous, root, max_depth, catalog_dir) = {
+    let (previous, root, max_depth, catalog_dir, source_fingerprint) = {
         let catalog = lock_db(state)?;
         let previous = catalog.asset(id)?;
         if previous.demo
@@ -457,9 +609,11 @@ fn suggest_relinks(state: &AppState, id: &str) -> Result<RelinkSuggestions, Stri
             ),
             None => return Err("当前个人库已无法确认此资产的原目录".into()),
         };
-        (previous, root, max_depth, catalog.dir.clone())
+        let fingerprint = recorded_fingerprint(&catalog, &previous)?;
+        (previous, root, max_depth, catalog.dir.clone(), fingerprint)
     };
     let mut result = collect_relink_candidates(&previous, &root, max_depth)?;
+    result.has_content_fingerprint = source_fingerprint.is_some();
     let catalog = lock_db(state)?;
     let current = catalog.asset(id)?;
     if catalog.dir != catalog_dir
@@ -481,13 +635,49 @@ fn suggest_relinks(state: &AppState, id: &str) -> Result<RelinkSuggestions, Stri
         if already_indexed {
             continue;
         }
-        if available.len() >= RELINK_RESULT_LIMIT {
+        let limit = if source_fingerprint.is_some() {
+            FINGERPRINT_SEARCH_COUNT_LIMIT
+        } else {
+            RELINK_RESULT_LIMIT
+        };
+        if available.len() >= limit {
             result.truncated = true;
             break;
         }
         available.push(candidate);
     }
-    result.candidates = available;
+    drop(indexed);
+    drop(catalog);
+    if let Some(expected) = source_fingerprint {
+        let mut verified = Vec::new();
+        let mut remaining = FINGERPRINT_TOTAL_BYTES;
+        for mut candidate in available {
+            if verified.len() >= RELINK_RESULT_LIMIT || previous.size > remaining {
+                result.truncated = true;
+                break;
+            }
+            let path = Path::new(&candidate.path);
+            if !path
+                .parent()
+                .is_some_and(|parent| real_relink_directory(parent).unwrap_or(false))
+            {
+                result.truncated = true;
+                continue;
+            }
+            remaining -= previous.size;
+            match FileFingerprint::read(path, previous.size) {
+                Ok(fingerprint) if fingerprint.digest == expected => {
+                    candidate.match_factors.insert(0, "SHA-256 内容校验一致");
+                    verified.push(candidate);
+                }
+                Ok(_) => {}
+                Err(_) => result.truncated = true,
+            }
+        }
+        result.candidates = verified;
+    } else {
+        result.candidates = available;
+    }
     Ok(result)
 }
 
@@ -510,9 +700,19 @@ fn prepare_confirmed_relink(
     if crate::workspace_folder_move::link_or_reparse(&metadata) {
         return Err("候选文件已被链接替换，请重新查找".into());
     }
-    let replacement = prepare_replacement(candidate, previous)?;
+    let mut replacement = prepare_replacement(candidate, previous)?;
     if clean_path(&replacement.path) != path || replacement.size != previous.size {
         return Err("候选文件已变化，请重新查找".into());
+    }
+    if suggestions.has_content_fingerprint {
+        let expected = recorded_fingerprint(&*lock_db(state)?, previous)?
+            .ok_or("原有内容校验已变化，请重新查找")?;
+        let fingerprint = FileFingerprint::read(candidate, previous.size)
+            .map_err(|error| format!("无法再次校验候选文件（{error}）"))?;
+        if fingerprint.digest != expected {
+            return Err("候选文件的内容已变化，请重新查找".into());
+        }
+        replacement.fingerprint = Some(fingerprint);
     }
     Ok(replacement)
 }
@@ -535,6 +735,7 @@ pub(crate) async fn suggest_asset_relinks(
 pub(crate) async fn check_asset_files(
     state: State<'_, AppState>,
     ids: Vec<String>,
+    record_content: Option<bool>,
 ) -> Result<AvailabilityReport, String> {
     if ids.iter().any(|id| id.starts_with("team:")) {
         return Err("文件检查适用于个人资产库".into());
@@ -542,7 +743,14 @@ pub(crate) async fn check_asset_files(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let items = check_items(&*lock_db(&state)?, ids)?;
-        Ok(check_paths(items))
+        let fingerprints = if record_content.unwrap_or(false) {
+            collect_source_fingerprints(&state, &items).unwrap_or(0)
+        } else {
+            0
+        };
+        let mut result = check_paths(items);
+        result.fingerprints = fingerprints;
+        Ok(result)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -813,5 +1021,36 @@ mod tests {
         let candidate = &result.candidates[0].path;
         fs::write(candidate, b"new contents and size").unwrap();
         assert!(prepare_confirmed_relink(&state, &original, candidate).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relinks_only_matching_bytes_when_original_checksum_was_recorded() {
+        let (_scratch, state, root, original) = suggestion_fixture(true);
+        let items = check_items(&*lock_db(&state).unwrap(), vec![original.id.clone()]).unwrap();
+        assert_eq!(collect_source_fingerprints(&state, &items).unwrap(), 1);
+        assert_eq!(collect_source_fingerprints(&state, &items).unwrap(), 0);
+        let moved = root.join("换了名字.obj");
+        fs::rename(&original.path, &moved).unwrap();
+        let impostor = root.join("同样大小.obj");
+        fs::write(&impostor, b"v 1 1 1\n").unwrap();
+
+        let result = suggest_relinks(&state, &original.id).unwrap();
+        assert!(result.has_content_fingerprint);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].path, clean_path(&moved));
+        assert_eq!(
+            result.candidates[0].match_factors[0],
+            "SHA-256 内容校验一致"
+        );
+        assert!(prepare_confirmed_relink(&state, &original, &clean_path(&impostor)).is_err());
+
+        let replacement = prepare_confirmed_relink(&state, &original, &clean_path(&moved)).unwrap();
+        let catalog = lock_db(&state).unwrap();
+        let expected = recorded_fingerprint(&catalog, &original).unwrap();
+        let changed = relink_file(&catalog, &original, replacement).unwrap();
+        assert_eq!(changed.id, original.id);
+        assert_eq!(changed.path, clean_path(&moved));
+        assert_eq!(recorded_fingerprint(&catalog, &changed).unwrap(), expected);
     }
 }

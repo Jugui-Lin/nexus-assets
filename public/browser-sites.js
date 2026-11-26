@@ -249,11 +249,12 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
   dialog.setAttribute('aria-labelledby', 'browser-site-dialog-title');
   dialog.innerHTML = `<form id="browser-site-form">
     <header><h2 id="browser-site-dialog-title">编辑网站</h2><button id="browser-site-close" type="button" aria-label="关闭">×</button></header>
-    <label for="browser-site-url">网站地址</label><input id="browser-site-url" type="text" required inputmode="url" maxlength="2048" autocomplete="off" spellcheck="false">
+    <label for="browser-site-url">入口地址</label>
+    <div class="browser-site-entry-row"><input id="browser-site-url" type="text" required inputmode="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="首页、案例库或下载页的网址"><button id="browser-site-test-entry" type="button">试开入口</button></div>
     <label for="browser-site-name">网站名称</label>
     <div class="browser-site-name-row"><span id="browser-site-icon" class="browser-site-mark" aria-hidden="true"></span><input id="browser-site-name" type="text" maxlength="120" placeholder="留空使用网站名称" autocomplete="off"></div>
     <p id="browser-site-lookup-status" role="status"></p>
-    <label for="browser-site-description">简介</label><textarea id="browser-site-description" rows="2" maxlength="260" placeholder="留空使用网站简介"></textarea>
+    <label for="browser-site-description">用途或简介</label><textarea id="browser-site-description" rows="2" maxlength="260" placeholder="例如产品案例、素材下载。留空时使用网站简介"></textarea>
     <label for="browser-site-category">分类</label><input id="browser-site-category" type="text" required list="browser-site-category-list" maxlength="40" autocomplete="off">
     <datalist id="browser-site-category-list"></datalist>
     <p id="browser-site-form-status" role="alert"></p>
@@ -263,6 +264,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
   document.body.append(dialog);
   const nameField = get('browser-site-name');
   const urlField = get('browser-site-url');
+  const testEntry = get('browser-site-test-entry');
   const descriptionField = get('browser-site-description');
   const categoryField = get('browser-site-category');
   const feedback = get('browser-site-form-status');
@@ -385,6 +387,8 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
 
   function renderEditorMetadata() {
     const address = safeAddress(urlField.value, true);
+    testEntry.disabled = !address;
+    testEntry.title = address?.href || '';
     const item = sites.find(item => item.id === editing);
     const info = address && metadata.get(address.href);
     const unchanged = address?.href === item?.url;
@@ -673,6 +677,10 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
   });
   entry.addEventListener('input', () => showEntryStatus());
   urlField.addEventListener('input', addressChanged);
+  testEntry.addEventListener('click', () => {
+    const address = safeAddress(urlField.value, true);
+    if (address) navigate(address.href);
+  });
   nameField.addEventListener('input', () => {
     automaticName = !nameField.value.trim();
     if (automaticName) return;

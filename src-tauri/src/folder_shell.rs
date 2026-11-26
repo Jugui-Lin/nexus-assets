@@ -7,6 +7,8 @@ pub(crate) struct FolderShellStatus {
     enabled: bool,
     can_enable: bool,
     can_restore: bool,
+    current_handler: Option<String>,
+    previous_handler: Option<String>,
     detail: String,
 }
 
@@ -47,6 +49,8 @@ mod operation {
             enabled: false,
             can_enable: false,
             can_restore: false,
+            current_handler: None,
+            previous_handler: None,
             detail: "此设置适用于 Windows。".into(),
         })
     }
@@ -362,8 +366,33 @@ mod operation {
         WinRegistry(HKEY_CLASSES_ROOT).exists(&format!(r"Folder\shell\{VERB}"))
     }
 
+    fn display_handler(value: Option<&Value>) -> Option<String> {
+        let value = value.and_then(Value::as_text)?;
+        let name = value.trim();
+        if name.eq_ignore_ascii_case(VERB) {
+            Some("Nexus Assets".into())
+        } else if name.is_empty()
+            || name.eq_ignore_ascii_case("none")
+            || name.eq_ignore_ascii_case("open")
+        {
+            Some("Windows 默认打开方式".into())
+        } else {
+            Some(name.chars().take(160).collect())
+        }
+    }
+
     fn read_status(registry: &impl Registry) -> Result<FolderShellStatus, String> {
         let saved = journal(registry)?;
+        let merged = WinRegistry(HKEY_CLASSES_ROOT)
+            .value(r"Folder\shell", "")
+            .ok()
+            .flatten();
+        let current_handler =
+            display_handler(merged.as_ref()).or_else(|| Some("Windows 默认打开方式".into()));
+        let previous_handler = saved.as_ref().map(|saved| {
+            display_handler(saved.previous.default.as_ref())
+                .unwrap_or_else(|| "使用系统关联（接管前没有单独指定）".into())
+        });
         let enabled = if let Some(saved) = &saved {
             our_default(registry.value(SHELL_KEY, "")?.as_ref()) && owns(registry, &saved.command)?
         } else {
@@ -387,6 +416,8 @@ mod operation {
             enabled,
             can_enable: installed && saved.is_none() && !collision,
             can_restore: saved.is_some(),
+            current_handler,
+            previous_handler,
             detail: detail.into(),
         })
     }

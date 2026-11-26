@@ -20,6 +20,7 @@ use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
 mod asset_availability;
+mod asset_catalog_export;
 mod asset_cover;
 mod asset_files;
 mod asset_versions;
@@ -31,10 +32,14 @@ mod browser_capture_import;
 mod browser_extension_install;
 mod asset_ai;
 mod c4d_import_preferences;
+mod c4d_material_sets;
 mod cloud_mounts;
 mod collection_desktop;
 mod drop_ingest;
+mod duplicate_review;
+mod exr_channel_desktop;
 mod folder_browser;
+mod format_help;
 mod folder_deletion;
 mod folder_shell;
 mod library_visibility;
@@ -44,12 +49,15 @@ mod local_explorer_clipboard;
 mod local_explorer_details;
 mod local_explorer_drop;
 mod local_explorer_new;
+mod local_explorer_paste;
 mod mesh_preview;
 mod native_drag;
 mod nexus_updater;
 mod personal_tags;
 mod placement;
+mod project_cleanup;
 mod project_dependencies;
+mod render_sequences;
 mod subscription_feed;
 mod subscription_open;
 mod team_avatar_picker;
@@ -58,10 +66,14 @@ mod team_desktop;
 mod team_host;
 mod team_import;
 mod team_nas;
+mod team_network_paths;
 mod team_update_version;
 mod thumbnail_desktop;
 mod workspace_asset_deletion;
 mod workspace_data;
+mod catalog_health;
+mod delivery_template;
+mod shot_delivery;
 mod workspace_files;
 mod workspace_folder_move;
 mod workspace_windows;
@@ -239,6 +251,8 @@ async fn pick_folder(purpose: Option<String>) -> Result<Option<String>, String> 
         let title = match purpose.as_deref() {
             Some("c4d-project") => "选择 Cinema 4D 工程的输出目录",
             Some("c4d-cache") => "选择 Cinema 4D 导入缓存位置",
+            Some("inventory-root") => "选择清单使用的项目根目录",
+            Some("delivery-template") => "选择交付目录的上级文件夹",
             _ => "选择资产文件夹（只建立索引，不移动原文件）",
         };
         rfd::FileDialog::new()
@@ -447,6 +461,15 @@ async fn read_preview(
             return Ok(preview_image_payload(thumbnail_desktop::read_shared_thumbnail(&state, &app, &id, size)?));
         }
         let source = thumbnail_desktop::PreviewSource::resolve(&state, &app, &id)?;
+        if mode == "original_pixels" {
+            let Some((mime, bytes, (width, height))) = thumbnail_desktop::read_original_pixels(&source.asset)? else {
+                return Ok(Value::Null);
+            };
+            let mut payload = preview_image_payload(Some((mime, bytes)));
+            payload["width"] = json!(width);
+            payload["height"] = json!(height);
+            return Ok(payload);
+        }
         if mode == "dimensions" {
             if source.asset.kind != "texture" {
                 return Ok(Value::Null);
@@ -565,6 +588,8 @@ struct SmartImportOptions {
     texture_resolution: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     map_keywords: Option<HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing)]
+    pbr_material_set: Option<c4d_material_sets::MaterialSetRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_mode: Option<c4d_import_preferences::MaxMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -577,6 +602,8 @@ struct C4dSceneImportOptions {
     objects: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     normals: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_textures: Option<bool>,
     materials: bool,
     textures: bool,
     cameras: bool,
@@ -620,6 +647,10 @@ impl SmartImportOptions {
         }
         if self.scene_import.as_ref().is_some_and(|options| !options.objects && !options.materials) {
             return Err("请至少导入对象或材质。".into());
+        }
+        if self.scene_import.as_ref().is_some_and(|options| options.store_textures == Some(true) &&
+            (!options.materials || !options.textures)) {
+            return Err("归档贴图需要导入材质和贴图。".into());
         }
         if self.map_keywords.as_ref().is_some_and(|channels| {
             channels.iter().any(|(channel, aliases)| {
@@ -684,8 +715,17 @@ async fn queue_import(
     let host = session["dcc"].as_str().unwrap_or("");
     if let Some(options) = &smart_options {
         options.validate()?;
+        if options.pbr_material_set.is_some() && (options.kind != "pbr"
+            || host != "c4d" || session["pbrMaterialSets"] != true || project_export.is_some())
+        {
+            return Err("请更新 Cinema 4D 桥接并重新连接，再发送材质套图。".into());
+        }
         if options.scene_overrides() && session["sceneImportOptions"] != true {
             return Err("请在 DCC 连接中心查看同步状态，重开 Cinema 4D 后使用模型导入选项。".into());
+        }
+        if options.scene_import.as_ref().is_some_and(|scene| scene.store_textures == Some(true)) &&
+            (host != "c4d" || session["archiveTextures"] != true || project_export.is_some()) {
+            return Err("请更新并重启 Cinema 4D 插件，再归档到当前工程。".into());
         }
     }
     let mut project_export = project_export;
@@ -717,6 +757,11 @@ async fn queue_import(
     if let Some(options) = &smart_options {
         j["mode"] = json!("smart");
         j["options"] = json!(options);
+        if let Some(request) = &options.pbr_material_set {
+            let maps = request.resolve(&asset_id, &a, |id| resolve_asset(&state, &app, id))?;
+            j["options"]["pbr_maps"] = json!(maps);
+            j["options"]["pbr_name"] = json!(request.name);
+        }
     }
     if let Some(project) = project_export {
         j["mode"] = json!("smart");
@@ -795,7 +840,9 @@ async fn register(
     let scoped_c4d_preferences = smart_import && v["scopedC4dPreferences"] == true;
     let max_texture_bindings = smart_import && v["maxTextureBindings"] == true;
     let max_import = dcc == "blender" && v["maxImport"] == true;
-    let session = json!({"id":id,"dcc":dcc,"pid":v["pid"],"placement":placement,"maxImport":max_import,"smartImport":smart_import,"projectExport":project_export,"sceneImportOptions":scene_import,"scopedC4dPreferences":scoped_c4d_preferences,"maxTextureBindings":max_texture_bindings,"label":v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),"lastSeen":now()});
+    let archive_textures = scene_import && v["archiveTextures"] == true;
+    let pbr_material_sets = smart_import && v["pbrMaterialSets"] == true;
+    let session = json!({"id":id,"dcc":dcc,"pid":v["pid"],"placement":placement,"maxImport":max_import,"smartImport":smart_import,"projectExport":project_export,"sceneImportOptions":scene_import,"scopedC4dPreferences":scoped_c4d_preferences,"maxTextureBindings":max_texture_bindings,"archiveTextures":archive_textures,"pbrMaterialSets":pbr_material_sets,"label":v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),"lastSeen":now()});
     s.sessions.lock().unwrap().insert(id.clone(), session);
     Ok(Json(json!({"id":id})))
 }
@@ -1132,6 +1179,12 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            catalog_health::inspect_personal_catalog_health,
+            delivery_template::preview_delivery_template,
+            delivery_template::create_delivery_template,
+            team_network_paths::workspace_network_path,
+            team_network_paths::search_network_paths,
+            shot_delivery::lock_shot_preview,
             workspace_windows::open_detached_workspace_tab,
             workspace_windows::take_detached_workspace_tab,
             workspace_windows::finish_detached_workspace_tab,
@@ -1142,6 +1195,8 @@ fn main() {
             get_activity,
             list_recycled_assets,
             recycle_assets,
+            duplicate_review::review_asset_duplicates,
+            duplicate_review::recycle_verified_duplicates,
             restore_recycled_assets,
             workspace_asset_deletion::delete_workspace_assets,
             baidu_cloud_desktop::baidu_cloud,
@@ -1217,6 +1272,7 @@ fn main() {
             pick_asset_folders,
             folder_browser::list_import_folders,
             local_explorer::list_local_files,
+            local_explorer::paths::local_explorer_check_folder_paths,
             local_explorer::local_explorer_tree_children,
             local_explorer_new::local_explorer_new_templates,
             local_explorer_new::local_explorer_create_item,
@@ -1228,9 +1284,12 @@ fn main() {
             local_explorer_drop::local_explorer_drop_files,
             local_explorer_drop::local_explorer_file_action,
             local_explorer_clipboard::local_explorer_clipboard,
+            local_explorer_paste::local_explorer_preview_paste,
+            local_explorer_paste::local_explorer_resolve_paste,
             thumbnail_desktop::local_explorer_thumbnail,
             thumbnail_desktop::local_explorer_folder_thumbnail,
             thumbnail_desktop::local_explorer_file_icon,
+            asset_catalog_export::export_offline_asset_catalog,
             local_explorer::open_local_file,
             local_explorer::reveal_local_file,
             take_shell_folder_launches,
@@ -1248,6 +1307,8 @@ fn main() {
             import_files,
             pick_asset_files,
             read_preview,
+            format_help::query_format_capabilities,
+            exr_channel_desktop::read_exr_channel_view,
             thumbnail_desktop::build_thumbnail_cache,
             thumbnail_desktop::store_model_thumbnail,
             thumbnail_desktop::store_video_thumbnail,
@@ -1266,9 +1327,15 @@ fn main() {
             asset_availability::check_asset_files,
             asset_availability::suggest_asset_relinks,
             asset_availability::relink_asset_file,
+            project_cleanup::inspect_project_cleanup,
             project_dependencies::inspect_project_dependencies,
             project_dependencies::pick_project_dependency_file,
+            project_dependencies::repair::suggest_project_dependency_replacements,
+            project_dependencies::repair::preview_project_dependency_replacement,
             project_dependencies::write_project_dependency_copy,
+            render_sequences::inspect_render_sequences,
+            render_sequences::render_sequence_frame_sizes,
+            thumbnail_desktop::render_sequence_frame_preview,
             asset_cover::change_asset_cover,
             asset_cover::set_clipboard_cover,
             asset_cover::start_cover_capture,

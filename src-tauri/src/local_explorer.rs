@@ -13,6 +13,7 @@ use std::{
 use url::Url;
 
 mod places;
+pub(crate) mod paths;
 
 #[tauri::command]
 pub(crate) async fn local_explorer_places(app: tauri::AppHandle) -> Result<places::Places, String> {
@@ -27,6 +28,7 @@ pub(crate) async fn local_explorer_drive_details(
 }
 
 const PAGE_SIZE: usize = 250;
+const TREE_COMPLETION_LIMIT: usize = 12;
 pub(super) const MAX_ENTRIES: usize = 20_000;
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
 const DIRECTORY_TTL: Duration = Duration::from_secs(5);
@@ -121,7 +123,53 @@ struct ListingPage<'a> {
     offset: Option<usize>,
     order: ListingOrder,
     query: Option<&'a str>,
+    project_filter: Option<&'a ProjectFileFilter>,
+    remembered_path: Option<&'a str>,
     show_hidden: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ProjectFileFilter {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    extensions: Vec<String>,
+}
+
+impl ProjectFileFilter {
+    fn validated(mut self) -> Result<Option<Self>, String> {
+        self.name = self.name.trim().to_lowercase();
+        if self.name.chars().count() > 96
+            || self.name.chars().any(char::is_control)
+            || self.extensions.len() > 12
+        {
+            return Err("项目筛选内容超过限制".into());
+        }
+        for value in &mut self.extensions {
+            *value = value.trim().trim_start_matches('.').to_ascii_lowercase();
+            if value.is_empty()
+                || value.len() > 16
+                || !value.bytes().all(|unit| unit.is_ascii_alphanumeric())
+            {
+                return Err("文件扩展名格式无效".into());
+            }
+        }
+        Ok((!self.name.is_empty() || !self.extensions.is_empty()).then_some(self))
+    }
+
+    fn matches(&self, file: &LocalFile) -> bool {
+        file.is_directory
+            || ((self.name.is_empty() || matches_query(file, &self.name))
+                && (self.extensions.is_empty()
+                    || Path::new(&file.name)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|extension| {
+                            self.extensions
+                                .iter()
+                                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+                        })))
+    }
 }
 
 impl LocalFile {
@@ -276,10 +324,17 @@ pub(crate) async fn list_local_files(
     refresh: Option<bool>,
     order: Option<ListingOrder>,
     query: Option<String>,
+    project_filter: Option<ProjectFileFilter>,
+    remembered_path: Option<String>,
     show_hidden: Option<bool>,
 ) -> Result<LocalFileListing, String> {
     let order = order.unwrap_or_default();
     let query = normalized_query(query);
+    let project_filter = project_filter
+        .map(ProjectFileFilter::validated)
+        .transpose()?
+        .flatten();
+    let remembered_path = remembered_path.filter(|path| path.len() <= 32_768);
     let show_hidden = cfg!(windows) && show_hidden.unwrap_or_default();
     let Some(address) = address.filter(|value| !value.trim().is_empty()) else {
         let drives = folder_browser::root_listing(&app)?;
@@ -299,6 +354,7 @@ pub(crate) async fn list_local_files(
                 order,
                 query: query.as_deref(),
                 show_hidden,
+                ..ListingPage::default()
             },
         );
     };
@@ -323,6 +379,8 @@ pub(crate) async fn list_local_files(
                             offset,
                             order,
                             query: query.as_deref(),
+                            project_filter: project_filter.as_ref(),
+                            remembered_path: remembered_path.as_deref(),
                             show_hidden,
                         },
                     );
@@ -337,6 +395,8 @@ pub(crate) async fn list_local_files(
             offset,
             order,
             query: query.as_deref(),
+            project_filter: project_filter.as_ref(),
+            remembered_path: remembered_path.as_deref(),
             show_hidden,
         };
         match address {
@@ -363,8 +423,17 @@ pub(crate) async fn local_explorer_tree_children(
     path: String,
     show_hidden: Option<bool>,
     active_child: Option<String>,
+    prefix: Option<String>,
 ) -> Result<Vec<folder_browser::FolderEntry>, String> {
     let address = parse_address(&path)?;
+    if prefix.as_ref().is_some_and(|value| {
+        value.chars().count() > 255
+            || value.contains(['\\', '/'])
+            || value.chars().any(char::is_control)
+    }) {
+        return Err("请输入有效的文件夹名称".into());
+    }
+    let prefix = prefix.map(|value| value.to_lowercase());
     let active_child = active_child.and_then(|path| match parse_address(&path).ok()? {
         Address::Path(path) => Some(path),
         #[cfg(windows)]
@@ -377,6 +446,7 @@ pub(crate) async fn local_explorer_tree_children(
                 &path,
                 show_hidden,
                 active_child.as_deref(),
+                prefix.as_deref(),
                 &DIRECTORIES,
                 cancelled,
             ),
@@ -384,7 +454,12 @@ pub(crate) async fn local_explorer_tree_children(
             Address::Host(host) => {
                 let (mut shares, _) = read_shares(&host, cancelled)?;
                 sort_entries(&mut shares);
-                Ok(tree_entries(&shares, active_child.as_deref(), || None))
+                Ok(tree_entries(
+                    &shares,
+                    active_child.as_deref(),
+                    prefix.as_deref(),
+                    || None,
+                ))
             }
         }
     })
@@ -395,6 +470,7 @@ fn read_tree_children(
     directory: &Path,
     show_hidden: bool,
     active_child: Option<&Path>,
+    prefix: Option<&str>,
     cache: &DirectoryCache,
     cancelled: &AtomicBool,
 ) -> Result<Vec<folder_browser::FolderEntry>, String> {
@@ -411,17 +487,23 @@ fn read_tree_children(
         cancelled,
     )?;
     check_cancelled(cancelled)?;
-    Ok(tree_entries(&snapshot.entries, active_child, || {
-        if !snapshot.truncated || cancelled.load(Ordering::Acquire) {
-            return None;
-        }
-        direct_tree_child(directory, active_child?, show_hidden)
-    }))
+    Ok(tree_entries(
+        &snapshot.entries,
+        active_child,
+        prefix,
+        || {
+            if !snapshot.truncated || cancelled.load(Ordering::Acquire) {
+                return None;
+            }
+            direct_tree_child(directory, active_child?, show_hidden)
+        },
+    ))
 }
 
 fn tree_entries(
     entries: &[LocalFile],
     active_child: Option<&Path>,
+    prefix: Option<&str>,
     include_beyond_snapshot: impl FnOnce() -> Option<folder_browser::FolderEntry>,
 ) -> Vec<folder_browser::FolderEntry> {
     let folder_from_entry = |entry: &LocalFile| folder_browser::FolderEntry {
@@ -429,6 +511,13 @@ fn tree_entries(
         path: entry.path.clone(),
     };
     let directories = || entries.iter().filter(|entry| entry.is_directory);
+    if let Some(prefix) = prefix {
+        return directories()
+            .filter(|entry| entry.name.to_lowercase().starts_with(prefix))
+            .take(TREE_COMPLETION_LIMIT)
+            .map(folder_from_entry)
+            .collect();
+    }
     let mut folders: Vec<_> = directories()
         .take(PAGE_SIZE)
         .map(folder_from_entry)
@@ -502,10 +591,15 @@ fn direct_tree_child(
 pub(crate) async fn local_explorer_selection(
     address: String,
     query: Option<String>,
+    project_filter: Option<ProjectFileFilter>,
     show_hidden: Option<bool>,
 ) -> Result<LocalFileSelection, String> {
     let address = parse_address(&address)?;
     let query = normalized_query(query);
+    let project_filter = project_filter
+        .map(ProjectFileFilter::validated)
+        .transpose()?
+        .flatten();
     let show_hidden = cfg!(windows) && show_hidden.unwrap_or_default();
     folder_browser::read_location(READ_TIMEOUT, move |cancelled| match address {
         Address::Path(path) => {
@@ -525,6 +619,7 @@ pub(crate) async fn local_explorer_selection(
                 &snapshot.entries,
                 snapshot.truncated,
                 query.as_deref(),
+                project_filter.as_ref(),
                 true,
                 cancelled,
             )
@@ -532,7 +627,14 @@ pub(crate) async fn local_explorer_selection(
         #[cfg(windows)]
         Address::Host(host) => {
             let (entries, truncated) = read_shares(&host, cancelled)?;
-            collect_selection(&entries, truncated, query.as_deref(), false, cancelled)
+            collect_selection(
+                &entries,
+                truncated,
+                query.as_deref(),
+                None,
+                false,
+                cancelled,
+            )
         }
     })
     .await
@@ -542,13 +644,16 @@ fn collect_selection(
     entries: &[LocalFile],
     truncated: bool,
     query: Option<&str>,
+    project_filter: Option<&ProjectFileFilter>,
     physical: bool,
     cancelled: &AtomicBool,
 ) -> Result<LocalFileSelection, String> {
     let mut selected = Vec::new();
     for entry in entries {
         check_cancelled(cancelled)?;
-        if query.is_some_and(|query| !matches_query(entry, query)) {
+        if query.is_some_and(|query| !matches_query(entry, query))
+            || project_filter.is_some_and(|filter| !filter.matches(entry))
+        {
             continue;
         }
         let size = if cfg!(not(windows)) && physical && !entry.is_directory {
@@ -1010,12 +1115,20 @@ fn page_listing(
         offset,
         order,
         query,
+        project_filter,
+        remembered_path,
         ..
     } = page;
     let sort = order != ListingOrder::default();
-    let mut indices = (sort || query.is_some()).then(|| (0..entries.len()).collect::<Vec<_>>());
-    if let (Some(query), Some(indices)) = (query, indices.as_mut()) {
-        indices.retain(|&index| matches_query(&entries[index], query));
+    let mut indices = (sort || query.is_some() || project_filter.is_some())
+        .then(|| (0..entries.len()).collect::<Vec<_>>());
+    if let Some(indices) = indices.as_mut() {
+        indices.retain(|&index| {
+            let entry = &entries[index];
+            query.is_none_or(|query| matches_query(entry, query))
+                && (project_filter.is_none_or(|filter| filter.matches(entry))
+                    || selected_path.is_some_and(|path| same_entry(&entry.path, path)))
+        });
     }
     if let Some(ordered) = indices.as_mut().filter(|_| sort) {
         ordered.sort_by_cached_key(|&index| {
@@ -1061,7 +1174,7 @@ fn page_listing(
     let entry_at =
         |index: usize| &entries[indices.as_ref().map_or(index, |indices| indices[index])];
     let total = indices.as_ref().map_or(entries.len(), Vec::len);
-    let selected = selected_path.and_then(|selected| {
+    let selected = selected_path.or(remembered_path).and_then(|selected| {
         (0..total).position(|index| same_entry(&entry_at(index).path, selected))
     });
     let selected_path = selected.map(|index| entry_at(index).path.clone());
@@ -1352,6 +1465,24 @@ mod tests {
     }
 
     #[test]
+    fn completes_folder_prefixes_after_the_sidebar_limit() {
+        let mut entries: Vec<_> = (0..PAGE_SIZE)
+            .map(|index| LocalFile::folder(format!("Archive {index:03}"), String::new()))
+            .collect();
+        let mut file = LocalFile::folder("Render file.txt".into(), String::new());
+        file.is_directory = false;
+        entries.push(file);
+        entries.extend((0..20).map(|index| {
+            LocalFile::folder(format!("Render {index:02}"), format!("Render {index:02}"))
+        }));
+
+        let matches = tree_entries(&entries, None, Some("render"), || None);
+        assert_eq!(matches.len(), TREE_COMPLETION_LIMIT);
+        assert_eq!(matches.first().unwrap().name, "Render 00");
+        assert_eq!(matches.last().unwrap().name, "Render 11");
+    }
+
+    #[test]
     fn file_selection_chooses_the_page_containing_the_file() {
         let listing = finish_listing(
             None,
@@ -1388,8 +1519,15 @@ mod tests {
                 created: None,
             })
             .collect::<Vec<_>>();
-        let selected =
-            collect_selection(&rows, false, Some("素材"), false, &AtomicBool::new(false)).unwrap();
+        let selected = collect_selection(
+            &rows,
+            false,
+            Some("素材"),
+            None,
+            false,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!(selected.total, 3);
         assert_eq!(
             selected
@@ -1511,7 +1649,7 @@ mod tests {
         for (show_hidden, total) in [(false, 1), (true, 2)] {
             let snapshot = cache.get(root, show_hidden).unwrap();
             let select =
-                collect_selection(&snapshot.entries, false, None, true, &cancelled).unwrap();
+                collect_selection(&snapshot.entries, false, None, None, true, &cancelled).unwrap();
             assert_eq!(select.total, total);
             let search = ListingPage {
                 query: Some("隐藏"),
@@ -1523,6 +1661,65 @@ mod tests {
         }
         let explicit = list_path(&hidden, false, &cache, &cancelled, page_at(0)).unwrap();
         assert_eq!(explicit.entries[0].name, "可访问.txt");
+    }
+
+    #[test]
+    fn filters_project_entries_before_paging_and_remembers_only_visible_rows() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        fs::create_dir(root.join("Subfolder")).unwrap();
+        for index in 0..PAGE_SIZE + 3 {
+            fs::write(root.join(format!("Shot_{index:03}.EXR")), b"").unwrap();
+        }
+        let excluded = root.join("Shot_notes.txt");
+        fs::write(&excluded, b"").unwrap();
+        fs::write(root.join("Other.c4d"), b"").unwrap();
+        let remembered = root.join(format!("Shot_{:03}.EXR", PAGE_SIZE));
+        let filter = ProjectFileFilter {
+            name: "shot".into(),
+            extensions: vec![".EXR".into(), "C4D".into()],
+        }
+        .validated()
+        .unwrap()
+        .unwrap();
+        let page = ListingPage {
+            project_filter: Some(&filter),
+            remembered_path: remembered.to_str(),
+            ..ListingPage::default()
+        };
+        let cache = DirectoryCache::default();
+        let cancelled = AtomicBool::new(false);
+        let result = list_path(root, false, &cache, &cancelled, page).unwrap();
+        assert_eq!(result.total, PAGE_SIZE + 4);
+        assert_eq!(result.offset, PAGE_SIZE);
+        assert_eq!(result.selected_path.as_deref(), remembered.to_str());
+        let snapshot = cache.get(root, false).unwrap();
+        let selected = collect_selection(
+            &snapshot.entries,
+            false,
+            None,
+            Some(&filter),
+            true,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(selected.total, result.total);
+        let removed = list_path(
+            root,
+            false,
+            &cache,
+            &cancelled,
+            ListingPage {
+                remembered_path: excluded.to_str(),
+                ..page
+            },
+        )
+        .unwrap();
+        assert_eq!(removed.offset, 0);
+        assert_eq!(removed.selected_path, None);
+        let direct = list_path(&excluded, false, &cache, &cancelled, page).unwrap();
+        assert_eq!(direct.selected_path.as_deref(), excluded.to_str());
+        assert_eq!(direct.total, result.total + 1);
     }
 
     #[test]

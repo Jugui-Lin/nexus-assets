@@ -46,3 +46,6 @@
   .recycle-bin-list time { grid-area: 2 / 1; }
   .recycle-bin-list button { grid-area: 1 / 2 / 3; }
 }
+.recycle-assets-scope { margin: 8px 0; }
+.recycle-assets-scope summary { cursor: pointer; color: var(--accent); }
+.recycle-assets-scope p { margin-block: 6px; }

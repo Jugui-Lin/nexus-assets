@@ -402,3 +402,40 @@ dialog.modal#workspace-tab-preferences-dialog {
   }
   #file-workspace table[data-explorer-display="content"] tr[data-entry-index] td[data-explorer-column-key="date"] { display: none; }
 }
+.local-explorer-batch-rename {
+  inline-size: min(680px, calc(100vw - 28px));
+  max-block-size: calc(100dvh - 28px);
+}
+
+.local-explorer-rename-fields {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  gap: 8px;
+}
+
+.local-explorer-rename-fields label { display: grid; gap: 4px; }
+.local-explorer-rename-list { max-block-size: 36dvh; overflow: auto; }
+.local-explorer-rename-list table { inline-size: 100%; text-align: start; }
+.local-explorer-rename-list :is(th,td) { padding: 5px; overflow-wrap: anywhere; }
+.local-explorer-rename-list [data-rename-conflict] td:last-child { color: var(--muted); }
+
+.folder-preferences-shortcut-editor { min-inline-size: 0; margin-block: 8px; }
+.folder-preferences-shortcut-editor p { color: var(--muted); font-size: 12px; }
+.folder-preferences-shortcut-editor p:empty { display: none; }
+.folder-preferences-shortcut-editor [data-shortcut-rows] > div {
+  display: grid;
+  grid-template-columns: minmax(72px,1.25fr) repeat(2,minmax(56px,1fr)) auto;
+  gap: 6px;
+  align-items: center;
+  padding-block: 4px;
+}
+.folder-preferences-shortcut-editor input {
+  min-inline-size: 0;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--bg);
+}
+.folder-preferences-shortcut-editor input:focus { border-color: var(--accent); }
+.folder-preferences-shortcut-editor [data-shortcut-rows] button { white-space: nowrap; }

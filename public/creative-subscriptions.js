@@ -6,6 +6,8 @@ const workLayoutKey = 'nexus-creator-work-layout';
 const creatorOrderKey = 'nexus-creator-card-order';
 const maximumCreators = 100;
 const teamRefreshInterval = 20_000;
+const firstRetryDelay = 30_000;
+const maximumRetryDelay = 10 * 60_000;
 const playerLoadingTimeout = 12_000;
 const xinpianchangEditorial = 'https://www.xinpianchang.com/recommend/editor';
 const youtubeImages = new Set(['i.ytimg.com', 'i1.ytimg.com', 'i2.ytimg.com', 'i3.ytimg.com', 'i4.ytimg.com',
@@ -227,6 +229,9 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
   const pendingProfiles = new WeakSet();
   const queue = [];
   let personalKey = subscriptionKey;
+  let syncHistoryKey = subscriptionKey + ':sync-history';
+  let syncHistory = readSyncHistory(syncHistoryKey);
+  let retryTimer;
   let creators = readCreators(personalKey);
   let active = false;
   let opened = false;
@@ -477,7 +482,10 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
       const old = previous.get(entry.id);
       previous.delete(entry.id);
       if (old?.revision === entry.revision) return old;
-      if (old?.url !== entry.url || old?.feed !== entry.feed) statuses.delete(entry.id);
+      if (old && (old.url !== entry.url || old.feed !== entry.feed)) {
+        statuses.delete(entry.id);
+        forgetSuccess(entry.id);
+      }
       if (!statuses.has(entry.id) || scheduled.has(entry.id)) {
         scheduled.delete(entry.id);
         changed.push(entry);
@@ -487,6 +495,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     for (const id of previous.keys()) {
       statuses.delete(id);
       scheduled.delete(id);
+      forgetSuccess(id);
     }
     if (!find(selected)) selected = null;
     if (active) schedule(changed);
@@ -532,6 +541,8 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     finishCreatorDrop();
     workspaceEpoch++;
     personalKey = nextPersonalKey;
+    syncHistoryKey = (key || personalKey) + ':sync-history';
+    syncHistory = readSyncHistory(syncHistoryKey);
     videoReferences.reload(context);
     creatorOrder = readCreatorOrder();
     workLayout = readWorkLayout();
@@ -545,6 +556,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     pending = 0;
     statuses.clear();
     scheduled.clear();
+    planRetry();
     creatorSearch.value = '';
     platform.value = '';
     if (editor.open) editor.close();
@@ -645,20 +657,58 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     return native ? '等待同步' : '桌面版可同步';
   }
 
+  function readSyncHistory(key) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(key));
+      return new Map((Array.isArray(saved) ? saved : []).slice(-maximumCreators).filter(record =>
+        Array.isArray(record) && typeof record[0] === 'string' && Number.isSafeInteger(record[1]) &&
+        record[1] > 0 && record[1] <= Date.now()));
+    } catch {
+      return new Map();
+    }
+  }
+
+  function rememberSuccess(id) {
+    syncHistory.delete(id);
+    syncHistory.set(id,Date.now());
+    saveSyncHistory();
+  }
+
+  function forgetSuccess(id) {
+    if (syncHistory.delete(id)) saveSyncHistory();
+  }
+
+  function saveSyncHistory() {
+    try { localStorage.setItem(syncHistoryKey,JSON.stringify([...syncHistory].slice(-maximumCreators))); }
+    catch { /* Keep refresh status available during this session. */ }
+  }
+
+  function syncFacts(creator) {
+    const state = statuses.get(creator.id);
+    const time = syncHistory.get(creator.id);
+    const success = time ? `上次成功 ${dateFormat.format(time)}` : '尚未成功刷新';
+    const error = state?.message && state?.failures ? `最近错误：${state.message}` : '';
+    const retry = state?.phase === 'error' && state.retryAt ? `下次自动重试 ${dateFormat.format(state.retryAt)}` : '';
+    return {success, summary:[success,error,retry].filter(Boolean).join(' · ')};
+  }
+
   function creatorCard(creator) {
     const id = escape(creator.id);
     const name = escape(label(creator));
     const state = statuses.get(creator.id);
+    const facts = syncFacts(creator);
     const bio = escape(creator.bio || '');
     return `<article class="creator-card" data-creator-id="${id}" tabindex="0" aria-label="${name}">
       <div class="creator-identity"><span class="creator-mark" aria-hidden="true">${avatarContents(creator)}</span><div class="creator-identity-copy"><h2 title="${name}">${name}</h2><p>${platformFor(creator.url)}</p></div>
         <button type="button" class="icon-button creator-card-grip" data-creator-action="reorder" aria-label="调整 ${name} 的顺序" aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown" title="拖动排序，或按 Alt + 方向键"></button>
       </div>
       ${bio ? `<p class="creator-bio" title="${bio}">${bio}</p>` : ''}
-      <div class="creator-card-footer"><span class="creator-status" data-phase="${state?.phase || ''}" title="${escape(state?.message || '')}">${statusLabel(creator)}</span>
+      <div class="creator-card-footer"><span class="creator-status" data-phase="${state?.phase || ''}" title="${escape(facts.summary)}">${statusLabel(creator)}</span>
         <button type="button" class="text-button" data-creator-action="view" aria-label="查看 ${name} 的作品">查看作品</button>
+        ${state?.failures ? `<button type="button" class="icon-button" data-creator-action="retry" aria-label="重试 ${name}" title="只重试此订阅"${state.phase === 'error' ? '' : ' disabled'}>${icon('refresh')}</button>` : ''}
         <button type="button" class="icon-button" data-creator-action="edit" title="编辑订阅" aria-label="编辑 ${name} 的订阅"${canWrite() ? '' : ' disabled'}>${icon('edit')}</button>
       </div>
+      ${native && canSync(creator) ? `<p class="creator-sync-line">${escape(facts.success)}</p>` : ''}
     </article>`;
   }
 
@@ -874,7 +924,10 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     detailBio.textContent = creator.bio || '';
     detailBio.title = detailBio.textContent;
     detailBio.hidden = !creator.bio;
-    get('creator-detail-refresh').disabled = !native || !canSync(creator) || scheduled.has(creator.id);
+    const refreshButton = get('creator-detail-refresh');
+    refreshButton.disabled = !native || !canSync(creator) || scheduled.has(creator.id);
+    refreshButton.querySelector('span').textContent = current?.phase === 'error' ? '重试此订阅' : '刷新作品';
+    get('creator-detail-sync-status').textContent = native && canSync(creator) ? syncFacts(creator).summary : '';
     const phase = current?.phase;
     const waiting = phase === 'loading' || phase === 'queued';
     const works = current?.works || [];
@@ -918,6 +971,11 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     const before = statuses.get(id);
     let feed = directFeed(creator) || before?.feed;
     let discovered;
+    function fail(message) {
+      const failures = Math.min((before?.failures || 0) + 1,10);
+      statuses.set(id, {...before, feed, phase:'error', message, failures,
+        retryAt:Date.now() + Math.min(firstRetryDelay * 2 ** (failures - 1),maximumRetryDelay)});
+    }
     statuses.set(id, {...before, phase:'loading'});
     render();
     try {
@@ -930,12 +988,13 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
       if (!feed) {
         if (discovered?.sourceStatus === 'public-works' && Array.isArray(discovered.items)) {
           const works = normalizedWorks(discovered.items, {preserveOrder:true});
+          rememberSuccess(id);
           statuses.set(id, {phase:'ready', source:'public-works', works});
           return;
         }
         if (discovered?.sourceStatus === 'public-works-unavailable') {
-          statuses.set(id, {...before, phase:'error', message:creator.url === xinpianchangEditorial
-            ? '暂时无法读取新片场编辑精选。' : '暂时无法读取哔哩哔哩的公开投稿。'});
+          fail(creator.url === xinpianchangEditorial
+            ? '暂时无法读取新片场编辑精选。' : '暂时无法读取哔哩哔哩的公开投稿。');
           return;
         }
         const message = discovered?.sourceStatus === 'no-public-feed'
@@ -949,10 +1008,10 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
       const title = publicName(result?.title);
       const works = normalizedWorks(result?.items);
       if (!creator.detectedName) rememberCreatorProfile(creator, {name:title});
+      rememberSuccess(id);
       statuses.set(id, {phase:'ready', feed, title, works});
     } catch (error) {
-      if (isCurrent()) statuses.set(id, {...before, feed, phase:'error',
-        message:String(error?.message || error || '同步订阅源失败').slice(0, 220)});
+      if (isCurrent()) fail(String(error?.message || error || '同步订阅源失败').slice(0,220));
     }
   }
 
@@ -967,6 +1026,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
         if (scheduled.get(creator.id) === creator) scheduled.delete(creator.id);
         pending--;
         pump();
+        planRetry();
         render();
       });
     }
@@ -981,7 +1041,31 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
       queue.push(creator);
     }
     pump();
+    planRetry();
     render();
+  }
+
+  function planRetry() {
+    clearTimeout(retryTimer);
+    if (!native || !active || document.hidden) return;
+    const retryAt = creator => {
+      const state = statuses.get(creator.id);
+      return state?.phase === 'error' && !scheduled.has(creator.id) ? state.retryAt : Infinity;
+    };
+    const next = Math.min(...creators.map(retryAt));
+    if (!Number.isFinite(next)) return;
+    retryTimer = setTimeout(() => {
+      if (!active || document.hidden) return;
+      const now = Date.now();
+      schedule(creators.filter(creator => retryAt(creator) <= now));
+    },Math.max(0,next - Date.now()));
+  }
+
+  function refreshCreator(id) {
+    const creator = find(id);
+    if (!native || !creator || !canSync(creator) || scheduled.has(id)) return;
+    log(`刷新创作订阅 · ${label(creator)}`);
+    schedule([creator]);
   }
 
   async function refresh() {
@@ -1215,6 +1299,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     if (!previous) { creatorSearch.value = ''; platform.value = ''; }
     if (!teamWorkspace && (changed || scheduled.has(creator.id))) {
       statuses.delete(creator.id);
+      if (changed) forgetSuccess(creator.id);
       scheduled.delete(creator.id);
       schedule([creator]);
     }
@@ -1260,6 +1345,8 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     if (removed) log(`移除创作订阅 · ${label(removed)}`);
     statuses.delete(id);
     scheduled.delete(id);
+    forgetSuccess(id);
+    planRetry();
     editor.close();
     if (wasSelected) back();
     else render();
@@ -1279,6 +1366,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
     const id = event.target.closest('[data-creator-id]')?.dataset.creatorId;
     if (action === 'view') openCreator(id);
     if (action === 'edit' && find(id)) showEditor(find(id));
+    if (action === 'retry') refreshCreator(id);
   });
   cards.addEventListener('dblclick', event => {
     if (!event.target.closest('button')) openCreator(event.target.closest('[data-creator-id]')?.dataset.creatorId);
@@ -1412,7 +1500,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
   mergeButton.addEventListener('click', mergeLocal);
   get('creator-add').addEventListener('click', () => showEditor());
   get('creator-refresh').addEventListener('click', refresh);
-  get('creator-detail-refresh').addEventListener('click', refresh);
+  get('creator-detail-refresh').addEventListener('click', () => refreshCreator(selected));
   get('creator-edit').addEventListener('click', () => showEditor(find(selected)));
   get('creator-open-home').addEventListener('click', () => openUrl(find(selected)?.url));
   get('creator-back').addEventListener('click', back);
@@ -1424,6 +1512,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
   platform.addEventListener('change', updateCreatorFilter);
   creatorSearch.addEventListener('input', updateCreatorFilter);
   workSearch.addEventListener('input', render);
+  document.addEventListener('visibilitychange',planRetry);
   setInterval(() => {
     if (!active || document.hidden) return;
     setWorkspace();
@@ -1481,6 +1570,7 @@ export function initCreativeSubscriptions({api, native, icon, escape, openWeb, l
       if (!visible && !keepSelection) selected = null;
       if (active === visible) return;
       active = visible;
+      planRetry();
       section.classList.toggle('hidden', !visible);
       if (!visible) return;
       render();

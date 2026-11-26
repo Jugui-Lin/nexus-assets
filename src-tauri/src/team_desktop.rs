@@ -37,8 +37,7 @@ pub(crate) mod creative_subscriptions;
 pub(crate) mod organization;
 #[path = "team_recycle.rs"]
 pub(crate) mod recycle;
-#[path = "team_network_paths.rs"]
-mod network_paths;
+use crate::team_network_paths as network_paths;
 #[path = "team_quick_access.rs"]
 pub(crate) mod quick_access;
 #[path = "team_whiteboard.rs"]

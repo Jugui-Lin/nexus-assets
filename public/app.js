@@ -2,11 +2,14 @@ import {MeshPreview} from './preview.js';
 import {applyTeamFolderVisibility, buildFolderTree, createFolderMatcher, filterFolderTree, findFolder, folderAncestors, mergedTeamFolderMap, rebaseMergedTeamFolder, relativeAssetPath, restoreLinkedTeamFolders} from './folders.js';
 import {initWorkspaceDrag} from './workspace-drag.js';
 import {initWorkspaceLayout} from './workspace-layout.js';
+import {initWorkspaceLayoutPresets} from './workspace-layout-presets.js';
 import {initSidebarZones} from './sidebar-zones.js';
 import {initWorkspaceNavigation} from './workspace-navigation.js';
 import {initAssetCompare} from './asset-compare.js';
 import {initAssetRecycle} from './asset-recycle.js';
+import {initDuplicateReview} from './duplicate-review.js';
 import {initSmartMapKeywords, storedMapKeywords} from './c4d-map-keywords.js';
+import {initMaterialSets, isMaterialSetImage} from './pbr-material-sets.js';
 import {initC4dImportPreferences} from './c4d-import-preferences.js';
 import {initC4dDropImport, isC4dSceneAsset} from './c4d-drop-import.js';
 import {buildTagTree, matchesTag, suggestAssetTags} from './asset-tags.js';
@@ -16,6 +19,11 @@ import {initFolderBrowser} from './folder-browser.js';
 import {initAssetFolderHistory, matchFolderAddress} from './folder-address.js';
 import {initLocalExplorer} from './local-explorer.js';
 import {initProjectDependencies} from './project-dependencies.js';
+import {initProjectCleanup} from './project-cleanup.js';
+import {initDeliveryTemplate} from './delivery-template.js';
+import {initRenderSequenceViewer} from './render-sequence-viewer.js';
+import {initExrChannelViewer} from './exr-channel-viewer.js';
+import {initTemporaryAssetBasket} from './temporary-asset-basket.js';
 import {initWorkspaceHandoff} from './workspace-handoff.js';
 import {initFolderSystemIntegration} from './folder-system-integration.js';
 import {initFolderContext} from './folder-context.js';
@@ -27,25 +35,36 @@ import {initScreenshotCover} from './screenshot-cover.js';
 import {assetKindLabels as kinds, initQuickFilters, isRecentlyAdded, summarizeQuickFilters} from './quick-filters.js';
 import {initAssetTypePreferences} from './asset-type-preferences.js';
 import {initAssetFilterToolbar} from './asset-filter-toolbar.js';
+import {assetFormatGroup,assetFormatGroups,retainAssetOrder} from './asset-browse-options.js';
+import {createAssetSearchLocations} from './asset-search-locations.js';
 import {initRuntimeLog} from './runtime-log.js';
 import {initWorkspaceGuide} from './workspace-guide.js';
+import {initFormatHelp} from './format-help.js';
+import {initAssetEmptySearch} from './asset-empty-search.js';
 import {initWorkspaceSettingsSearch} from './workspace-settings-search.js';
 import {initVideoHoverPreview} from './video-hover-preview.js';
 import {initVideoControls} from './video-controls.js';
+import {initVideoFraming} from './video-framing.js';
+import {initVideoRangeLoop} from './video-range-loop.js';
+import {initQuickVideoClip} from './quick-video-clip.js';
 import {initVideoCardDurations} from './video-card-durations.js';
 import {initTeamAssetMessages} from './team-asset-messages.js';
 import {initTeamOrganization} from './team-organization.js';
 import {initCreativeSubscriptions} from './creative-subscriptions.js';
 import {initBrowserSites} from './browser-sites.js';
 import {initWhiteboardProjects} from './whiteboard-projects.js';
+import {chooseWhiteboardRegion} from './whiteboard-regions.js';
 import {encodeWhiteboardAssetClipboard} from './whiteboard-asset-clipboard.js';
 import {initNexusUpdater} from './nexus-updater.js';
 import {initNexusReleaseNotes} from './nexus-release-notes.js';
 import {initBrowserCapture} from './browser-capture.js';
 import {initWorkspaceTabs} from './workspace-tabs.js';
 import {initWorkspaceTabManagement} from './workspace-tab-management.js';
+import {initWorkspaceTabOverview} from './workspace-tab-overview.js';
 import {initAssetMasonry} from './asset-masonry.js';
 import {initQuickImagePreview} from './quick-image-preview.js';
+import {initQuickMeshTools} from './quick-mesh-tools.js';
+import {contactSheetLimit,initAssetContactSheet} from './asset-contact-sheet.js';
 import {initWindowControls} from './window-controls.js';
 import {initExplorerFileDrop} from './local-explorer-drop.js';
 import {initExplorerColumns} from './local-explorer-columns.js';
@@ -53,6 +72,11 @@ import {initExplorerContextMenu} from './local-explorer-context.js';
 import {createExplorerSidebarWidth, initExplorerSidebar} from './local-explorer-sidebar.js';
 import {initFolderAssetsPane} from './folder-assets-pane.js';
 import {initFileWorkspacePreferences, readFileWorkspacePreferences} from './file-workspace-preferences.js';
+import {initFilePreferenceTransfer} from './file-preference-transfer.js';
+import {initFavoriteExpiry} from './favorite-expiry.js';
+import {initCatalogHealth} from './catalog-health.js';
+import {initAssetInventory} from './asset-inventory.js';
+import {initShotDashboard} from './shot-dashboard.js';
 import {initExplorerInspector} from './local-explorer-inspector.js';
 import {initExplorerNew} from './local-explorer-new.js';
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
@@ -92,6 +116,8 @@ const api=async(command,args={})=>{
 const gridZoomKey = 'nexus-grid-zoom-width';
 const assetLayoutKey = 'nexus-asset-layout';
 const assetThumbnailFitKey = 'nexus-asset-thumbnail-fit';
+const alternateAssetRowsKey = 'nexus-asset-alternate-rows';
+const neutralAssetPreviewKey = 'nexus-neutral-asset-preview';
 const assetViewButtons = {grid:'#grid-view', masonry:'#masonry-view', list:'#list-view'};
 const assetMasonry = initAssetMasonry($('#asset-grid'));
 function preferredAssetLayout(preferences) {
@@ -152,6 +178,7 @@ const localExplorer = initLocalExplorer({
   tabBar:workspaceBar,
   preferences:readFileWorkspacePreferences(),
   browse:native ? args => invoke('list_local_files',args) : undefined,
+  checkFolderPaths:nativeDragOut ? args => invoke('local_explorer_check_folder_paths',args) : undefined,
   treeChildren:nativeDragOut ? args => invoke('local_explorer_tree_children',args) : undefined,
   selectAllEntries:native ? args => invoke('local_explorer_selection',args) : undefined,
   entryDetails:nativeDragOut ? args => invoke('local_explorer_entry_details',args) : undefined,
@@ -165,6 +192,10 @@ const localExplorer = initLocalExplorer({
   contextMenu:native ? initExplorerContextMenu(fileWorkspace) : undefined,
   fileAction:nativeDragOut ? args => invoke('local_explorer_file_action',args) : undefined,
   clipboard:nativeDragOut ? args => invoke('local_explorer_clipboard',args) : undefined,
+  pasteConflicts:nativeDragOut ? {
+    preview:args => invoke('local_explorer_preview_paste',args),
+    apply:args => invoke('local_explorer_resolve_paste',args),
+  } : undefined,
   copy:copyWorkspaceText,
   columns:initExplorerColumns,
   onOpenFiles:revealFileWorkspace,
@@ -173,7 +204,14 @@ const localExplorer = initLocalExplorer({
   onBrowseAssets:nativeDragOut ? location => browseFolderAssets(location).catch(error) : undefined,
   onAddToAssets:nativeDragOut ? location => addExplorerSourceToAssets(location).catch(error) : undefined,
   onAddToCollection:nativeDragOut ? entries => collectExplorerFiles(entries).catch(error) : undefined,
+  onAddToBasket:nativeDragOut ? entries => temporaryBasket.add(entries.map(entry => ({kind:'file',...entry}))) : undefined,
   onProjectDependencies:nativeDragOut ? path => projectDependencies.show(path) : undefined,
+  onCreateFolderShortcut:nativeDragOut ? async path => toast(await invoke('create_desktop_shortcut',{folderPath:path})) : undefined,
+  onInspectCleanup:nativeDragOut ? path => projectCleanup.show(path) : undefined,
+  projectFiltersEnabled:nativeDragOut,
+  onOpenShotBoard:nativeDragOut ? (code,options) => navigateWhiteboardShot(code,options) : undefined,
+  onInspectRenderSequence:nativeDragOut ? payload => renderSequenceViewer.show(payload) : undefined,
+  onCompareExrChannels:nativeDragOut ? payload => exrChannelViewer.show(payload) : undefined,
   lookupAssets:nativeDragOut ? lookupExplorerAssets : undefined,
   onLoadAssets:nativeDragOut ? ensureAssetWorkspace : undefined,
   onToggleFavorite:nativeDragOut ? toggleExplorerFavorite : undefined,
@@ -217,6 +255,7 @@ const folderAssetPane = nativeDragOut ? initFolderAssetsPane({
     return !fileWorkspace.hidden && explorerPathKey(localExplorer.getSelectedPath()) === explorerPathKey(asset.path);
   },
   favorite:toggleExplorerFavorite,
+  addToBasket:id => addIndexedAssetsToBasket([id]),
   report:error,
 }) : null;
 if (nativeDragOut) fileInspector = initExplorerInspector({
@@ -228,6 +267,8 @@ if (nativeDragOut) fileInspector = initExplorerInspector({
     references:readExplorerReferences,openReference:openExplorerReference},
   thumbnail:args => invoke('local_explorer_thumbnail',args),
   fileIcon:args => invoke('local_explorer_file_icon',args),
+  linkDetails:args => invoke('local_explorer_entry_details',args),
+  openLinkLocation:path => localExplorer.openPath(path),
   closeAssetPane:() => folderAssetPane?.hide({focus:false}),
 });
 const explorerFileDrop = nativeDragOut ? initExplorerFileDrop({
@@ -244,6 +285,10 @@ const assetSearchToggle = $('#asset-search-toggle');
 const assetSearchField = $('#asset-search-field');
 const assetSearchToolbar = assetSearchField.parentElement;
 const assetSearchStrip = assetSearchToggle.closest('.asset-filter-strip');
+const emptyAssetSearch = initAssetEmptySearch($('#empty-search-help'),{input:assetSearchInput,
+  clearOtherFilters:() => resetFilters(false,null,{preserveSearch:true}),
+  focusSearch:() => focusAssetSearch({select:false}),
+});
 const assetViewNavigation = $('#main-nav');
 const assetViewNavigationSlot = $('#asset-view-navigation-slot');
 const assetSort = $('#sort');
@@ -333,6 +378,7 @@ for (const region of [assetSearchToolbar, assetSearchStrip, $('#asset-pinned-fil
 assetSearchStrip.addEventListener('scroll', alignAssetSearch, {passive:true});
 
 const markedAssets = new Set();
+const assetBrowseTabs = new Map();
 const fileStates = new Map();
 const customCovers = new Set();
 const coverRevisions = new Map();
@@ -358,7 +404,8 @@ const videoHover = native ? initVideoHoverPreview({
   grid: $('#asset-grid'),
   canPreview(id) {
     const asset = assetsById.get(id);
-    return Boolean(state.library) && asset?.kind === 'video' && !fileStates.has(id) && (!isTeamAsset(asset) || asset.teamMounted);
+    return !$('#asset-grid').hasAttribute('data-quiet-browse') && Boolean(state.library) && asset?.kind === 'video' &&
+      !fileStates.has(id) && (!isTeamAsset(asset) || asset.teamMounted);
   },
   async source(id) {
     const {path} = await prepareVideoSource(assetsById.get(id));
@@ -403,6 +450,12 @@ const libraryPreferences = {
   setItem: (key, value) => localStorage.setItem(libraryPreferenceKey(key), value),
   removeItem: key => localStorage.removeItem(libraryPreferenceKey(key)),
 };
+const originGroupPreference = 'nexus-search-group-origins';
+const assetSearchLocations = createAssetSearchLocations({
+  resolve:nativeDragOut ? paths => api('search_network_paths',{paths}) : undefined,
+  libraryName:id => state.libraries.find(library => library.id === id)?.name,
+  refresh:() => { if (state.search && isAssetView()) renderAssets(); },
+});
 const assetTypePreferences = initAssetTypePreferences({
   preferences:libraryPreferences,
   getAssets:() => state.assets,
@@ -489,14 +542,32 @@ const timestamp = v => typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : Date.
 const date=v=>new Date(timestamp(v)).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 let toastTimer,previewSerial=0;
 const preview=new MeshPreview($('#preview-canvas'));
-const quickRenderer=new MeshPreview($('#quick-preview-canvas'));
+const quickRenderer=new MeshPreview($('#quick-preview-canvas'),null,{inspection:true});
+const quickMeshTools = initQuickMeshTools($('#quick-preview-tools'),quickRenderer);
 const thumbnailRenderer = new MeshPreview(document.createElement('canvas'), {width:320,height:234});
 const thumbCache=new Map();
 const thumbnailSizeKey = 'nexus-thumbnail-pixels';
 const rasterBrowseSizeLimit = 192 * 1024 * 1024;
 let thumbnailSize = Number(localStorage.getItem(thumbnailSizeKey)) || 256;
 if (!Number.isInteger(thumbnailSize) || thumbnailSize < 128 || thumbnailSize > 1024) thumbnailSize = 256;
-function toast(message,error=false){const t=$('#toast');t.textContent=String(message);t.classList.remove('hidden');t.classList.toggle('error',error);clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.add('hidden'),error?6500:3500);}
+let toastPointer;
+document.addEventListener('pointermove',event => { toastPointer = {x:event.clientX,y:event.clientY}; },{passive:true});
+function toast(message,error=false) {
+  const notification = $('#toast');
+  notification.textContent = String(message);
+  notification.classList.remove('hidden');
+  notification.classList.toggle('error',error);
+  delete notification.dataset.toastPosition;
+  if (toastPointer && document.hasFocus()) {
+    const {x,y} = toastPointer;
+    const {left,right,top,bottom,width} = notification.getBoundingClientRect();
+    if (x >= left - 18 && x <= right + 18 && y >= top - 18 && y <= bottom + 18) {
+      notification.dataset.toastPosition = width > innerWidth/2 - 40 ? 'top' : x < innerWidth/2 ? 'right' : 'left';
+    }
+  }
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => notification.classList.add('hidden'),error ? 6500 : 3500);
+}
 function error(e){toast(e?.message||e,true);}
 function openDialog(id){const d=$(id);if(!d.open)d.showModal();}
 function confirmDiscardWorkspaceEdits(locateAsset = false, switchTab = false) {
@@ -534,7 +605,7 @@ function baseAssets() {
   const members = collection ? new Set(collection.assetIds) : null;
   const now = Date.now();
   return assets.filter(asset =>
-    (state.view !== 'favorites' || asset.favorite) &&
+    (state.view !== 'favorites' || favoriteExpiry.matches(asset,now)) &&
     (state.view !== 'recent' || isRecentlyAdded(asset.added, now)) &&
     (!inFolder || inFolder(asset)) &&
     (!members || members.has(asset.id))
@@ -673,9 +744,10 @@ function renderLibraryTree() {
 function getNavSummary() {
   if (navSummary) return navSummary;
   let favorites = 0;
+  const now = Date.now();
   const tagsByName = new Map(state.definedTags.map(tag => [tag.toLowerCase(), tag]));
   for (const asset of state.assets) {
-    if (asset.favorite) favorites++;
+    if (asset.favorite && !favoriteExpiry.expired(asset,now)) favorites++;
     for (const tag of asset.tags) if (!tagsByName.has(tag.toLowerCase())) tagsByName.set(tag.toLowerCase(), tag);
   }
   navSummary = {favorites, tags:[...tagsByName.values()]};
@@ -685,7 +757,9 @@ function renderJobCount() {
   $('#job-count').textContent=state.jobs.filter(j=>['queued','running'].includes(j.status)).length||'';
 }
 function renderNav(){
+  $('#open-asset-duplicate-review').classList.toggle('hidden',!nativeDragOut || team.active);
   syncAssetSearchToggle();
+  favoriteExpiry.render(state.view === 'favorites',state.assets);
   $('#all-count').textContent=state.assets.length;$('#fav-count').textContent=getNavSummary().favorites;
   renderJobCount();
   folderContext.render();
@@ -759,7 +833,9 @@ function renderLocation() {
   parts.push(`<span aria-current="location">${escape(place)}</span>`);
   $('#breadcrumbs').innerHTML = parts.join(icon('chevron'));
   $('#page-title').textContent = place;
-  workbenchTabs.render(place);
+  const location = lib ? diskFolderPath(lib,state.folder) || [root,lib.name,...folders.map(item => item.name)].join(' › ')
+    : collection ? [root,'合集',collection.name].join(' › ') : '';
+  workbenchTabs.render(place, location);
   const description = lib
     ? (lib.path ? '' : '尚未链接源文件夹')
     : collection ? team.active ? '团队共享合集' : '此合集保存在当前个人库'
@@ -773,8 +849,8 @@ function renderLocation() {
   $('#asset-folder-file-view').hidden = !nativeDragOut || !lib?.path || !isAssetView();
   assetFolderHistory.recordLocation();
 }
-function renderSubfolders() {
-  const folder = state.library && !state.collection && isAssetView()
+function renderSubfolders(focusing) {
+  const folder = !focusing && state.library && !state.collection && isAssetView()
     ? findFolder(folderTrees.get(state.library), state.folder) : null;
   const grid = $('#subfolder-grid');
   const hasChildren = Boolean(folder?.children.length);
@@ -841,17 +917,24 @@ function renderAssets(){
   siteNavigation.setScope(libraryScope(), team.active ? team.info.team.id : undefined, collectionScope());
   whiteboard.setContext({key:collectionScope(), teamId:team.active ? team.info.team.id : null, visible:board});
   const showAssets = isAssetView();
-  const navigationParent = showAssets ? assetSearchToggle.parentElement : assetViewNavigationSlot;
+  const navigationParent = jobs ? assetViewNavigationSlot : assetSearchToggle.parentElement;
   let navigationFocus;
   if (assetViewNavigation.parentElement !== navigationParent) {
     if (assetViewNavigation.contains(document.activeElement)) navigationFocus = document.activeElement;
-    navigationParent.insertBefore(assetViewNavigation,showAssets ? assetSearchToggle : null);
+    navigationParent.insertBefore(assetViewNavigation,jobs ? null : assetSearchToggle);
   }
   $('#workspace-asset-controls').hidden = !showAssets;
+  const groupSearch = $('#group-search-locations');
+  const canGroupSearch = showAssets && Boolean(state.search) && state.layout !== 'masonry';
+  const groupByOrigin = canGroupSearch && libraryPreferences.getItem(originGroupPreference) === 'true';
+  groupSearch.hidden = !canGroupSearch;
+  groupSearch.setAttribute('aria-pressed',String(groupByOrigin));
   navigationFocus?.focus({preventScroll:true});
   $('#asset-grid').classList.toggle('hidden', !showAssets);
   renderLocation();
-  renderSubfolders();
+  const browse = currentAssetBrowse();
+  const focus = browse?.focus;
+  renderSubfolders(Boolean(focus));
   workspaceNavigation?.render();
   if (!isAssetView()) {
     videoCardDurations?.refresh();
@@ -865,14 +948,39 @@ function renderAssets(){
   const view = assetView(base);
   quickFilters.render(view);
   assetFilterToolbar.render();
-  const {rows} = view;
+  const ordered = browse?.order ? retainAssetOrder(view.rows,browse.order) : view.rows;
+  const rows = focus ? ordered.filter(asset => focus.ids.has(asset.id)) : ordered;
+  assetSearchLocations.update(state.search ? JSON.stringify([libraryScope(),state.search]) : '',rows);
+  if (focus) {
+    const inFocus = new Set(rows.map(asset => asset.id));
+    for (const id of markedAssets) if (!inFocus.has(id)) markedAssets.delete(id);
+    if (!markedAssets.has(markedAnchor)) markedAnchor = null;
+  }
+  if (browse?.marker) browse.marker.available = view.rows.some(asset => asset.id === browse.marker.id);
   displayedAssetRows = rows;
+  $('#show-material-sets').hidden = !rows.some(isMaterialSetImage);
+  renderAssetBrowseControls(browse);
   $('#result-count').textContent=rows.length;$('#active-filter').innerHTML=state.tag?`<button class="active-filter-chip">${escape(state.tag)} ×</button>`:'';
   $('#check-files').classList.toggle('hidden', !native || !rows.length);
   const grid = $('#asset-grid');
   const list = state.layout === 'list';
+  const rowGroups = !groupByOrigin && browse?.formats && !focus && state.layout === 'grid' ? assetFormatGroups(rows) : null;
+  const origins = groupByOrigin ? assetSearchLocations.groups(rows) : null;
+  const anchorOrigin = origins && state.assetWindowAnchor && assetsById.get(state.assetWindowAnchor);
+  const anchorGroup = anchorOrigin ? assetSearchLocations.group(anchorOrigin).key : null;
+  if (anchorGroup) assetSearchLocations.opened.add(anchorGroup);
+  const shownOrigins = origins ? [...origins.values()].slice(0,Math.ceil(state.limit / 60) * 40) : null;
+  if (anchorGroup && origins.has(anchorGroup) && !shownOrigins.some(group => group.key === anchorGroup)) shownOrigins.push(origins.get(anchorGroup));
+  if (state.assetWindowAnchor && rowGroups) {
+    browse.formats.delete(assetFormatGroup(assetsById.get(state.assetWindowAnchor)));
+  }
+  const gridRows = shownOrigins ? shownOrigins.flatMap(group => assetSearchLocations.opened.has(group.key) ? group.items : [])
+    : rowGroups ? [...rowGroups].flatMap(([format,group]) => browse.formats.has(format) ? [] : group) : rows;
   grid.classList.toggle('list-mode', list);
   grid.classList.toggle('masonry-mode', state.layout === 'masonry');
+  grid.toggleAttribute('data-quiet-browse',Boolean(browse?.quiet));
+  grid.toggleAttribute('data-alternate-rows',list && libraryPreferences.getItem(alternateAssetRowsKey) === 'true');
+  renderAssetBrowseOptions(browse);
   for (const [layout, selector] of Object.entries(assetViewButtons)) {
     const active = layout === state.layout;
     const button = $(selector);
@@ -881,14 +989,16 @@ function renderAssets(){
   }
   if (list) grid.setAttribute('role', 'table');
   else grid.removeAttribute('role');
-  $('#select-visible').disabled = !rows.length;
-  const anchorIndex = state.assetWindowAnchor ? rows.findIndex(asset => asset.id === state.assetWindowAnchor) : -1;
+  const anchorIndex = state.assetWindowAnchor ? gridRows.findIndex(asset => asset.id === state.assetWindowAnchor) : -1;
   const offset = anchorIndex >= 60 ? Math.floor(anchorIndex / 60) * 60 : 0;
-  const visible = rows.slice(offset, offset + state.limit);
+  const visible = gridRows.slice(offset, offset + state.limit);
+  $('#select-visible').disabled = !visible.length;
   const libraries = list ? new Map(state.libraries.map(library => [library.id, library])) : null;
   const focusedCard = document.activeElement?.matches('#asset-grid .asset-card') ? document.activeElement.dataset.id : null;
-  grid.innerHTML = (list && visible.length ? assetListHeadings : '') +
-    visible.map(asset => renderAssetCard(asset, libraries?.get(asset.libraryId))).join('');
+  grid.innerHTML = shownOrigins ? (list && visible.length ? assetListHeadings : '') + renderAssetOriginGroups(shownOrigins,visible,libraries)
+    : rowGroups ? renderAssetFormatGroups(rowGroups,browse.formats,visible)
+    : (list && visible.length ? assetListHeadings : '') +
+      visible.map(asset => renderAssetCard(asset, libraries?.get(asset.libraryId))).join('');
   renderGridSize();
   videoCardDurations?.refresh();
   if (focusedCard) grid.querySelector(`.asset-card[data-id="${CSS.escape(focusedCard)}"]`)?.focus({preventScroll:true});
@@ -897,22 +1007,54 @@ function renderAssets(){
   const emptyFavorites = state.view === 'favorites' && !base.length;
   const emptyTeam = team.active && state.view === 'all' && !emptyCollection && !base.length;
   const showRemoved = emptyTeam && !state.libraries.length && folderContext.hasRemoved();
-  $('#empty-heading').textContent = emptyCollection ? '合集里还没有可用资产'
+  $('#empty-heading').textContent = focus ? '当前筛选下没有聚焦的资产' : emptyCollection ? '合集里还没有可用资产'
     : emptyFolder ? (state.recursive ? '此文件夹暂无资产' : '此文件夹暂无直接存放的资产')
-    : emptyFavorites ? '还没有收藏的资产'
+    : emptyFavorites ? (favoriteExpiry.history ? '还没有到期的收藏' : '当前范围内没有收藏的资产')
     : showRemoved ? '团队库的文件夹已移除' : emptyTeam ? '团队库暂无资产' : '还没有匹配的资产';
-  const description = emptyCollection ? '从资产列表把卡片拖到左侧的合集名称。'
-    : emptyFavorites ? '在资产卡片上点击星标即可收藏。'
+  const description = focus ? '可更改筛选条件或退出聚焦。' : emptyCollection ? '从资产列表把卡片拖到左侧的合集名称。'
+    : emptyFavorites ? (favoriteExpiry.history ? '' : '在资产卡片上点击星标即可收藏。')
     : emptyTeam ? (!showRemoved && team.allLibraries.some(library => library.watching)
       ? 'NAS 共享目录里的素材会自动同步。' : '') : emptyFolder ? '' : '可以更改搜索词或筛选条件。';
   $('#empty-description').textContent = description;
   $('#empty-description').classList.toggle('hidden', !description);
-  $('#clear-filters').classList.toggle('hidden', Boolean(emptyCollection || emptyFolder || emptyFavorites || emptyTeam));
+  emptyAssetSearch.render({empty:!rows.length && !focus,filtered:Boolean(state.kind !== 'all' || state.rating || state.tag || state.workflow ||
+    state.fileNameQuery || state.formatIncludes.length || state.formatExcludes.length || state.tagIncludes.length ||
+    state.tagExcludes.length || state.quickFilters.length)});
+  $('#clear-filters').classList.toggle('hidden', Boolean(emptyCollection || emptyFolder || emptyFavorites || emptyTeam || !$('#empty-search-help').hidden));
   $('#view-removed-folders').classList.toggle('hidden', !showRemoved);
   $('#show-earlier-assets').classList.toggle('hidden', offset === 0);
-  $('#empty-state').classList.toggle('hidden',rows.length!==0);$('#load-more').classList.toggle('hidden',rows.length<=offset+state.limit);loadVisibleThumbs();
-  renderBulkBar();
+  const moreGroups = origins && shownOrigins.length < origins.size;
+  const moreRows = gridRows.length > offset + state.limit;
+  $('#empty-state').classList.toggle('hidden',rows.length!==0);
+  $('#load-more').classList.toggle('hidden',!moreRows && !moreGroups);
+  $('#load-more').textContent = moreGroups && !moreRows ? '加载更多位置' : '加载更多资产';
+  loadVisibleThumbs();
+  renderBulkBar(focus);
   return rows;
+}
+function renderAssetFormatGroups(groups,collapsed,visible) {
+  const visibleGroups = assetFormatGroups(visible);
+  return [...groups].map(([format,assets]) => {
+    const closed = collapsed.has(format);
+    const label = escape(format || '无扩展名');
+    return `<div class="asset-format-group" role="heading" aria-level="3"><button type="button"
+      data-asset-format-group="${escape(format)}" aria-expanded="${!closed}">${icon('chevron')}
+      <strong>${label}</strong> <span>${assets.length.toLocaleString('zh-CN')} 项</span></button></div>` +
+      (visibleGroups.get(format) || []).map(asset => renderAssetCard(asset)).join('');
+  }).join('');
+}
+function renderAssetOriginGroups(groups,visible,libraries) {
+  const visibleGroups = assetSearchLocations.groups(visible);
+  return groups.map(({key,title,items}) => {
+    const list = Boolean(libraries);
+    const label = escape(title);
+    const marked = items.some(asset => assetSearchLocations.alias(asset));
+    const button = `<button type="button" data-asset-origin-group="${escape(key)}" aria-expanded="${assetSearchLocations.opened.has(key)}"
+       title="${label}">${icon('chevron')}<strong>${label}</strong><span>${items.length.toLocaleString('zh-CN')} 项</span>${marked ? '<span>有同一 NAS 原件</span>' : ''}</button>`;
+    return `<div class="asset-format-group asset-origin-group" ${list ? 'role="row"' : 'role="heading" aria-level="3"'}>
+      ${list ? '<div role="cell">' + button + '</div>' : button}</div>` +
+      (visibleGroups.get(key)?.items || []).map(asset => renderAssetCard(asset,libraries?.get(asset.libraryId))).join('');
+  }).join('');
 }
 const assetListHeadings = `<div class="asset-list-header" role="row">
   <span class="asset-list-preview-heading" role="columnheader">预览</span>
@@ -979,7 +1121,9 @@ function renderAssetCard(asset, library) {
   const nameRow = nativeDragOut && explorerAssetFile(asset)
     ? `<div class="asset-card-name-row">${nameHeading}<button type="button" class="icon-button card-source" data-reveal-source="${id}" aria-label="定位原文件 ${title}" title="定位原文件">${icon('locate')}</button></div>`
     : nameHeading;
-  const secondaryName = list && (fileWarning || distinctAssetFileName(asset) || asset.subtitle);
+  const secondaryName = list && (distinctAssetFileName(asset) || asset.subtitle);
+  const alias = state.search ? assetSearchLocations.alias(asset) : null;
+  const aliasBadge = alias ? `<small class="asset-origin-alias" title="${escape(alias.path)}">同一 NAS 原件</small>` : '';
   const format = escape(asset.ext.toUpperCase());
   const cardLabel = escape(assetCardLabel(asset));
   const placeholder = icon(kindIcons[assetTypePreferences.effectiveKind(asset)] || 'box', 'placeholder-icon');
@@ -998,8 +1142,9 @@ function renderAssetCard(asset, library) {
     </div>
     <div class="card-info"${list ? ' role="presentation"' : ''}>
       ${list ? `<div class="asset-list-name" role="cell">${nameRow}
-        ${secondaryName ? `<small${fileWarning ? ' class="asset-list-file-warning"' : ''} title="${escape(secondaryName)}">${escape(secondaryName)}</small>` : ''}
-      </div>${renderAssetListDetails(asset, library)}` : nameRow}
+        ${secondaryName ? `<small title="${escape(secondaryName)}">${escape(secondaryName)}</small>` : ''}
+        ${fileWarning ? `<small class="asset-list-file-warning">${fileWarning}</small>` : ''}${aliasBadge}
+      </div>${renderAssetListDetails(asset, library)}` : nameRow + aliasBadge}
     </div>
   </article>`;
 }
@@ -1014,16 +1159,224 @@ function assetCardLabel(asset, duration) {
   const displayName = filename ? `${asset.name}，文件名 ${filename}` : asset.name;
   const fileState = fileStates.get(asset.id);
   return [displayName,format,duration && `时长 ${duration}`,asset.favorite ? '已收藏' : '未收藏',
+    state.search && assetSearchLocations.alias(asset) && '同一 NAS 原件',
     fileState && (fileState === 'missing' ? '文件缺失' : '无法访问')].filter(Boolean).join('，');
 }
-function renderBulkBar() {
+function renderBulkBar(focus = currentAssetBrowse()?.focus) {
   $('#bulk-bar').classList.toggle('hidden', !markedAssets.size);
   $('#selection-count').textContent = `已选 ${markedAssets.size} 项`;
+  $('#focus-marked-assets').hidden = Boolean(focus);
   $('#compare-assets').disabled = markedAssets.size < 2 || markedAssets.size > 4;
+  $('#contact-sheet-assets').disabled = markedAssets.size > contactSheetLimit;
   $('#batch-asset-ai').classList.toggle('hidden', !native);
   $('#batch-thumbnails').classList.toggle('hidden', !native);
   $('#remove-from-collection').classList.toggle('hidden', !currentCollection());
 }
+
+function currentAssetBrowse(create = false) {
+  if (!create && !assetBrowseTabs.size) return null;
+  for (const id of assetBrowseTabs.keys()) {
+    if (!workbenchTabs.hasTab(id)) assetBrowseTabs.delete(id);
+  }
+  const tab = workbenchTabs.activeId();
+  if (!tab) return null;
+  const location = JSON.stringify([state.view,state.library,state.folder,state.collection]);
+  let browse = assetBrowseTabs.get(tab);
+  if (browse?.location === location) return browse;
+  if (!create) {
+    assetBrowseTabs.delete(tab);
+    return null;
+  }
+  browse = {location};
+  assetBrowseTabs.set(tab,browse);
+  return browse;
+}
+
+function assetBrowseCard(id) {
+  return id ? $(`#asset-grid .asset-card[data-id="${CSS.escape(id)}"]`) : null;
+}
+
+function renderAssetBrowseOptions(browse) {
+  $('#asset-freeze-order').setAttribute('aria-pressed',String(Boolean(browse?.order)));
+  const grouping = $('#asset-group-formats');
+  grouping.disabled = Boolean(browse?.focus) || state.layout !== 'grid';
+  grouping.setAttribute('aria-pressed',String(Boolean(browse?.formats) && !grouping.disabled));
+  $('#asset-quiet-browse').setAttribute('aria-pressed',String(Boolean(browse?.quiet)));
+  $('#asset-alternate-rows').setAttribute('aria-pressed',String(libraryPreferences.getItem(alternateAssetRowsKey) === 'true'));
+  const neutralPreview = libraryPreferences.getItem(neutralAssetPreviewKey) === 'true';
+  document.documentElement.toggleAttribute('data-neutral-asset-preview',neutralPreview);
+  $('#asset-neutral-canvas').setAttribute('aria-pressed',String(neutralPreview));
+}
+
+$('#asset-freeze-order').addEventListener('click',() => {
+  const browse = currentAssetBrowse(true);
+  if (!browse) return;
+  if (browse.order) delete browse.order;
+  else browse.order = (browse.focus ? filtered() : displayedAssetRows).map(asset => asset.id);
+  renderAssets();
+});
+$('#asset-group-formats').addEventListener('click',() => {
+  const browse = currentAssetBrowse(true);
+  if (!browse || browse.focus || state.layout !== 'grid') return;
+  if (browse.formats) delete browse.formats;
+  else browse.formats = new Set();
+  renderAssets();
+});
+$('#asset-quiet-browse').addEventListener('click',() => {
+  const browse = currentAssetBrowse(true);
+  if (!browse) return;
+  browse.quiet = !browse.quiet;
+  if (browse.quiet) videoHover?.stop();
+  renderAssets();
+});
+$('#asset-alternate-rows').addEventListener('click',() => {
+  libraryPreferences.setItem(alternateAssetRowsKey,String(libraryPreferences.getItem(alternateAssetRowsKey) !== 'true'));
+  renderAssets();
+});
+$('#asset-neutral-canvas').addEventListener('click',() => {
+  libraryPreferences.setItem(neutralAssetPreviewKey,String(libraryPreferences.getItem(neutralAssetPreviewKey) !== 'true'));
+  renderAssetBrowseOptions(currentAssetBrowse());
+});
+$('#asset-grid').addEventListener('click',event => {
+  const toggle = event.target.closest('[data-asset-format-group]');
+  const collapsed = currentAssetBrowse()?.formats;
+  if (!toggle || !collapsed) return;
+  const format = toggle.dataset.assetFormatGroup;
+  if (collapsed.has(format)) collapsed.delete(format);
+  else {
+    collapsed.add(format);
+    if (state.assetWindowAnchor && assetFormatGroup(assetsById.get(state.assetWindowAnchor)) === format) state.assetWindowAnchor = null;
+  }
+  renderAssets();
+  $(`#asset-grid [data-asset-format-group="${CSS.escape(format)}"]`)?.focus({preventScroll:true});
+});
+$('#group-search-locations').addEventListener('click',event => {
+  libraryPreferences.setItem(originGroupPreference,String(event.currentTarget.getAttribute('aria-pressed') !== 'true'));
+  state.assetWindowAnchor = null;
+  renderAssets();
+});
+$('#asset-grid').addEventListener('click',event => {
+  const toggle = event.target.closest('[data-asset-origin-group]');
+  if (!toggle) return;
+  const key = toggle.dataset.assetOriginGroup;
+  if (!assetSearchLocations.opened.delete(key)) assetSearchLocations.opened.add(key);
+  state.assetWindowAnchor = null;
+  renderAssets();
+  $(`#asset-grid [data-asset-origin-group="${CSS.escape(key)}"]`)?.focus({preventScroll:true});
+});
+
+function renderAssetBrowseControls(browse) {
+  $('#exit-asset-focus').hidden = !browse?.focus;
+  const marker = browse?.marker;
+  const asset = assetsById.get(marker?.id);
+  if (asset === undefined && marker) delete browse.marker;
+  $('#asset-browse-marker').hidden = !asset;
+  if (!asset) return;
+  const label = '返回标记 · ' + asset.name;
+  const button = $('#return-to-asset-marker');
+  button.title = marker.available ? label : label + '（当前筛选未显示）';
+  button.setAttribute('aria-label',button.title);
+}
+
+function captureAssetBrowseScroll(scroll) {
+  const position = {scrollTop:scroll.scrollTop};
+  const top = scroll.getBoundingClientRect().top + scroll.clientTop;
+  const bottom = top + scroll.clientHeight;
+  for (const card of $$('#asset-grid .asset-card')) {
+    const bounds = card.getBoundingClientRect();
+    if (bounds.bottom > top && bounds.top < bottom) {
+      position.id = card.dataset.id;
+      position.offset = bounds.top - top;
+      break;
+    }
+  }
+  return position;
+}
+
+function startAssetFocus() {
+  const ids = new Set(displayedAssetRows.filter(asset => markedAssets.has(asset.id)).map(asset => asset.id));
+  if (!ids.size) return toast('当前筛选未显示已选资产');
+  const browse = currentAssetBrowse(true);
+  if (!browse || browse.focus) return;
+  const scroll = $('#browser-scroll');
+  browse.focus = {ids, limit:state.limit, anchor:state.assetWindowAnchor, position:captureAssetBrowseScroll(scroll)};
+  state.assetWindowAnchor = null;
+  renderAssets();
+  scroll.scrollTop = 0;
+  $('#exit-asset-focus').focus({preventScroll:true});
+}
+
+function leaveAssetFocus(browse) {
+  const focus = browse?.focus;
+  if (!focus) return null;
+  delete browse.focus;
+  state.limit = focus.limit;
+  state.assetWindowAnchor = focus.anchor;
+  return focus.position;
+}
+
+function restoreAssetBrowseScroll(position) {
+  const scroll = $('#browser-scroll');
+  const card = assetBrowseCard(position.id);
+  scroll.scrollTop = position.scrollTop;
+  if (card) {
+    const top = scroll.getBoundingClientRect().top + scroll.clientTop;
+    scroll.scrollTop += card.getBoundingClientRect().top - top - position.offset;
+  }
+  return card;
+}
+
+function exitAssetFocus() {
+  const position = leaveAssetFocus(currentAssetBrowse());
+  if (!position) return false;
+  const exitingByButton = document.activeElement === $('#exit-asset-focus');
+  renderAssets();
+  const card = restoreAssetBrowseScroll(position);
+  if (exitingByButton) {
+    (card || $('#asset-grid .asset-card') || assetSearchToggle).focus({preventScroll:true});
+  }
+  return true;
+}
+
+function setAssetBrowseMarker(id) {
+  const browse = currentAssetBrowse(true);
+  if (!browse || !assetsById.has(id) || !assetBrowseCard(id)) return;
+  if (browse.marker?.id === id) delete browse.marker;
+  else browse.marker = {id,available:true};
+  renderAssetBrowseControls(browse);
+}
+
+function returnToAssetBrowseMarker() {
+  const browse = currentAssetBrowse();
+  const marker = browse?.marker;
+  if (!marker?.available) return toast('当前筛选未显示标记资产');
+  if (browse.focus && !browse.focus.ids.has(marker.id)) {
+    leaveAssetFocus(browse);
+    state.assetWindowAnchor = marker.id;
+    renderAssets();
+  } else if (!assetBrowseCard(marker.id)) {
+    state.assetWindowAnchor = marker.id;
+    renderAssets();
+  }
+  const card = assetBrowseCard(marker.id);
+  if (!card) return toast('未找到标记资产');
+  card.scrollIntoView({block:'nearest'});
+  card.focus({preventScroll:true});
+  highlightAssetCard(card);
+}
+
+$('#focus-marked-assets').addEventListener('click',startAssetFocus);
+$('#exit-asset-focus').addEventListener('click',exitAssetFocus);
+$('#return-to-asset-marker').addEventListener('click',returnToAssetBrowseMarker);
+$('#clear-asset-marker').addEventListener('click',() => {
+  const browse = currentAssetBrowse();
+  if (!browse?.marker) return;
+  const card = assetBrowseCard(browse.marker.id);
+  delete browse.marker;
+  renderAssetBrowseControls(browse);
+  (card || assetSearchToggle).focus({preventScroll:true});
+});
+
 const thumbObserver=new IntersectionObserver(entries=>{for(const e of entries)if(e.isIntersecting){thumbObserver.unobserve(e.target);const img=e.target.querySelector('[data-thumb]');if(img)enqueueThumb(img);}},{rootMargin:'200px'});
 let thumbActive=0,thumbCacheBytes=0,thumbGeneration=0;const thumbQueue=[];
 const pendingThumbnails = new Map();
@@ -2057,6 +2410,7 @@ function renderConnections(){
     ? connectionLabel + ' · ' + placementHosts.join('、') + ' 视口放置已就绪'
     : connectionLabel;
   dccConnections.render();
+  materialSets.refreshTargets();
   const dock = $('#dcc-drop-dock');
   dock.innerHTML = state.sessions.map(session => '<button type="button" tabindex="-1" class="button subtle" title="' +
     (session.dcc === 'c4d' ? '拖入模型或工程以选择导入选项' : '放在这里将直接导入当前场景') + '" data-drop-session="' +
@@ -2112,6 +2466,7 @@ async function favorite(id, value) {
   if (id === state.selected) renderInspector(false);
 }
 async function setFavorite(a, value) {
+  const scope = collectionScope();
   if (isTeamAsset(a)) {
     await teamOrganization.setFavorite(a.id, value);
   } else {
@@ -2119,17 +2474,20 @@ async function setFavorite(a, value) {
     Object.assign(a, result);
     if (!a.favorite) delete a.favoriteAt;
   }
+  if (!value && scope === collectionScope()) favoriteExpiry.remove(a.id);
   navSummary = null;
   refreshExplorerCatalog();
 }
-function resetFilters(restoreFolder = false, assetWindowAnchor = null) {
+function resetFilters(restoreFolder = false, assetWindowAnchor = null, {preserveSearch = false} = {}) {
   assetFilterToolbar.close();
-  Object.assign(state, {kind:'all',tag:null,search:'',limit:60,rating:0,workflow:'',
+  Object.assign(state, {kind:'all',tag:null,search:preserveSearch ? state.search : '',limit:60,rating:0,workflow:'',
     formatIncludes:[],formatExcludes:[],tagIncludes:[],tagExcludes:[],quickFilters:[],fileNameQuery:'',assetWindowAnchor});
   if (restoreFolder) Object.assign(state, quickFilters.remembered());
-  else if (!assetWindowAnchor) quickFilters.saveIfRemembered();
-  assetSearchInput.value = '';
-  setAssetSearchExpanded(false);
+  else if (!assetWindowAnchor && !preserveSearch) quickFilters.saveIfRemembered();
+  if (!preserveSearch) {
+    assetSearchInput.value = '';
+    setAssetSearchExpanded(false);
+  }
   $('#rating-filter').value = '0';
   $('#workflow-filter').value = '';
   $('#browser-scroll').scrollTop = 0;
@@ -2424,6 +2782,12 @@ function clearAssetModeHighlight() {
   assetModeHighlight?.classList.remove('asset-view-located');
   assetModeHighlight = null;
 }
+function highlightAssetCard(card) {
+  clearAssetModeHighlight();
+  assetModeHighlight = card;
+  card.classList.add('asset-view-located');
+  assetModeHighlightTimer = setTimeout(clearAssetModeHighlight,1600);
+}
 function selectMode(layout) {
   if (state.layout === layout || !isAssetView()) return;
   clearAssetModeHighlight();
@@ -2442,9 +2806,7 @@ function selectMode(layout) {
   const box = card.getBoundingClientRect();
   scroll.scrollTop += box.top - scroll.getBoundingClientRect().top - scroll.clientTop +
     (box.height - scroll.clientHeight) / 2;
-  assetModeHighlight = card;
-  card.classList.add('asset-view-located');
-  assetModeHighlightTimer = setTimeout(clearAssetModeHighlight, 1600);
+  highlightAssetCard(card);
 }
 for (const [layout, selector] of Object.entries(assetViewButtons)) {
   $(selector).addEventListener('click', () => selectMode(layout));
@@ -2718,12 +3080,177 @@ const filePreferences = initFileWorkspacePreferences({
   focusNewTabControl:() => (newTabMenu.hidden ? newTabTrigger : newTabMenu).focus({preventScroll:true}),
   report:toast,
 });
+initFilePreferenceTransfer({controller:filePreferences, closeMenu:() => closeTopTools(true)});
+const favoriteExpiry = initFavoriteExpiry({scope:collectionScope,
+  async ensureFavorite(id,scope) {
+    const asset = assetsById.get(id);
+    if (!asset || scope !== collectionScope()) throw Error('资产所在工作区已切换');
+    if (!asset.favorite) await setFavorite(asset,true);
+  },
+  refresh() {
+    navSummary = null;
+    renderNav();
+    if (state.view === 'favorites') renderAssets();
+  },
+});
+initCatalogHealth({enabled:native, api, closeMenu:() => closeTopTools(true),
+  current:() => team.active ? null : {...personalWorkspace}});
+initAssetInventory({
+  scope:collectionScope, closeMenu:() => closeTopTools(true), canImport:native,
+  pickFolder:native ? () => api('pick_folder',{purpose:'inventory-root'}) : undefined,
+  exportHtml:native ? (root,ids,expected) => {
+    if (expected !== collectionScope()) throw Error('当前工作区已切换，请重新选择导出范围');
+    return api('export_offline_asset_catalog',{root,ids});
+  } : undefined,
+  openHtml:native ? path => api('open_local_file',{path}) : undefined,
+  data(snapshot = false) {
+    if (snapshot) return {assets:state.assets.map(asset => ({
+      id:asset.id,path:asset.path,revision:asset.revision,...metadataFields(asset),
+    }))};
+    const library = currentLibrary();
+    const visible = isAssetView() ? displayedAssetRows : state.assets;
+    const ids = markedAssets.size ? [...markedAssets] : state.selected ? [state.selected] : [];
+    return {
+      root:library ? diskFolderPath(library,state.folder) : '',
+      visible, marked:ids.map(id => assetsById.get(id)).filter(Boolean),
+      favorites:state.view === 'favorites' ? visible : state.assets.filter(asset =>
+        asset.favorite && !favoriteExpiry.expired(asset,Date.now())),
+    };
+  },
+  async apply(snapshot,patch,scope) {
+    const asset = assetsById.get(snapshot.id);
+    if (!asset || scope !== collectionScope()) throw Error('当前工作区或资产已变化，请重新预览。');
+    if (editor.id === snapshot.id && (editor.saving || editor.dirty)) throw Error('请先保存资产详情里的更改。');
+    if (isTeamAsset(asset) && (team.fromLocalIndex || $('#team-sync-status').dataset.offline === 'yes')) {
+      throw Error('团队库离线，暂时无法保存。');
+    }
+    const {id,revision,...expected} = snapshot;
+    const latest = {...metadataFields(asset),path:asset.path};
+    if (asset.revision !== revision || Object.keys(expected).some(field =>
+      JSON.stringify(expected[field]) !== JSON.stringify(latest[field]))) {
+      throw Error('资产资料或路径已变化，请重新预览。');
+    }
+    if (!Object.keys(patch).length) return false;
+    await writeMetadata(asset,patch,revision,expected);
+    return true;
+  },
+  partlyApplied(scope) {
+    if (scope !== collectionScope()) return;
+    renderNav();
+    renderAssets();
+    if (!editor.dirty && !editor.saving) void renderInspector(false).catch(error);
+  },
+});
+const workspaceNetworkPath = (path,toLocal) => nativeDragOut
+  ? api('workspace_network_path',{path,toLocal}).then(value => typeof value === 'string' && value ? value : path,() => path)
+  : Promise.resolve(path);
+let whiteboardRegionNavigation = 0;
+async function navigateWhiteboardShot(code,{projectId,stillRequested = () => true} = {}) {
+  const revision = ++whiteboardRegionNavigation;
+  if (!stillRequested()) return false;
+  await ensureAssetWorkspace();
+  const scope = collectionScope();
+  const current = () => revision === whiteboardRegionNavigation && scope === collectionScope();
+  const searching = () => current() && stillRequested();
+  const regions = await whiteboard.findShotRegions(code,scope,{projectId,stillRequested:searching});
+  if (!searching()) return false;
+  if (!regions.length) throw Error('找不到此镜头的白板区域，可在白板「区域」中关联镜头号');
+  const region = await chooseWhiteboardRegion(regions,regions[0].shot);
+  if (!region || !searching()) return false;
+  if (!fileWorkspace.hidden) await showAssetWorkspace();
+  if (!current() || !fileWorkspace.hidden) return false;
+  if (state.view !== 'whiteboard' && !await workbenchTabs.openView('白板','whiteboard')) return false;
+  const mounted = () => current() && fileWorkspace.hidden && state.view === 'whiteboard';
+  if (!mounted()) return false;
+  const focused = await whiteboard.focusShotRegion(region,scope,mounted);
+  if (!focused && mounted()) throw Error('此白板区域已移除或暂不可用');
+  return focused && mounted();
+}
+initShotDashboard({enabled:nativeDragOut,api,scope:collectionScope,assets:() => state.assets,
+  activeAsset:() => assetsById.get(state.selected), boards:scope => whiteboard.listClipProjects(scope),
+  networkPath:workspaceNetworkPath, closeMenu:() => closeTopTools(true), notify:toast,
+  async open(role,reference,scope) {
+    if (scope !== collectionScope()) throw Error('镜头所在的资产库已切换');
+    if (role === 'board-region') return navigateWhiteboardShot(reference.code,{projectId:reference.projectId,
+      stillRequested:() => scope === collectionScope()});
+    if (role === 'board') {
+      if (!fileWorkspace.hidden) await showAssetWorkspace();
+      if (scope !== collectionScope() || !await workbenchTabs.openView('白板','whiteboard') ||
+          !await whiteboard.restoreProject(reference.id)) throw Error('当前工作区找不到关联白板');
+      return;
+    }
+    if (role === 'render' || role === 'locked') {
+      const path = await workspaceNetworkPath(reference.path,true);
+      if (scope !== collectionScope()) return;
+      if (role === 'render') return renderSequenceViewer.show({path,isDirectory:true});
+      return api('open_local_file',{path});
+    }
+    const asset = assetsById.get(reference.id);
+    if (role === 'preview' && asset?.kind === 'video') return showQuickPreview(asset.id,[asset.id]);
+    const file = explorerAssetFile(asset);
+    if (!file || asset.ext !== 'c4d') throw Error('工程原件暂不可用，请核对资产和挂载');
+    return api('open_local_file',{path:file.path});
+  },
+});
 initWorkspaceSettingsSearch(topTools, closeTopTools);
-initWorkspaceGuide(topTools, closeTopTools);
+const formatHelp = initFormatHelp({
+  api,native,kindName:kind => kinds[kind],
+  async context({file,kind,extension}) {
+    if (file) await ensureAssetWorkspace().catch(() => {});
+    const loaded = Boolean(assetWorkspaceReady) && !appRoot.classList.contains('app-starting');
+    const asset = file && loaded ? indexedExplorerFile(file.path) : null;
+    return {
+      name:team.active ? team.info.team.name : personalWorkspace.name,
+      team:team.active, loaded, indexed:Boolean(asset),
+      hiddenFormat:Boolean(loaded && kind && !assetTypePreferences.enabled(asset || {kind,ext:extension})),
+    };
+  },
+});
+initWorkspaceGuide(topTools, closeTopTools, {openFormatHelp:formatHelp.show});
+const exrChannelViewer = initExrChannelViewer({api});
+const renderSequenceViewer = initRenderSequenceViewer({api,onCompareExr:exrChannelViewer.show});
 const projectDependencies = initProjectDependencies({api,async reveal(path) {
   revealFileWorkspace();
   await localExplorer.openPath(path);
 }});
+const projectCleanup = initProjectCleanup({api,reveal:path => localExplorer.openPath(path)});
+if (nativeDragOut) initDeliveryTemplate({api,closeMenu:() => closeTopTools(true),notify:toast,
+  currentFolder:() => !fileWorkspace.hidden ? localExplorer.getCurrentDirectory() :
+    currentLibrary() ? diskFolderPath(currentLibrary(),state.folder) : '',
+  openFolder(path) { revealFileWorkspace(); return localExplorer.openPath(path); },
+});
+const materialSets = initMaterialSets({
+  button:$('#show-material-sets'),
+  current:() => {
+    const libraries = new Map(state.libraries.map(library => [library.id,library]));
+    return {
+      rows:displayedAssetRows, scope:collectionScope(), keywords:smartOptions().map_keywords,
+      libraryName:id => libraries.get(id)?.name || '',
+      pathFor:asset => matchFolderAddress(asset.path,[])?.path ||
+        relativeAssetPath(asset,libraries.get(asset.libraryId)),
+    };
+  },
+  targets:() => native ? state.sessions.filter(session => session.dcc === 'c4d' &&
+    session.smartImport === true && session.pbrMaterialSets === true) : [],
+  canSend:group => native && group.ids.every(id => explorerAssetFile(assetsById.get(id))),
+  async send(group,{scope,sessionId}) {
+    const session = state.sessions.find(item => item.id === sessionId && item.pbrMaterialSets === true);
+    const anchor = assetsById.get(group.ids[0]);
+    if (collectionScope() !== scope || !group.ids.every(id => explorerAssetFile(assetsById.get(id)))) {
+      throw Error('材质贴图来源已变化，请重新打开材质套图。');
+    }
+    if (!canUseSmartImport(session,anchor)) throw Error('目标 Cinema 4D 实例已离线。');
+    const channels = Object.fromEntries(group.maps.filter(map => map.variants.length)
+      .map(map => [map.key,map.variants.map(variant => variant.id)]));
+    const job = await api('queue_import',{assetId:anchor.id,sessionId,workspace:libraryScope(),
+      smartOptions:{...smartOptions(),kind:'pbr',lod:null,pbr_material_set:{name:group.name,channels}}});
+    if (scope !== collectionScope()) return;
+    if (!state.jobs.some(item => item.id === job.id)) state.jobs.unshift(job);
+    renderJobCount();
+    if (state.view === 'jobs') renderJobs();
+  },
+  notify:toast,
+});
 const workspaceHandoff = initWorkspaceHandoff({capture:captureWorkspaceHandoff,open:openWorkspaceHandoff,notify:toast});
 $('#workspace-handoff-export').addEventListener('click', () => {
   closeTopTools(true);
@@ -3352,18 +3879,37 @@ let quickAssets = [];
 let quickIndex = 0;
 const quickVideo = $('#quick-preview-video');
 const quickVideoPlayer = $('#quick-video-player');
+const quickVideoBackground = $('#quick-video-background');
+quickVideo.addEventListener('loadedmetadata',() => { quickVideoBackground.hidden = !quickVideo.videoWidth; });
+quickVideo.addEventListener('emptied',() => { quickVideoBackground.hidden = true; });
+quickVideoBackground.addEventListener('change',() => { quickVideoPlayer.dataset.background = quickVideoBackground.value; });
 const quickVideoControls = initVideoControls(quickVideoPlayer, quickVideo);
 const quickPlayer = $('#quick-open-player');
 const quickMessage = $('#quick-preview-message');
 const quickDialog = $('#quick-preview-dialog');
+const quickVideoClip = initQuickVideoClip({dialog:quickDialog,video:quickVideo,
+  context() {
+    const asset = assetsById.get(quickAssets[quickIndex]);
+    if (!native || !quickDialog.open || asset?.kind !== 'video' || fileStates.has(asset.id) || isTeamAsset(asset) && !asset.teamMounted) return null;
+    return {id:asset.id,name:asset.name,serial:quickSequence,scope:collectionScope(),project:whiteboard.captureProject()};
+  },
+  listProjects:scope => whiteboard.listClipProjects(scope),
+  save:saveQuickVideoClip,
+});
 const quickImageBackground = $('#quick-image-background');
 const quickImagePreview = initQuickImagePreview({viewport:$('#quick-preview-image-viewport'), image:$('#quick-preview-image'),
-  background:quickImageBackground});
+  background:quickImageBackground,toolbar:$('#quick-image-tools')});
+initVideoFraming({video:quickVideo,player:quickVideoPlayer,dialog:quickDialog});
+initVideoRangeLoop(quickVideoPlayer,quickVideo);
+const quickOriginalImageFormats = new Set(['png','jpg','jpeg','jfif','webp','bmp']);
+const hasOriginalImagePreview = asset => asset.kind === 'texture' && quickOriginalImageFormats.has(asset.ext.toLowerCase());
 let quickVideoFallback;
 let quickBufferTimer;
+let quickVideoStart = 0;
 function resetQuickVideo() {
   clearTimeout(quickBufferTimer);
   quickVideoFallback = null;
+  quickVideoStart = 0;
   quickVideoPlayer.classList.add('hidden');
   quickPlayer.classList.add('hidden');
   quickVideo.removeAttribute('poster');
@@ -3373,6 +3919,7 @@ function resetQuickVideo() {
     quickVideo.load();
   }
   quickVideoControls.reset();
+  quickVideoClip.reset();
 }
 function playQuickVideo(url) {
   quickVideo.src = url;
@@ -3381,7 +3928,7 @@ function playQuickVideo(url) {
   // The open action is user-initiated. Keep the controls usable if autoplay is blocked.
   quickVideo.play().catch(() => {});
 }
-function showQuickPreview(id, queue) {
+function showQuickPreview(id, queue, {startTime = 0} = {}) {
   const asset = assetsById.get(id);
   if (!asset) return;
   runtimeLog.add(`打开快速预览 · ${asset.name}`, 'info', 'preview');
@@ -3393,9 +3940,9 @@ function showQuickPreview(id, queue) {
     quickIndex = 0;
   }
   openDialog('#quick-preview-dialog');
-  renderQuickPreview();
+  renderQuickPreview(startTime);
 }
-async function renderQuickPreview() {
+async function renderQuickPreview(startTime = 0) {
   const serial = ++quickSequence;
   const asset = assetsById.get(quickAssets[quickIndex]);
   const canvas = $('#quick-preview-canvas');
@@ -3403,7 +3950,8 @@ async function renderQuickPreview() {
   canvas.classList.add('hidden');
   quickImagePreview.reset();
   resetQuickVideo();
-  $('#quick-preview-tools').classList.add('hidden');
+  quickVideoStart = startTime;
+  quickMeshTools.reset();
   $('#quick-position').textContent = `${quickIndex+1} / ${quickAssets.length}`;
   $('#quick-previous').disabled = quickIndex === 0;
   $('#quick-next').disabled = quickIndex === quickAssets.length - 1;
@@ -3438,7 +3986,7 @@ async function renderQuickPreview() {
       canvas.classList.remove('hidden');
       const stats = loadMesh(quickRenderer, payload, asset);
       $('#quick-preview-caption').textContent += ` · ${stats.faces.toLocaleString()} 面 · 拖动旋转，滚轮缩放`;
-      $('#quick-preview-tools').classList.remove('hidden');
+      quickMeshTools.show(stats);
       message.textContent = '';
       return;
     } catch (e) { meshError = e; }
@@ -3449,7 +3997,11 @@ async function renderQuickPreview() {
     const payload = await api('read_preview', {id:asset.id,mode:'large'});
     if (serial !== quickSequence) return;
     if (payload?.url) {
-      quickImagePreview.show(payload.url);
+      const original = hasOriginalImagePreview(asset);
+      quickImagePreview.show(payload.url,{
+        original:native && original ? () => api('read_preview',{id:asset.id,mode:'original_pixels'}) : undefined,
+        originalDisplayed:!native && original,
+      });
       $('#quick-preview-caption').textContent += ' · 滚轮缩放，按住中键平移';
       message.textContent = '';
     } else {
@@ -3458,6 +4010,25 @@ async function renderQuickPreview() {
   } catch (e) {
     if (serial === quickSequence) message.textContent = String(e?.message || e);
   }
+}
+async function saveQuickVideoClip(clip, requested) {
+  const current = () => requested() && clip.scope === collectionScope() && assetsById.get(clip.id)?.kind === 'video';
+  if (!current()) throw Error('视频预览已切换');
+  if (!fileWorkspace.hidden) await showAssetWorkspace();
+  if (!current()) return;
+  if (state.view !== 'whiteboard' || whiteboard.captureProject() !== clip.projectId) {
+    const passiveBoard = $$('.workspace-pane-preview [data-whiteboard-project]').find(node => node.dataset.whiteboardProject === clip.projectId);
+    const pane = passiveBoard?.closest('.workspace-pane');
+    const switched = pane ? await workbenchTabs.focusPane(pane,pane.getAttribute('aria-labelledby')) : await workbenchTabs.openView('白板','whiteboard');
+    if (!switched) throw Error('白板尚未打开，当前预览已保留');
+  }
+  if (!current()) return;
+  if (!await whiteboard.restoreProject(clip.projectId)) throw Error('选择的白板项目暂不可用');
+  if (!current()) return;
+  if (!await whiteboard.addVideoClip(clip.projectId,{...clip,workspaceKey:clip.scope},current)) {
+    throw Error('白板暂时无法添加此视频引用');
+  }
+  if (current()) toast('片段已添加到白板');
 }
 function nextQuick(step) {
   const next = quickIndex + step;
@@ -3470,6 +4041,15 @@ $('#preview-marked-assets').addEventListener('click', () => {
   if (!isAssetView()) return;
   const ids = [...markedAssets].filter(id => assetsById.has(id));
   if (ids.length) showQuickPreview(ids.includes(state.selected) ? state.selected : ids[0], ids);
+});
+const assetContactSheet = initAssetContactSheet({readThumbnail:asset => {
+  const cached = thumbCache.get(asset.id);
+  if (cached) return cached;
+  if (fileStates.has(asset.id) || isTeamAsset(asset) && !asset.teamMounted) return null;
+  return readThumbnail(asset,512,false);
+}});
+$('#contact-sheet-assets').addEventListener('click', () => {
+  if (isAssetView()) void assetContactSheet.show([...markedAssets].map(id => assetsById.get(id)).filter(Boolean));
 });
 let quickBackdropPress = false;
 function isQuickBackdrop(event) {
@@ -3489,10 +4069,11 @@ quickDialog.addEventListener('close', () => {
   quickSequence++;
   quickBackdropPress = false;
   quickImagePreview.reset();
+  quickMeshTools.reset();
   resetQuickVideo();
 });
 quickDialog.addEventListener('keydown', event => {
-  if (quickVideoPlayer.contains(event.target) || event.target === quickImageBackground) return;
+  if (quickVideoPlayer.contains(event.target) || quickVideoClip.contains(event.target) || event.target.closest('select')) return;
   if (!['ArrowLeft','ArrowRight'].includes(event.key)) return;
   event.preventDefault();
   nextQuick(event.key === 'ArrowLeft' ? -1 : 1);
@@ -3510,6 +4091,11 @@ function clearQuickBuffer() {
 for (const event of ['loadeddata', 'canplay', 'playing', 'pause']) {
   quickVideo.addEventListener(event, clearQuickBuffer);
 }
+quickVideo.addEventListener('loadedmetadata',() => {
+  if (quickVideoStart > 0 && Number.isFinite(quickVideo.duration)) {
+    quickVideo.currentTime = Math.min(quickVideoStart,Math.max(0,quickVideo.duration - .001));
+  }
+});
 quickVideo.addEventListener('waiting', () => {
   clearTimeout(quickBufferTimer);
   if (!quickVideo.currentTime || quickVideo.paused) return;
@@ -3528,12 +4114,6 @@ quickVideo.addEventListener('error', () => {
   quickVideoControls.reset();
   quickMessage.textContent = '无法在这里播放，请用系统播放器打开';
 });
-$('#quick-wireframe').addEventListener('click', event => {
-  quickRenderer.wire = !quickRenderer.wire;
-  event.currentTarget.setAttribute('aria-pressed', String(quickRenderer.wire));
-  quickRenderer.draw();
-});
-$('#quick-reset').addEventListener('click', () => quickRenderer.reset());
 
 let appliedLibraryScope;
 function loadLibraryPreferences() {
@@ -4311,28 +4891,32 @@ async function copyWhiteboardMediaReferences(assetIds) {
 
 async function batchAssets(ids, operation, label) {
   const scope = collectionScope();
-  let done = 0;
-  const failures = [];
+  const outcomes = [];
   const assets = assetsById;
   for (const id of ids) {
     if (scope !== collectionScope()) {
-      failures.push('工作空间已切换');
+      outcomes.push({id,name:'',failure:'工作空间已切换'});
       break;
     }
     const asset = assets.get(id);
     if (!asset) {
-      failures.push('找不到资产');
+      outcomes.push({id,name:'未找到的资产',failure:'资产已不在当前索引'});
       continue;
     }
     try {
       await operation(asset);
-      done += 1;
+      outcomes.push({id,name:asset.name,failure:null});
     } catch (e) {
-      failures.push(asset.name + ' · ' + (e?.message || e));
+      outcomes.push({id,name:asset.name,failure:String(e?.message || e)});
     }
   }
-  const count = failures.length;
-  toast(label + ' ' + done + ' 项' + (count ? '，' + count + ' 项未处理 · ' + failures[0] : ''), count > 0);
+  if (label) {
+    const failures = outcomes.filter(outcome => outcome.failure !== null);
+    const first = failures[0];
+    toast(label + ' ' + (outcomes.length - failures.length) + ' 项' +
+      (first ? '，' + failures.length + ' 项未处理 · ' + [first.name,first.failure].filter(Boolean).join(' · ') : ''), Boolean(first));
+  }
+  return outcomes;
 }
 
 async function copyFiles(ids) {
@@ -4358,19 +4942,23 @@ async function checkFiles(ids) {
   try {
     let missing = 0;
     let unavailable = 0;
+    let fingerprints = 0;
     for (let offset = 0; offset < ids.length; offset += 250) {
       const assetIds = ids.slice(offset, offset + 250);
-      const result = await api(command, {ids: assetIds});
+      const result = await api(command, {ids: assetIds,
+        ...(command === 'check_asset_files' && offset === 0 && {recordContent:true})});
       if (scope !== collectionScope()) return;
       for (const id of assetIds) fileStates.delete(id);
       for (const id of result.missing) fileStates.set(id, 'missing');
       for (const id of result.unavailable) fileStates.set(id, 'unavailable');
       missing += result.missing.length;
       unavailable += result.unavailable.length;
+      fingerprints += result.fingerprints || 0;
     }
     renderAssets();
     renderInspector(false);
-    const summary = `检查了 ${ids.length} 项 · ${missing} 项缺失 · ${unavailable} 项无法访问`;
+    const summary = `检查了 ${ids.length} 项 · ${missing} 项缺失 · ${unavailable} 项无法访问` +
+      (fingerprints ? ` · 已记录 ${fingerprints} 项内容校验` : '');
     runtimeLog.add(summary, 'info', 'folders');
     toast(summary, Boolean(missing || unavailable));
   } finally {
@@ -4413,7 +5001,7 @@ async function showRelinkSuggestions(id) {
   relinkStatus.textContent = '正在查找可能的新位置…';
   relinkDialog.showModal();
   try {
-    const {candidates,truncated} = await api('suggest_asset_relinks', {id});
+    const {candidates,truncated,hasContentFingerprint} = await api('suggest_asset_relinks', {id});
     if (relinkDraft !== draft || !relinkDialog.open) return;
     draft.candidates = candidates;
     relinkCandidates.replaceChildren(...candidates.map(({name,path,matchFactors},index) => {
@@ -4435,8 +5023,9 @@ async function showRelinkSuggestions(id) {
     }));
     relinkCandidates.disabled = !candidates.length;
     relinkStatus.textContent = candidates.length
-      ? '请核对路径和匹配依据，再确认关联。' + (truncated ? '已显示限定范围内的结果。' : '')
-      : '未在限定范围内找到候选，可手动选择文件。';
+      ? (hasContentFingerprint ? '候选文件通过 SHA-256 内容校验，请核对路径后确认关联。'
+        : '原文件暂无内容校验记录，请按路径和匹配依据确认。') + (truncated ? '已显示限定范围内的结果。' : '')
+      : (hasContentFingerprint ? '未在限定范围内找到通过内容校验的文件' : '未在限定范围内找到候选') + '，可手动选择文件。';
   } catch (failure) {
     if (relinkDraft === draft && relinkDialog.open) relinkStatus.textContent = String(failure?.message || failure);
   }
@@ -4607,43 +5196,120 @@ const assetAI = initAssetAI({
 $('#batch-asset-ai').addEventListener('click', () => assetAI.show([...markedAssets]));
 
 let batchEdit;
+const batchDialog = $('#batch-metadata-dialog');
+const batchForm = $('#batch-metadata-form');
+const batchResults = $('#batch-metadata-results');
+const batchList = $('#batch-metadata-result-list');
+const batchResultSize = 60;
+
 function showBatchMetadata(ids) {
-  if (!ids.length) return;
-  batchEdit = {ids, scope: collectionScope()};
+  if (!ids.length || batchEdit?.pending) return;
+  batchEdit = {ids:[...new Set(ids)], scope:collectionScope(), filter:'all', limit:batchResultSize, outcomes:new Map()};
   $('#batch-metadata-count').textContent = '将更改应用到所选的 ' + ids.length + ' 项资产。新增标签会保留现有标签。';
-  $('#batch-metadata-form').reset();
+  batchForm.reset();
+  batchForm.hidden = false;
+  batchResults.hidden = true;
+  batchList.replaceChildren();
   openDialog('#batch-metadata-dialog');
+}
+
+function renderBatchOutcomes(edit) {
+  const all = [...edit.outcomes.values()];
+  const failures = all.filter(item => item.failure !== null);
+  const success = all.filter(item => item.failure === null);
+  const filters = {all:all, success, failure:failures};
+  for (const button of batchResults.querySelectorAll('[data-batch-result-filter]')) {
+    const filter = button.dataset.batchResultFilter;
+    button.setAttribute('aria-pressed',String(filter === edit.filter));
+    button.querySelector('span').textContent = filters[filter].length.toLocaleString('zh-CN');
+  }
+  const entries = filters[edit.filter];
+  batchList.replaceChildren(...entries.slice(0,edit.limit).map(item => {
+    const row = document.createElement('li');
+    const detail = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = item.name;
+    const status = document.createElement('small');
+    status.textContent = item.failure ?? '已更新';
+    detail.append(name,status);
+    row.append(detail);
+    if (item.failure !== null) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'button subtle';
+      retry.dataset.batchRetry = item.id;
+      retry.textContent = '重试';
+      retry.setAttribute('aria-label','重试「' + item.name + '」');
+      retry.disabled = edit.pending;
+      row.append(retry);
+    }
+    return row;
+  }));
+  $('#batch-metadata-count').textContent = `已更新 ${success.length} 项 · ${failures.length} 项失败`;
+  $('#batch-metadata-result-status').textContent = edit.pending ? '正在重试…' : entries.length ? '' : '没有符合条件的结果';
+  $('#batch-metadata-result-more').hidden = entries.length <= edit.limit;
+}
+
+async function runBatchMetadata(edit, ids) {
+  if (edit.pending || edit.scope !== collectionScope()) return;
+  edit.pending = true;
+  const {tags,rating,workflow} = edit.patch;
+  const submit = $('#batch-metadata-submit');
+  submit.disabled = true;
+  if (!batchResults.hidden) renderBatchOutcomes(edit);
+  try {
+    const completed = await batchAssets(ids,async asset => {
+      if (editor.id === asset.id && (editor.dirty || editor.saving)) throw Error('请先保存详情中的编辑');
+      const patch = {};
+      if (tags.length) patch.tags = [...new Set([...asset.tags,...tags])];
+      if (rating) patch.rating = Number(rating);
+      if (workflow) patch.workflow = workflow;
+      await writeMetadata(asset,patch);
+    });
+    for (const item of completed) edit.outcomes.set(item.id,item);
+    if (edit.scope !== collectionScope()) return;
+    renderNav();
+    renderAssets();
+    if (!editor.dirty && !editor.saving) await renderInspector(false);
+  } finally {
+    edit.pending = false;
+    submit.disabled = false;
+    if (batchEdit === edit && edit.scope === collectionScope() && batchDialog.open) {
+      batchForm.hidden = true;
+      batchResults.hidden = false;
+      renderBatchOutcomes(edit);
+      const retry = ids.length === 1 && batchList.querySelector(`[data-batch-retry="${CSS.escape(ids[0])}"]`);
+      (retry || batchResults.querySelector('[aria-pressed="true"]'))?.focus({preventScroll:true});
+    }
+  }
 }
 
 $('#compare-assets').addEventListener('click', () => compareAssets([...markedAssets]));
 $('#batch-metadata').addEventListener('click', () => showBatchMetadata([...markedAssets]));
-$('#batch-metadata-form').addEventListener('submit', async event => {
+batchForm.addEventListener('submit', event => {
   event.preventDefault();
-  if (!batchEdit || batchEdit.scope !== collectionScope()) return;
-  const {ids, scope} = batchEdit;
+  if (!batchEdit || batchEdit.pending || batchEdit.scope !== collectionScope()) return;
   const tags = $('#batch-tags').value.split(/[,，]/).map(tag => tag.trim()).filter(Boolean);
   const rating = $('#batch-rating').value;
   const workflow = $('#batch-workflow').value;
   if (!tags.length && !rating && !workflow) return toast('填写一个标签、评分或工作流状态');
-  const button = $('#batch-metadata-submit');
-  button.disabled = true;
-  try {
-    await batchAssets(ids, async asset => {
-      if (editor.id === asset.id && (editor.dirty || editor.saving)) throw Error('请先保存详情中的编辑');
-      const patch = {};
-      if (tags.length) patch.tags = [...new Set([...asset.tags, ...tags])];
-      if (rating) patch.rating = Number(rating);
-      if (workflow) patch.workflow = workflow;
-      await writeMetadata(asset, patch);
-    }, '已更新');
-    if (collectionScope() === scope) {
-      renderNav();
-      renderAssets();
-      renderInspector(false);
-    }
-    $('#batch-metadata-dialog').close();
-  } finally {
-    button.disabled = false;
+  batchEdit.patch = {tags,rating,workflow};
+  runBatchMetadata(batchEdit,batchEdit.ids).catch(error);
+});
+batchResults.addEventListener('click',event => {
+  const edit = batchEdit;
+  if (!edit || edit.pending || edit.scope !== collectionScope()) return;
+  const filter = event.target.closest('[data-batch-result-filter]');
+  const retry = event.target.closest('[data-batch-retry]');
+  if (filter) {
+    edit.filter = filter.dataset.batchResultFilter;
+    edit.limit = batchResultSize;
+    renderBatchOutcomes(edit);
+  } else if (retry) {
+    runBatchMetadata(edit,[retry.dataset.batchRetry]).catch(error);
+  } else if (event.target.id === 'batch-metadata-result-more') {
+    edit.limit += batchResultSize;
+    renderBatchOutcomes(edit);
   }
 });
 
@@ -4874,6 +5540,27 @@ recycleBinButton.classList.toggle('hidden', !native);
 recycleBinButton.addEventListener('click', () => {
   closeTopTools(true);
   assetRecycle.openBin();
+});
+const duplicateReview = initDuplicateReview({
+  api,
+  context:() => nativeDragOut && !team.active ? collectionScope() : null,
+  preview(id,queue) {
+    if (!assetsById.has(id)) { toast('资产已变化，请重新检查',true); return; }
+    showQuickPreview(id,queue);
+  },
+  reveal:openAssetSourceInFolder,
+  validateMove(ids) {
+    if (ids.includes(editor.id) && (editor.dirty || editor.saving)) throw Error('请先保存资产详情中的编辑');
+  },
+  async refresh(ids) {
+    await refresh();
+    if (ids.includes(state.selected) && !selected()) await selectAsset(null);
+  },
+  notify:toast,
+});
+$('#open-asset-duplicate-review').addEventListener('click', () => {
+  closeTopTools(true);
+  duplicateReview.show();
 });
 
 const assetMenu = $('#asset-menu');
@@ -5144,16 +5831,22 @@ function showAssetCardMenu(event) {
   const ids = draggedIds(asset.id);
   const local = native && (!isTeamAsset(asset) || asset.teamMounted);
   const preview = [['preview', asset.kind === 'video' ? 'play' : 'eye', '快速预览', 'Space']];
+  if (native && ids.length === 1 && asset.ext === 'exr' && explorerAssetFile(asset)) {
+    preview.push(['exr-channels','compare','EXR 通道对照…']);
+  }
   const organize = [
     ['collect', 'stack', '加入合集'],
+    ['add-to-basket','stack','加入临时素材篮'],
     ['favorite', 'star', asset.favorite ? '取消收藏' : '收藏资产'],
   ];
+  if (ids.length === 1) organize.push(['set-favorite-expiry','clock','收藏期限与项目…']);
   const files = [];
   const covers = [];
   const send = [];
   const remove = [];
 
   if (ids.length >= 2 && ids.length <= 4) preview.push(['compare', 'compare', '并排对比']);
+  preview.push(['return-marker','pin',currentAssetBrowse()?.marker?.id === asset.id ? '清除返回标记' : '设为返回标记']);
   if (indexedAssetFolder(asset)) preview.push(['jump-folder', 'locate', '跳转到文件夹']);
   if (local && !fileStates.has(asset.id)) {
     if (nativeDragOut && explorerAssetFile(asset)) preview.push(['file-workspace-reveal', 'locate', '定位原文件']);
@@ -5298,9 +5991,12 @@ assetMenu.addEventListener('click', event => {
   if (!action || !id) return;
   closeAssetMenu(true);
   if (action === 'preview') showQuickPreview(id);
+  else if (action === 'set-favorite-expiry') favoriteExpiry.show(assetsById.get(id));
+  else if (action === 'return-marker') setAssetBrowseMarker(id);
   else if (action === 'pinterest-lens') showPinterestLens(assetsById.get(id));
   else if (action === 'jump-folder') jumpToIndexedAsset(id).catch(error);
   else if (action === 'collect') showCollectionDialog('add', draggedIds(id));
+  else if (action === 'add-to-basket') addIndexedAssetsToBasket(draggedIds(id));
   else if (action === 'compare') compareAssets(draggedIds(id));
   else if (action === 'batch') showBatchMetadata(draggedIds(id));
   else if (action === 'asset-ai') assetAI.show(draggedIds(id));
@@ -5311,6 +6007,10 @@ assetMenu.addEventListener('click', event => {
   else if (action === 'delete-source') assetRecycle.confirm(draggedIds(id), 'delete');
   else if (action === 'check') checkFiles(draggedIds(id)).catch(error);
   else if (action === 'relink') showRelinkSuggestions(id).catch(error);
+  else if (action === 'exr-channels') {
+    const asset = assetsById.get(id);
+    if (asset) void exrChannelViewer.show({id,name:asset.name});
+  }
   else if (action === 'project-dependencies') {
     const source = explorerAssetFile(assetsById.get(id));
     if (source) void projectDependencies.show(source.path);
@@ -5688,6 +6388,35 @@ if (native) {
 }
 
 const workspaceLayout = initWorkspaceLayout(libraryPreferences,sharedSidebar);
+initWorkspaceLayoutPresets({
+  preferences:libraryPreferences, scope:libraryScope, closeMenu:() => closeTopTools(true),
+  enabled:() => fileWorkspace.hidden && isAssetView() && Boolean(workspaceLayout),
+  capture(includeSearch) {
+    return {panels:workspaceLayout.snapshot(),view:state.layout,fit:state.thumbnailFit,density:state.density,zoom:state.gridZoom,
+      ...(includeSearch ? {search:{query:assetSearchInput.value.slice(0,1024),expanded:assetSearchToggle.getAttribute('aria-expanded') === 'true'}} : {})};
+  },
+  apply(preset) {
+    if (!Object.hasOwn(assetViewButtons,preset.view) || !['compact','normal','large'].includes(preset.density) ||
+        !['contain','cover','scale-down'].includes(preset.fit)) throw Error('此布局的显示设置无效');
+    const zoom = Number.isFinite(preset.zoom) && preset.zoom >= gridZoomLimits.min && preset.zoom <= gridZoomLimits.max ? preset.zoom : 0;
+    workspaceLayout.applySnapshot(preset.panels);
+    libraryPreferences.setItem(assetLayoutKey,preset.view);
+    libraryPreferences.setItem(assetThumbnailFitKey,preset.fit);
+    libraryPreferences.setItem('nexus-grid-density',preset.density);
+    if (zoom) libraryPreferences.setItem(gridZoomKey,String(zoom));
+    else libraryPreferences.removeItem(gridZoomKey);
+    Object.assign(state,{layout:preset.view,density:preset.density,thumbnailFit:preset.fit,gridZoom:zoom});
+    if (typeof preset.search?.query === 'string' && preset.search.query.length <= 1024) {
+      assetSearchInput.value = preset.search.query;
+      state.search = preset.search.query.trim().toLowerCase().replaceAll('\\','/');
+      state.limit = 60;
+      state.assetWindowAnchor = null;
+      setAssetSearchExpanded(preset.search.expanded === true);
+    }
+    renderAssets();
+  },
+  notify:toast,
+});
 const sidebarZones = initSidebarZones(libraryPreferences);
 let priorTeamOrganization = null;
 const teamOrganization = initTeamOrganization({
@@ -5804,10 +6533,112 @@ initBrowserCapture({
 });
 const whiteboard = initWhiteboardProjects({panel:$('#workspace-whiteboard'), api, notify:toast,
   resolveAssetImage:resolveWhiteboardAssetMedia, openLink:openWebsite, locateAsset:locateWhiteboardAsset,
+  reviewAssignees:workspace => team.active && workspace === collectionScope() ? team.online.map(member => ({id:member.id,name:member.name})) : [],
+  copyReviewText:copyWorkspaceText,
+  searchReplacementImages(workspace,query,exactId) {
+    if (workspace !== collectionScope()) return [];
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const found = [];
+    for (const asset of exactId ? [assetsById.get(exactId)] : state.assets) {
+      if (asset?.kind !== 'texture' || fileStates.has(asset.id)) continue;
+      if (terms.length) {
+        const text = [asset.name,asset.relativePath,asset.ext,...(asset.tags || [])].join(' ').toLowerCase();
+        if (!terms.every(term => text.includes(term))) continue;
+      }
+      found.push({id:asset.id,name:asset.name,fileName:(asset.relativePath || asset.path || '').split(/[\\/]/).at(-1)});
+      if (found.length >= 60) break;
+    }
+    return found;
+  },
+  openVideoSource(id,startTime,workspaceKey) {
+    if (workspaceKey === collectionScope() && assetsById.get(id)?.kind === 'video') showQuickPreview(id,[id],{startTime});
+    else toast('当前资产库找不到这段引用的原片',true);
+  },
   loadPresenceAvatar:member => fetchTeamAvatar({id:member.memberId,avatarRevision:member.avatarRevision}),
   getFileFolders:native ? getWhiteboardFileFolders : undefined,
   importPastedFiles:importPastedWhiteboardFiles, handleDroppedFiles:addWhiteboardFileReferences,
   copyCachedImages:copyCachedWhiteboardImages, revealPastedFile:revealWhiteboardFile, loadFilePreview:loadWhiteboardFilePreview});
+
+function basketAsset(item) {
+  if (item.kind === 'asset') return item.scope === collectionScope() ? assetsById.get(item.id) : null;
+  return !item.isDirectory && assetWorkspaceReady ? indexedExplorerFile(item.path,{unique:true}) : null;
+}
+
+function basketC4dSupports(session,asset) {
+  return session.dcc === 'c4d' && !fileStates.has(asset.id) && (!isTeamAsset(asset) || asset.teamMounted) &&
+    (sessionSupportsAsset(session,asset) || canUseSmartImport(session,asset));
+}
+
+function addIndexedAssetsToBasket(ids) {
+  const scope = collectionScope();
+  temporaryBasket.add(ids.flatMap(id => {
+    const asset = assetsById.get(id);
+    return asset && !asset.demo ? [{kind:'asset',id,name:asset.name,scope}] : [];
+  }));
+}
+
+const temporaryBasket = initTemporaryAssetBasket({
+  dialog:$('#temporary-asset-basket'),scope:collectionScope,mount:ensureAssetWorkspace,report:toast,
+  resolve(item) {
+    const asset = basketAsset(item);
+    if (asset) return {name:asset.name,origin:state.libraries.find(library => library.id === asset.libraryId)?.name,
+    preview:true,locate:item.kind === 'file' || Boolean(indexedAssetFolder(asset) || explorerAssetFile(asset)),
+    board:isWhiteboardReferenceMedia(asset),c4d:state.sessions.some(session => basketC4dSupports(session,asset))};
+    if (item.kind === 'file' && nativeDragOut) return {preview:!item.isDirectory,locate:true};
+    return null;
+  },
+  async open(action,item) {
+    const asset = basketAsset(item);
+    if (action === 'preview' && asset) return showQuickPreview(asset.id,[asset.id]);
+    if (item.kind === 'file' && nativeDragOut) {
+      revealFileWorkspace();
+      const directory = item.isDirectory ? item.path : assetSourceDirectory(item.path);
+      const opened = directory && await localExplorer.revealSource(item.path,{directory});
+      if (!opened || fileWorkspace.hidden) throw Error('无法打开素材的原位置');
+      if (action === 'preview') fileInspector?.showPreview();
+      return;
+    }
+    if (asset && explorerAssetFile(asset) && nativeDragOut) return openAssetSourceInFolder(asset.id);
+    if (asset) return jumpToIndexedAsset(asset.id,() => item.scope === collectionScope(),revealAssetWorkspace);
+  },
+  async targets(action,items,scope) {
+    if (scope !== collectionScope()) return [];
+    const assets = items.map(basketAsset).filter(Boolean);
+    if (action === 'board') return whiteboard.listClipProjects(scope);
+    return state.sessions.filter(session => assets.some(asset => basketC4dSupports(session,asset)))
+      .map(session => ({id:session.id,name:session.name || session.label || 'Cinema 4D'}));
+  },
+  async send(action,items,destination,scope) {
+    if (scope !== collectionScope()) throw Error('工作空间已切换，请重新选择素材');
+    const assets = [...new Map(items.map(basketAsset).filter(Boolean).map(asset => [asset.id,asset])).values()];
+    if (action === 'c4d') {
+      const session = state.sessions.find(item => item.id === destination);
+      if (!session) throw Error('目标 Cinema 4D 已离线');
+      const ids = assets.filter(asset => basketC4dSupports(session,asset)).map(asset => asset.id);
+      if (!ids.length) throw Error('所选素材暂不能发送到该 Cinema 4D');
+      return sendAssets(ids,session.id);
+    }
+    const ids = whiteboardMediaIds(assets.map(asset => asset.id));
+    if (!ids.length) throw Error('所选素材没有可用的白板引用');
+    if (!fileWorkspace.hidden) await showAssetWorkspace();
+    if (!fileWorkspace.hidden) return;
+    if (scope !== collectionScope()) throw Error('工作空间已切换，请重新选择素材');
+    if (state.view !== 'whiteboard' && !await workbenchTabs.openView('白板','whiteboard')) return;
+    if (scope !== collectionScope() || !await whiteboard.restoreProject(destination))
+      throw Error('无法打开选择的白板');
+    if (scope !== collectionScope()) return;
+    const stage = $('#workspace-whiteboard .whiteboard-stage');
+    const added = stage && await whiteboard.dropAssetReferences(destination,{workspaceKey:scope,assetIds:ids},
+      {x:stage.clientWidth / 2,y:stage.clientHeight / 2});
+    if (!added) throw Error('未能将素材引用添加到白板');
+    toast('已将素材引用添加到白板');
+  },
+});
+$$('[data-open-temporary-basket]').forEach(button => button.addEventListener('click',() => {
+  const fromTools = topTools.contains(button);
+  if (fromTools) closeTopTools(true);
+  temporaryBasket.show(fromTools ? topToolsTrigger : button);
+}));
 const workspacePicker = initWorkspacePicker({
   api,
   native,
@@ -6023,7 +6854,17 @@ const workbenchTabs = initWorkspaceTabs({
     }
     return !editor.dirty || confirmDiscardWorkspaceEdits(false, true);
   },
-  onDuplicate: () => assetFolderHistory.recordLocation(),
+  onDuplicate(sourceTab) {
+    const browse = assetBrowseTabs.get(sourceTab);
+    if (!browse) return assetFolderHistory.recordLocation();
+    const focus = browse.focus;
+    if (focus) {
+      state.limit = focus.limit;
+      state.assetWindowAnchor = focus.anchor;
+    }
+    renderAssets();
+    if (focus) restoreAssetBrowseScroll(focus.position);
+  },
   goHome(view = 'all') {
     editor.dirty = false;
     state.selected = null;
@@ -6052,18 +6893,25 @@ if (nativeDragOut) {
   const originalAddFile = workspaceBar.querySelector('[data-explorer-add-tab]');
   initWorkspaceTabManagement({bar:workspaceBar,files:localExplorer,assets:workbenchTabs,onError:error});
   const filesOption = newTabOptions.querySelector('[data-new-tab="files"]');
+  const batchFilesOption = newTabOptions.querySelector('[data-new-tab="batch-files"]');
   const currentOption = newTabOptions.querySelector('[data-new-tab="current"]');
   const hasAssetView = () => Boolean(assetWorkspaceReady && workbenchTabs.getTabCount() && !appRoot.classList.contains('app-starting'));
+  initWorkspaceTabOverview(workspaceBar, hasAssetView);
   const canDuplicateCurrent = () => fileWorkspace.hidden ? hasAssetView() : localExplorer.canDuplicateActive();
   renderNewTabPreference(filePreferences.get().newTabAction);
   newTabOptions.addEventListener('beforetoggle',event => {
     if (event.newState !== 'open') return;
     newTabOptions.style.setProperty('--new-tab-left',newTabTrigger.getBoundingClientRect().left + 'px');
     filesOption.disabled = originalAddFile.disabled;
+    batchFilesOption.hidden = fileWorkspace.hidden;
     currentOption.hidden = fileWorkspace.hidden ? !hasAssetView() : !localExplorer.getTabCount();
     currentOption.disabled = !canDuplicateCurrent();
   });
   async function openNewTab(action) {
+    if (action === 'batch-files') {
+      localExplorer.openBatchPaths();
+      return;
+    }
     if (action === 'settings') {
       filePreferences.openTabSettings();
       return;
@@ -6487,6 +7335,12 @@ const folderContext = initFolderContext({
 $('#view-removed-folders').addEventListener('click', folderContext.openRemoved);
 const assetCompare = initAssetCompare({
   readPreview: (asset, mode) => api('read_preview', {id: asset.id, mode}),
+  originalImage:native ? asset => hasOriginalImagePreview(asset) && api('read_preview',{id:asset.id,mode:'original_pixels'}) : undefined,
+  videoSource:native ? async asset => {
+    if (isTeamAsset(asset) && !asset.teamMounted) throw Error('请先连接此资产的团队挂载目录');
+    const source = await api('asset_video_source',{id:asset.id});
+    return source?.url || (source?.path && window.__TAURI__.core.convertFileSrc(source.path));
+  } : undefined,
   meshCapable,
   loadMesh,
   describeAsset: asset => [asset.ext.toUpperCase(), displayAssetType(asset), bytes(asset.size)].filter(Boolean).join(' · '),
@@ -6533,6 +7387,10 @@ document.addEventListener('keydown', event => {
       return;
     }
     clearAssetModeHighlight();
+    if (!event.repeat && assetMenu.classList.contains('hidden') && exitAssetFocus()) {
+      event.preventDefault();
+      return;
+    }
     if (!event.repeat && markedAssets.size && assetMenu.classList.contains('hidden')) {
       event.preventDefault();
       clearMarkedAssets();
@@ -6967,9 +7825,10 @@ async function captureWorkspaceHandoff() {
   if (!fileWorkspace.hidden) {
     const path = localExplorer.getCurrentDirectory();
     if (!path) throw Error('请先打开具体的文件夹');
-    return {workspace:{kind:'files',path,name:path.split(/[/\\]/).filter(Boolean).at(-1)},
-      assets:localExplorer.getSelectedEntries().filter(item => !item.isDirectory)
-        .map(({path,name}) => ({path,name}))};
+    const entries = localExplorer.getSelectedEntries().filter(item => !item.isDirectory);
+    const directory = await workspaceNetworkPath(path,false);
+    const assets = await Promise.all(entries.map(async ({path,name}) => ({path:await workspaceNetworkPath(path,false),name})));
+    return {workspace:{kind:'files',path:directory,name:path.split(/[/\\]/).filter(Boolean).at(-1)},assets};
   }
   await ensureAssetWorkspace();
   const library = currentLibrary();
@@ -6978,24 +7837,32 @@ async function captureWorkspaceHandoff() {
   const view = projectId ? 'whiteboard' : collection ? 'collection' : library ? 'folder'
     : ['favorites','recent'].includes(state.view) ? state.view : 'all';
   const workspace = {kind:'assets',name:$('#page-title').textContent,view,catalogId:handoffCatalogId()};
-  if (view === 'folder') Object.assign(workspace,{path:diskFolderPath(library,state.folder),libraryId:library.id,folder:state.folder});
+  if (view === 'folder') {
+    const path = diskFolderPath(library,state.folder);
+    Object.assign(workspace,{path:path ? await workspaceNetworkPath(path,false) : undefined,libraryId:library.id,folder:state.folder});
+  }
   if (view === 'collection') workspace.collectionId = collection.id;
   if (view === 'whiteboard') workspace.projectId = projectId;
   const ids = markedAssets.size ? [...markedAssets] : state.selected ? [state.selected] : [];
-  return {workspace,assets:ids.map(id => assetsById.get(id)).filter(Boolean).map(asset => ({
-    id:asset.id,name:asset.name,path:explorerAssetFile(asset)?.path,
-  }))};
+  const assets = await Promise.all(ids.map(id => assetsById.get(id)).filter(Boolean).map(async asset => {
+    const path = explorerAssetFile(asset)?.path;
+    return {id:asset.id,name:asset.name,path:path ? await workspaceNetworkPath(path,false) : undefined};
+  }));
+  return {workspace,assets};
 }
 
 async function openWorkspaceHandoff({workspace,assets}) {
   if (workspace.kind === 'files') {
     if (!nativeDragOut) throw Error('请在 Windows 客户端打开这个文件夹交接');
-    const directoryKey = explorerPathKey(workspace.path);
+    const sourceKey = explorerPathKey(workspace.path);
     const first = assets.find(item => item.path &&
-      explorerPathKey(item.path.replace(/[^/\\]+$/,'')) === directoryKey);
+      explorerPathKey(item.path.replace(/[^/\\]+$/,'')) === sourceKey);
+    const directory = await workspaceNetworkPath(workspace.path,true);
+    const path = first ? await workspaceNetworkPath(first.path,true) : directory;
+    const directoryKey = explorerPathKey(directory);
     const previousTabCount = localExplorer.getTabCount();
     revealFileWorkspace();
-    await localExplorer.addTab(first?.path || workspace.path);
+    await localExplorer.addTab(path);
     if (localExplorer.getTabCount() === previousTabCount) throw Error('文件夹标签已满，请先关闭一页');
     if (explorerPathKey(localExplorer.getCurrentDirectory()) !== directoryKey) throw Error('无法打开交接目录，请核对路径或挂载');
     return {message:'已打开交接目录'};
@@ -7008,6 +7875,7 @@ async function openWorkspaceHandoff({workspace,assets}) {
   if (workspace.view === 'folder') {
     const node = sameCatalog && findFolder(folderTrees.get(workspace.libraryId),workspace.folder);
     folder = node ? {libraryId:workspace.libraryId,folder:node.path} : indexedExplorerFolder(workspace.path);
+    if (!folder && workspace.path) folder = indexedExplorerFolder(await workspaceNetworkPath(workspace.path,true));
     if (!folder) throw Error('当前资产库找不到交接目录，请核对路径或打开对应资产库');
   }
   if (workspace.view === 'collection' && (!sameCatalog || !state.collections.some(item => item.id === workspace.collectionId))) {
@@ -7025,8 +7893,13 @@ async function openWorkspaceHandoff({workspace,assets}) {
     if (!await whiteboard.restoreProject(workspace.projectId)) throw Error('当前工作空间找不到这个白板项目');
     return {message:'已打开交接白板'};
   }
-  const ids = new Set(assets.map(({id,path}) => sameCatalog && assetsById.has(id) ? id
-    : path && indexedExplorerFile(path,{unique:true})?.id).filter(Boolean));
+  const ids = new Set((await Promise.all(assets.map(async ({id,path}) => {
+    if (sameCatalog && assetsById.has(id)) return id;
+    if (!path) return null;
+    return indexedExplorerFile(path,{unique:true})?.id ||
+      indexedExplorerFile(await workspaceNetworkPath(path,true),{unique:true})?.id;
+  }))).filter(Boolean));
+  if (scope !== collectionScope()) throw Error('已切换资产库，请重新打开交接视图');
   if (ids.size) {
     const matches = filtered().filter(asset => ids.has(asset.id));
     for (const asset of matches) markedAssets.add(asset.id);
@@ -7279,7 +8152,7 @@ async function openShellFolders() {
       revealFileWorkspace();
       for (const path of paths) {
         if (fileWorkspace.hidden) break;
-        await localExplorer.openPath(path);
+        await localExplorer.openShellPath(path);
       }
     }
   } catch (failure) {

@@ -34,6 +34,31 @@ class AssetPrepTests(unittest.TestCase):
             path.touch()
         return self.source
 
+    def test_explicit_material_set_uses_only_selected_map_variants(self):
+        self.files("Metal/tex/Metal_BaseColor.png", "Metal/tex/Metal_Normal_GL.png",
+                   "Metal/tex/Metal_Normal_DX.png", "Metal/tex/Metal_Roughness.png",
+                   "Metal/tex/Metal_Height.png", "Metal/tex/Metal2_BaseColor.png",
+                   "Metal/materials/Metal_8K_Normal_GL.png")
+        folder = self.source / "Metal" / "tex"
+        selected = folder / "Metal_BaseColor.png"
+        maps = {
+            "base_color": [str(selected)],
+            "normal": [str(folder / item) for item in ("Metal_Normal_DX.png", "Metal_Normal_GL.png")],
+            "roughness": [str(folder / "Metal_Roughness.png")],
+        }
+        with mock.patch.object(prep, "_scan_related", side_effect=AssertionError("must not scan siblings")):
+            plan = prep.prepare(None, selected, {"kind":"pbr","pbr_name":"Metal","pbr_maps":maps}, self.cache)
+        self.assertEqual(plan["name"], "Metal")
+        self.assertEqual(set(plan["maps"]), set(maps))
+        self.assertEqual(Path(plan["maps"]["normal"]), folder / "Metal_Normal_GL.png")
+        other = self.source / "Metal" / "materials" / "Metal_8K_Normal_GL.png"
+        with self.assertRaises(ValueError):
+            prep.prepare(None, selected, {"kind":"pbr","pbr_name":"Metal",
+                "pbr_maps":dict(maps, normal=[str(other)])}, self.cache)
+        with self.assertRaises(ValueError):
+            prep.prepare(None, selected, {"kind":"pbr","pbr_name":"Metal",
+                "pbr_maps":dict(maps, normal=[str(selected)])}, self.cache)
+
     def test_lod_and_same_asset_maps(self):
         self.files("Rock/Rock_LOD0.fbx", "Rock/Rock_LOD2.fbx", "Rock/Rock_LOD4.fbx",
                    "Rock/tex/Rock_1K_Albedo.png", "Rock/tex/Rock_2K_Albedo.png",

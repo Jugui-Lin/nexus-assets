@@ -1,10 +1,39 @@
 import {bindWhiteboardLinkDrag} from './whiteboard-links.js';
+import {downloadWorkspaceFile} from './workspace-download.js';
 
 const storageKey = 'nexus-creative-video-references-v1';
 const migrationKey = storageKey + ':team-migrated';
 const maximumReferences = 120;
 const cardSelector = '[data-reference-index]';
 const savedReference = ({url,title,coverUrl}) => ({url,title,...(coverUrl && {coverUrl})});
+const noteFields = [
+  ['credit','来源署名',200,1],
+  ['summary','内容摘要',800,3],
+  ['chapters','章节与时间点',1000,3],
+  ['usage','使用说明与选用理由',1000,3],
+];
+
+const cleanNotes = values => Object.fromEntries(noteFields.flatMap(([name,,limit]) => {
+  const value = typeof values?.[name] === 'string' ? values[name].trim().slice(0,limit) : '';
+  return value ? [[name,value]] : [];
+}));
+
+const markdown = value => value.replace(/([\\`*_{}\[\]()<>#!|~])/g,'\\$1');
+
+export function referenceListMarkdown(entries) {
+  const sections = ['# 视频参考清单'];
+  for (const {entry,notes} of entries) {
+    sections.push('## ' + markdown(entry.title.replace(/\s+/g,' ')));
+    const url = entry.url.replace(/[<>]/g, char => char === '<' ? '%3C' : '%3E');
+    sections.push(`- 来源：${markdown(entry.platform)} · <${url}>`);
+    for (const [field,label] of noteFields) {
+      if (!notes?.[field]) continue;
+      const lines = notes[field].split(/\r?\n/u).map(line => markdown(line.trim()));
+      sections.push(`- ${label}：${lines.join('\n  ')}`);
+    }
+  }
+  return sections.join('\n\n') + '\n';
+}
 
 export function initCreativeVideoReferences({panel, preferences, describe, readMetadata, play, openWeb, icon, escape, notify,
   whiteboardLinkDrop, teamReferenceDrop, teamApi}) {
@@ -17,6 +46,7 @@ export function initCreativeVideoReferences({panel, preferences, describe, readM
   const teamStatus = panel.querySelector('#creator-reference-team-status');
   const search = panel.querySelector('input[type="search"]');
   const searchEmpty = panel.querySelector('#creator-reference-search-empty');
+  const exportButton = panel.querySelector('#creator-reference-export');
   const list = panel.querySelector('ul');
   let records = [];
   let team = null;
@@ -24,7 +54,26 @@ export function initCreativeVideoReferences({panel, preferences, describe, readM
   let workspaceRevision = 0;
   let visible = false;
   let activeReads = 0;
+  let notesKey;
+  let notes = new Map();
+  let noteDraft = null;
   const attempted = new WeakSet();
+
+  const noteEditor = document.createElement('dialog');
+  noteEditor.className = 'modal creator-reference-note-dialog';
+  noteEditor.setAttribute('aria-labelledby','creator-reference-note-title');
+  noteEditor.innerHTML = `
+    <form>
+      <div class="modal-header"><h2 id="creator-reference-note-title">视频参考资料</h2><button type="button" class="icon-button" data-note-close aria-label="关闭">${icon('close')}</button></div>
+      <p class="modal-description" data-note-source></p>
+      <p class="modal-description">此处资料保存在本机。导出清单时会包含已填写的内容。</p>
+      ${noteFields.map(([name,label,limit,rows]) => `
+        <label class="field-label"><span>${label}</span><textarea class="text-field" name="${name}" rows="${rows}" maxlength="${limit}"${name === 'chapters' ? ' placeholder="例如 02:15 光线设置"' : ''}></textarea></label>`).join('')}
+      <div class="modal-footer"><p role="alert" data-note-status></p><button type="submit" class="button primary">保存资料</button></div>
+    </form>`;
+  document.body.append(noteEditor);
+  const noteForm = noteEditor.querySelector('form');
+  const noteStatus = noteEditor.querySelector('[data-note-status]');
 
   function cardMarkup(entry,index) {
     const title = escape(entry.title);
@@ -35,21 +84,32 @@ export function initCreativeVideoReferences({panel, preferences, describe, readM
       '<div class="creator-work-cover" aria-hidden="true">' + icon('play') + image + '</div>' +
       '<div class="creator-reference-caption"><span class="creator-reference-label">' +
       '<strong class="creator-work-title" title="' + title + '">' + title + '</strong>' +
-      '<span class="creator-reference-host">' + escape(entry.host) + '</span></span>' +
+      '<span class="creator-reference-host" title="' + escape(notes.get(entry.key)?.credit || entry.host) + '">' +
+      escape(notes.get(entry.key)?.credit || entry.host) + '</span></span>' +
       '<button type="button" class="icon-button" data-reference-action="play" title="' + playLabel +
       '" aria-label="' + playLabel + ' · ' + title + '">' + icon(entry.embedded ? 'play' : 'drag-out') + '</button>' +
       (entry.embedded ? '<button type="button" class="icon-button" data-reference-action="open" title="打开原网页" aria-label="打开原网页 · ' +
         title + '">' + icon('drag-out') + '</button>' : '') +
+      '<button type="button" class="icon-button" data-reference-action="notes" title="视频参考资料" aria-label="视频参考资料 · ' +
+      title + '"' + (notes.has(entry.key) ? ' data-has-notes' : '') + '>' + icon('notes') + '</button>' +
       '<button type="button" class="icon-button" data-reference-action="remove" title="移除引用" aria-label="移除引用 · ' +
       title + '"' + (team && !Number.isSafeInteger(entry.revision) ? ' disabled' : '') +
       '>' + icon('trash') + '</button></div></li>';
   }
 
-  function render() {
+  function displayedEntries() {
     const query = search.value.trim().toLocaleLowerCase();
-    const cards = records.map((entry,index) =>
-      !query || [entry.title,entry.platform,entry.url].some(value => value.toLocaleLowerCase().includes(query))
-        ? cardMarkup(entry,index) : '').join('');
+    return records.flatMap((entry,index) => {
+      const data = notes.get(entry.key);
+      const searchable = [entry.title,entry.platform,entry.url,...Object.values(data || {})];
+      return !query || searchable.some(value => value.toLocaleLowerCase().includes(query))
+        ? [{entry,index,notes:data}] : [];
+    });
+  }
+
+  function render() {
+    const shown = displayedEntries();
+    const cards = shown.map(({entry,index}) => cardMarkup(entry,index)).join('');
     if (renderedCards !== cards) {
       const action = list.contains(document.activeElement) && document.activeElement.dataset.referenceAction;
       const index = action && document.activeElement.closest(cardSelector)?.dataset.referenceIndex;
@@ -59,7 +119,8 @@ export function initCreativeVideoReferences({panel, preferences, describe, readM
         ?.focus({preventScroll:true});
     }
     list.hidden = !cards;
-    searchEmpty.hidden = !query || Boolean(cards);
+    searchEmpty.hidden = !search.value.trim() || Boolean(cards);
+    exportButton.disabled = !shown.length;
   }
 
   function normalize(rows, shared = false) {
@@ -116,6 +177,16 @@ export function initCreativeVideoReferences({panel, preferences, describe, readM
 
   function reload(context = null) {
     workspaceRevision++;
+    if (noteEditor.open) noteEditor.close();
+    noteDraft = null;
+    notesKey = `${storageKey}:notes:${context?.cacheKey || context?.teamId || 'personal'}`;
+    try {
+      const saved = JSON.parse(preferences.getItem(notesKey));
+      notes = new Map((Array.isArray(saved) ? saved : []).slice(-maximumReferences * 2).flatMap(row =>
+        Array.isArray(row) && typeof row[0] === 'string' ? [[row[0],cleanNotes(row[1])]] : []));
+    } catch {
+      notes = new Map();
+    }
     records = readLocal(Boolean(context));
     team = context ? {
       teamId:context.teamId, phase:'loading', pending:Promise.resolve(), legacy:records, shared:[],
@@ -300,6 +371,34 @@ export function initCreativeVideoReferences({panel, preferences, describe, readM
   }
 
   form.addEventListener('submit', event => { event.preventDefault(); add(); });
+  exportButton.addEventListener('click', () => {
+    const shown = displayedEntries();
+    if (!shown.length) return;
+    downloadWorkspaceFile(document,'Nexus 视频参考清单.md',referenceListMarkdown(shown),'text/markdown;charset=utf-8');
+  });
+  noteEditor.querySelector('[data-note-close]').addEventListener('click',() => noteEditor.close());
+  noteEditor.addEventListener('close',() => { if (!noteEditor.open) noteDraft = null; });
+  noteForm.addEventListener('submit', event => {
+    event.preventDefault();
+    if (!noteDraft || noteDraft.scope !== workspaceRevision || !records.some(entry => entry.key === noteDraft.key)) {
+      noteStatus.textContent = '此视频引用已变化，请重新打开资料。';
+      return;
+    }
+    const next = new Map(notes);
+    const data = cleanNotes(Object.fromEntries(new FormData(noteForm)));
+    next.delete(noteDraft.key);
+    if (Object.keys(data).length) next.set(noteDraft.key,data);
+    const bounded = [...next].slice(-maximumReferences * 2);
+    try { preferences.setItem(notesKey,JSON.stringify(bounded)); }
+    catch { noteStatus.textContent = '暂时无法保存视频资料。'; return; }
+    notes = new Map(bounded);
+    const key = noteDraft.key;
+    noteEditor.close();
+    render();
+    const index = records.findIndex(entry => entry.key === key);
+    (list.querySelector('[data-reference-index="' + index + '"] [data-reference-action="notes"]')
+      || search).focus({preventScroll:true});
+  });
   addToggle.addEventListener('click', () => setAdding(form.hidden,true));
   cancelAdd.addEventListener('click', () => setAdding(false,true));
   form.addEventListener('keydown', event => {
@@ -329,7 +428,15 @@ export function initCreativeVideoReferences({panel, preferences, describe, readM
     const entry = records[index];
     if (!entry) return;
     const action = event.target.closest('[data-reference-action]')?.dataset.referenceAction;
-    if (action === 'remove') {
+    if (action === 'notes') {
+      if (noteEditor.open) return;
+      noteDraft = {scope:workspaceRevision,key:entry.key};
+      noteStatus.textContent = '';
+      noteEditor.querySelector('[data-note-source]').textContent = entry.title;
+      for (const [key] of noteFields) noteForm.elements[key].value = notes.get(entry.key)?.[key] || '';
+      noteEditor.showModal();
+      noteForm.elements.credit.focus();
+    } else if (action === 'remove') {
       const scope = workspaceRevision;
       const position = [...list.children].indexOf(card);
       const removed = team ? Number.isSafeInteger(entry.revision) &&

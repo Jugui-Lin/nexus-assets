@@ -1,7 +1,7 @@
 const resultLimit = 36;
 
 export function initFolderAssetsPane({
-  pane,trigger,load,directory,canOpenFolder,openFolder,search,resolve,thumbnail,preview,locate,favorite,report,
+  pane,trigger,load,directory,canOpenFolder,openFolder,search,resolve,thumbnail,preview,locate,favorite,addToBasket,report,
 }) {
   if (!pane || !trigger) return null;
   const input = pane.querySelector('[data-folder-assets-search]');
@@ -113,6 +113,7 @@ export function initFolderAssetsPane({
       row.append(card);
       if (locate) row.append(actionButton('locate',asset,'定位原文件','locate'));
       if (favorite) row.append(actionButton('favorite',asset,asset.favorite ? '取消收藏' : '收藏','star'));
+      if (addToBasket) row.append(actionButton('basket',asset,'加入临时素材篮','stack'));
       return row;
     }));
     for (const card of results.querySelectorAll('[data-folder-asset-id]')) observer.observe(card);
@@ -144,6 +145,7 @@ export function initFolderAssetsPane({
       if (visible) render();
       return;
     }
+    if (action === 'basket') { addToBasket?.(id); return; }
     const request = opening;
     let fallbackFocus;
     if (action === 'locate') {

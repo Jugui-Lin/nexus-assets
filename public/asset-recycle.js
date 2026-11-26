@@ -19,6 +19,7 @@ export function initAssetRecycle({api, context, asset, validateMove, refreshCata
   const moveTitle = get('recycle-assets-title');
   const moveConfirm = get('recycle-assets-submit');
   const moveItems = get('recycle-assets-items');
+  const moveScope = get('recycle-assets-scope');
   let visit = null;
   let draft = null;
   let moving = false;
@@ -184,6 +185,14 @@ export function initAssetRecycle({api, context, asset, validateMove, refreshCata
     get('recycle-assets-description').textContent = permanent
       ? `将从${scope.teamId ? '共享存储' : '磁盘'}永久删除${label}的源文件。此操作不可从 Nexus 回收站恢复。`
       : `将${label}的资产记录移到 Nexus 回收站。${shared}源文件保留在原位置，可以随时恢复记录。`;
+    if (moveScope) {
+      const sourcePaths = new Set(active.map(id => asset(id).path).filter(Boolean));
+      const sourceImpact = permanent ? `${sourcePaths.size} 条源路径` : '源文件保留';
+      moveScope.querySelector('summary').textContent = `选择范围 · ${active.length} 条资产记录 · ${sourceImpact}`;
+      moveScope.querySelector('[data-recycle-impact]').textContent = scope.teamId
+        ? `团队库「${scope.name}」中的选中记录` : `个人库「${scope.name}」中的选中记录`;
+      moveScope.open = permanent;
+    }
     moveItems.replaceChildren(...active.map(id => {
       const item = asset(id);
       const row = document.createElement('li');

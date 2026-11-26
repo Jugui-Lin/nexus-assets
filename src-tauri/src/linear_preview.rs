@@ -17,6 +17,9 @@ const METADATA_BUDGET: u64 = 4 * 1024 * 1024;
 const EXR_LIMIT_ERROR: &str = "EXR 图像超过预览尺寸或解码内存限制。";
 const HDR_HEADER_BUDGET: u64 = 64 * 1024;
 
+mod exr_compare;
+pub use exr_compare::read_exr_views;
+
 struct PreviewPixels {
     source: Vec2<usize>,
     image: ImageBuffer<Luma<f32>, Vec<f32>>,
@@ -172,6 +175,15 @@ fn read_hdr_scanline(reader: &mut impl Read, row: &mut [[u8; 4]]) -> io::Result<
 }
 
 fn valid_metadata(metadata: &MetaData, max_alloc: u64, max_size: u32) -> bool {
+    valid_metadata_with_limit(metadata, max_alloc, max_size, 32)
+}
+
+fn valid_metadata_with_limit(
+    metadata: &MetaData,
+    max_alloc: u64,
+    max_size: u32,
+    max_channels: usize,
+) -> bool {
     if metadata.headers.is_empty() || metadata.headers.len() > 32 {
         return false;
     }
@@ -179,7 +191,7 @@ fn valid_metadata(metadata: &MetaData, max_alloc: u64, max_size: u32) -> bool {
     for header in &metadata.headers {
         let size = header.layer_size;
         if header.deep
-            || header.channels.list.len() > 32
+            || header.channels.list.len() > max_channels
             || preview_dimensions(size, max_alloc, max_size, 8).is_none()
         {
             return false;

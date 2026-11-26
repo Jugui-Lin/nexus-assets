@@ -1,3 +1,15 @@
+const pinyin = new Intl.Collator('zh-CN-u-co-pinyin',{sensitivity:'base'});
+const initials = [...'abcdefghjklmnopqrstwxyz'];
+const pinyinBoundaries = [...'阿八擦搭蛾发噶哈击喀垃妈拿哦啪期然撒塌挖昔压匝'];
+
+function menuInitial(text) {
+  if (/^重(?:命名|开|新)/.test(text)) return 'c';
+  const first = [...text.trim()][0];
+  if (!first || !/\p{Script=Han}/u.test(first)) return first?.toLowerCase();
+  const index = pinyinBoundaries.findLastIndex(character => pinyin.compare(first,character) >= 0);
+  return index < 0 ? undefined : initials[index];
+}
+
 export function initExplorerContextMenu(root) {
   const owner = root.ownerDocument;
   const popup = owner.createElement('div');
@@ -8,11 +20,15 @@ export function initExplorerContextMenu(root) {
   popup.hidden = true;
   root.append(popup);
   let pending;
+  let frame = [];
+  const parents = [];
 
   function dismiss(id = null,restoreFocus = true) {
     if (!pending) return;
     const {resolve,anchor} = pending;
     pending = null;
+    parents.length = 0;
+    frame = [];
     popup.hidden = true;
     popup.replaceChildren();
     if (restoreFocus && anchor?.isConnected && root.contains(anchor) && !root.hidden) {
@@ -30,9 +46,40 @@ export function initExplorerContextMenu(root) {
     button?.scrollIntoView({block:'nearest'});
   }
 
+  function position() {
+    const margin = 6;
+    const previous = pending?.anchor?.getBoundingClientRect();
+    const {clientWidth,clientHeight} = owner.documentElement;
+    const maxLeft = clientWidth - popup.offsetWidth - margin;
+    const maxTop = clientHeight - popup.offsetHeight - margin;
+    popup.style.left = Math.max(margin,Math.min(maxLeft,pending?.x ?? previous?.left ?? margin)) + 'px';
+    popup.style.top = Math.max(margin,Math.min(maxTop,pending?.y ?? previous?.bottom ?? margin)) + 'px';
+  }
+
+  function openChildren(button) {
+    const item = frame.find(entry => entry.id === button?.dataset.explorerMenuItem);
+    if (!item?.children?.length) return false;
+    parents.push({items:frame,focus:item.id});
+    frame = item.children;
+    popup.replaceChildren(menuItems(frame));
+    position();
+    focusItem(enabledItems()[0]);
+    return true;
+  }
+
+  function returnToParent() {
+    const previous = parents.pop();
+    if (!previous) return false;
+    frame = previous.items;
+    popup.replaceChildren(menuItems(frame));
+    position();
+    focusItem(enabledItems().find(button => button.dataset.explorerMenuItem === previous.focus));
+    return true;
+  }
+
   popup.addEventListener('click',event => {
     const item = event.target.closest('button[data-explorer-menu-item]');
-    if (item && !item.disabled) dismiss(item.dataset.explorerMenuItem);
+    if (item && !item.disabled && !openChildren(item)) dismiss(item.dataset.explorerMenuItem);
   });
   popup.addEventListener('contextmenu',event => {
     event.preventDefault();
@@ -43,7 +90,14 @@ export function initExplorerContextMenu(root) {
       case 'Escape':
         event.preventDefault();
         event.stopPropagation();
-        dismiss();
+        if (!returnToParent()) dismiss();
+        return;
+      case 'ArrowRight':
+      case 'ArrowLeft':
+        if (event.key === 'ArrowRight' ? openChildren(owner.activeElement) : returnToParent()) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
         return;
       case 'Tab':
         dismiss();
@@ -63,6 +117,18 @@ export function initExplorerContextMenu(root) {
         }[event.key];
         focusItem(items[destination]);
         break;
+      }
+      default: {
+        if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing || [...event.key].length !== 1 || !event.key.trim()) return;
+        const items = enabledItems();
+        const first = items.indexOf(owner.activeElement) + 1;
+        const key = event.key.toLowerCase();
+        const match = [...items.slice(first),...items.slice(0,first)].find(button =>
+          button.dataset.initial === key || button.querySelector('.local-explorer-context-label').textContent.toLowerCase().startsWith(key));
+        if (!match) return;
+        event.preventDefault();
+        event.stopPropagation();
+        focusItem(match);
       }
     }
   });
@@ -92,6 +158,7 @@ export function initExplorerContextMenu(root) {
       button.tabIndex = -1;
       button.disabled = Boolean(item.disabled);
       button.dataset.explorerMenuItem = item.id;
+      button.dataset.initial = menuInitial(item.label) || '';
       button.setAttribute('role',item.checked == null ? 'menuitem' : 'menuitemcheckbox');
       if (item.checked != null) button.setAttribute('aria-checked',String(item.checked));
 
@@ -103,7 +170,13 @@ export function initExplorerContextMenu(root) {
       label.className = 'local-explorer-context-label';
       label.textContent = item.label;
       button.append(mark,label);
-      if (item.shortcut) {
+      if (item.children?.length) {
+        button.setAttribute('aria-haspopup','menu');
+        const arrow = owner.createElement('span');
+        arrow.textContent = '›';
+        arrow.setAttribute('aria-hidden','true');
+        button.append(arrow);
+      } else if (item.shortcut) {
         const shortcut = owner.createElement('kbd');
         shortcut.textContent = item.shortcut;
         button.append(shortcut);
@@ -121,16 +194,10 @@ export function initExplorerContextMenu(root) {
     if (!content.childElementCount) return Promise.resolve(null);
     popup.replaceChildren(content);
     popup.hidden = false;
-
-    const margin = 6;
-    const previous = anchor?.getBoundingClientRect();
-    const {clientWidth,clientHeight} = owner.documentElement;
-    const maxLeft = clientWidth - popup.offsetWidth - margin;
-    const maxTop = clientHeight - popup.offsetHeight - margin;
-    popup.style.left = Math.max(margin,Math.min(maxLeft,x ?? previous?.left ?? margin)) + 'px';
-    popup.style.top = Math.max(margin,Math.min(maxTop,y ?? previous?.bottom ?? margin)) + 'px';
+    frame = items;
     return new Promise(resolve => {
-      pending = {resolve,anchor};
+      pending = {resolve,anchor,x,y};
+      position();
       focusItem(enabledItems()[0]);
     });
   }

@@ -76,16 +76,54 @@ export function initExplorerSidebar(root,sharedWidth = createExplorerSidebarWidt
   owner.addEventListener('pointercancel',event => { if (drag?.pointer === event.pointerId) finish(true); },true);
   owner.defaultView.addEventListener('blur',() => finish());
   const reset = () => { sharedWidth.set(null); sharedWidth.persist(); };
+
+  function setExactWidth() {
+    if (drag || owner.querySelector('dialog[open]')) return;
+    const {min,max} = sharedWidth.bounds();
+    const dialog = owner.createElement('dialog');
+    dialog.className = 'modal compact-dialog';
+    dialog.setAttribute('aria-label','设置导航栏宽度');
+    dialog.innerHTML = '<form method="dialog"><h2>导航栏宽度</h2>' +
+      '<label class="field-label">宽度（像素）<input type="number" class="text-field" step="1" autofocus required></label>' +
+      '<div class="modal-footer"><button type="submit" value="cancel" class="button subtle" formnovalidate>取消</button>' +
+      '<button type="submit" value="save" class="button primary">应用</button></div></form>';
+    const field = dialog.querySelector('input');
+    field.min = String(min);
+    field.max = String(max);
+    field.value = String(sharedWidth.value());
+    dialog.addEventListener('close',() => {
+      if (dialog.returnValue === 'save' && Number.isFinite(field.valueAsNumber)) {
+        sharedWidth.set(field.valueAsNumber);
+        sharedWidth.persist();
+      }
+      dialog.remove();
+      divider.focus({preventScroll:true});
+    },{once:true});
+    root.append(dialog);
+    dialog.showModal();
+    field.select();
+  }
+
   divider.addEventListener('dblclick',reset);
+  divider.addEventListener('contextmenu',event => {
+    event.preventDefault();
+    setExactWidth();
+  });
   divider.addEventListener('keydown',event => {
     if (event.key === 'Escape' && drag) {
       event.preventDefault();
       finish(true);
       return;
     }
+    if (event.key === 'Enter' || event.key === 'Backspace') {
+      event.preventDefault();
+      if (event.key === 'Enter') setExactWidth();
+      else reset();
+      return;
+    }
     const {min,max} = sharedWidth.bounds();
     const start = sidebar.getBoundingClientRect().width;
-    const step = event.shiftKey ? 48 : 16;
+    const step = event.ctrlKey ? 1 : event.shiftKey ? 48 : 16;
     const width = {ArrowLeft:start - step,ArrowRight:start + step,Home:min,End:max}[event.key];
     if (typeof width !== 'number') return;
     event.preventDefault();

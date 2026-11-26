@@ -182,8 +182,14 @@ function sceneMeshes(json, visit) {
   }
 }
 
-function appendMesh(json, loadBuffer, mesh, matrix, vertices, faces) {
+function appendMesh(json, loadBuffer, mesh, matrix, vertices, faces, names) {
   if (!Array.isArray(mesh.primitives)) invalid();
+  const name = names && typeof mesh.name === 'string' ? mesh.name.slice(0,160) : '';
+  const mirrored = names && (
+    matrix[0] * (matrix[5] * matrix[10] - matrix[9] * matrix[6]) -
+    matrix[4] * (matrix[1] * matrix[10] - matrix[9] * matrix[2]) +
+    matrix[8] * (matrix[1] * matrix[6] - matrix[5] * matrix[2])
+  ) < 0;
   const offsets = new Map();
   for (const primitive of mesh.primitives) {
     const mode = nonnegative(primitive?.mode ?? 4);
@@ -220,19 +226,22 @@ function appendMesh(json, loadBuffer, mesh, matrix, vertices, faces) {
       const start = mode === 4 ? triangle * 3 : triangle;
       const face = [vertexIndex(mode === 6 ? 0 : start), vertexIndex(start + 1), vertexIndex(start + 2)];
       if (mode === 5 && triangle % 2) [face[0], face[1]] = [face[1], face[0]];
+      if (mirrored) [face[1], face[2]] = [face[2], face[1]];
       faces.push(face);
+      names?.push(name);
     }
   }
 }
 
-export function parseGltf(bytes, format) {
+export function parseGltf(bytes, format, inspect = false) {
   const {json, binary} = format === 'glb' ? readGlb(bytes) : {json: decodeJson(bytes)};
   if (typeof json?.asset?.version !== 'string' || !/^2\.\d+$/.test(json.asset.version)) invalid();
   const vertices = [];
   const faces = [];
+  const names = inspect ? [] : null;
   const loadBuffer = bufferReader(json, binary);
   sceneMeshes(json, (index, matrix) => {
-    appendMesh(json, loadBuffer, objectAt(json.meshes, index), matrix, vertices, faces);
+    appendMesh(json, loadBuffer, objectAt(json.meshes, index), matrix, vertices, faces, names);
   });
-  return {vertices, faces};
+  return {vertices, faces, ...(names && {names})};
 }

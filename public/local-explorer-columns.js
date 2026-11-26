@@ -1,4 +1,6 @@
 const storageKey = 'nexus-file-columns-v1';
+const folderWidthsKey = 'nexus-file-column-widths-by-folder-v1';
+const folderWidthsLimit = 96;
 const columns = [
   {id:'name',label:'名称',size:260,sort:'name'},
   {id:'date',label:'修改日期',size:154,sort:'date'},
@@ -10,6 +12,7 @@ const columns = [
   {id:'title',label:'标题',size:180,property:true},
   {id:'extension',label:'扩展名',size:90},
   {id:'path',label:'完整路径',size:300},
+  {id:'linkTarget',label:'链接目标',size:280,property:true},
   {id:'dimensions',label:'尺寸',size:104,property:true},
   {id:'duration',label:'长度',size:104,property:true},
   {id:'attributes',label:'属性',size:96,property:true},
@@ -37,14 +40,26 @@ function preferences(definitions) {
     const saved = JSON.parse(localStorage.getItem(storageKey));
     if (Array.isArray(saved?.visible)) {
       const visible = definitions.filter(col => col.id === 'name' || saved.visible.includes(col.id)).map(col => col.id);
-      const widths = Object.fromEntries(definitions.flatMap(({id}) => {
-        const width = saved.widths?.[id];
-        return Number.isFinite(width) && width >= minWidth && width <= maxWidth ? [[id,width]] : [];
-      }));
-      return {visible,widths};
+      return {visible,widths:validWidths(definitions,saved.widths)};
     }
   } catch {}
   return {visible:[...defaults],widths:{}};
+}
+
+function validWidths(definitions,widths) {
+  return Object.fromEntries(definitions.flatMap(({id}) => {
+    const width = widths?.[id];
+    return Number.isFinite(width) && width >= minWidth && width <= maxWidth ? [[id,width]] : [];
+  }));
+}
+
+function readFolderWidths(definitions) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(folderWidthsKey));
+    if (Array.isArray(saved)) return new Map(saved.slice(-folderWidthsLimit).flatMap(item =>
+      Array.isArray(item) && typeof item[0] === 'string' && item[0] ? [[item[0],validWidths(definitions,item[1])]] : []));
+  } catch {}
+  return new Map();
 }
 
 function extension(name) {
@@ -73,19 +88,64 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
   menu.setAttribute('role','group');
   menu.setAttribute('aria-label','详细信息列');
   menu.hidden = true;
-  panel.append(menu);
+  const overflow = owner.createElement('div');
+  overflow.className = 'local-explorer-column-overflow';
+  overflow.setAttribute('aria-hidden','true');
+  overflow.hidden = true;
+  panel.append(menu,overflow);
   const prefs = preferences(definitions);
+  const byFolder = readFolderWidths(definitions);
+  let directory = '';
+  const widths = () => byFolder.get(directory) || prefs.widths;
   const visibleColumns = () => definitions.filter(({id}) => prefs.visible.includes(id));
   let sorting;
   let resize;
   let menuAnchor;
+  let overflowCell;
+  let overflowTitle;
+
+  function hideOverflow() {
+    overflow.hidden = true;
+    overflowCell = null;
+    if (overflowTitle && !overflowTitle.node.hasAttribute('title'))
+      overflowTitle.node.setAttribute('title',overflowTitle.value);
+    overflowTitle = null;
+  }
+
+  function showOverflow(target) {
+    if (!menu.hidden || resize || table.hidden || table.matches('.local-explorer-grid,[data-explorer-display]')) return;
+    const cell = target.closest('td[data-explorer-column-key]');
+    if (cell === overflowCell) return;
+    hideOverflow();
+    if (!cell || !table.contains(cell)) return;
+    const name = cell.dataset.explorerColumnKey === 'name';
+    const label = name ? cell.querySelector('.local-explorer-entry-name') : cell;
+    if (!label || !label.clientWidth || label.scrollWidth <= label.clientWidth + 1) return;
+    if (name && !target.closest('.local-explorer-entry')) return;
+    overflowCell = cell;
+    const titled = name ? label.closest('.local-explorer-entry') : cell;
+    const title = titled.getAttribute('title');
+    if (title) {
+      overflowTitle = {node:titled,value:title};
+      titled.removeAttribute('title');
+    }
+    overflow.textContent = label.textContent;
+    overflow.hidden = false;
+    const rect = label.getBoundingClientRect();
+    const {innerWidth,innerHeight} = owner.defaultView;
+    overflow.style.left = Math.max(4,Math.min(rect.left,innerWidth - overflow.offsetWidth - 4)) + 'px';
+    overflow.style.top = Math.max(4,Math.min(rect.top,innerHeight - overflow.offsetHeight - 4)) + 'px';
+  }
 
   function persist() {
-    try { localStorage.setItem(storageKey, JSON.stringify(prefs)); } catch {}
+    try {
+      localStorage.setItem(storageKey,JSON.stringify(prefs));
+      localStorage.setItem(folderWidthsKey,JSON.stringify([...byFolder]));
+    } catch {}
   }
 
   function assignWidth(id,width) {
-    prefs.widths[id] = Math.min(maxWidth,Math.max(minWidth,Math.round(width)));
+    widths()[id] = Math.min(maxWidth,Math.max(minWidth,Math.round(width)));
     updateWidths();
   }
 
@@ -113,7 +173,7 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
         const decoration = id === 'name' ? 36 : 0;
         width = Math.max(width,textWidth(label) + horizontalPadding(cell) + decoration + 8);
       }
-      prefs.widths[id] = Math.min(maxWidth,Math.max(minWidth,Math.ceil(width)));
+      widths()[id] = Math.min(maxWidth,Math.max(minWidth,Math.ceil(width)));
     }
     updateWidths();
     persist();
@@ -121,14 +181,34 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
 
   function updateWidths() {
     const cols = visibleColumns();
+    const current = widths();
     let total = 0;
     for (const [index,col] of cols.entries()) {
-      const width = prefs.widths[col.id] ?? col.size;
-      colgroup.children[index].style.inlineSize = col.id === 'name' && !prefs.widths.name ? '' : width + 'px';
+      const width = current[col.id] ?? col.size;
+      colgroup.children[index].style.inlineSize = col.id === 'name' && !current.name ? '' : width + 'px';
       total += width;
     }
-    table.style.inlineSize = prefs.widths.name ? total + 'px' : '';
+    table.style.inlineSize = current.name ? total + 'px' : '';
     table.style.minInlineSize = String(total) + 'px';
+  }
+
+  function setDirectory(path) {
+    const next = path || '';
+    if (next === directory) return;
+    hideOverflow();
+    finishResize();
+    directory = next;
+    updateWidths();
+  }
+
+  function toggleFolderWidths() {
+    if (!directory) return;
+    if (!byFolder.delete(directory)) {
+      byFolder.set(directory,{...prefs.widths});
+      if (byFolder.size > folderWidthsLimit) byFolder.delete(byFolder.keys().next().value);
+    }
+    updateWidths();
+    persist();
   }
 
   function setSort(state) {
@@ -172,9 +252,15 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
         table.toggleAttribute('data-column-resizing',true);
       });
       grip.addEventListener('keydown',event => {
-        if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+        if (!['ArrowRight','ArrowLeft','Home'].includes(event.key) || event.altKey) return;
         event.preventDefault();
-        assignWidth(col.id,th.getBoundingClientRect().width + (event.key === 'ArrowRight' ? 12 : -12));
+        if (event.key === 'Home') {
+          delete widths()[col.id];
+          updateWidths();
+        } else {
+          const step = event.ctrlKey ? 1 : event.shiftKey ? 40 : 12;
+          assignWidth(col.id,th.getBoundingClientRect().width + (event.key === 'ArrowRight' ? step : -step));
+        }
         persist();
       });
       grip.addEventListener('dblclick',() => {
@@ -302,7 +388,10 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
         const nextVisible = [...list.querySelectorAll('input:checked')].map(input => input.value);
         const addedAssetColumn = definitions.some(col => col.asset && nextVisible.includes(col.id) && !prefs.visible.includes(col.id));
         prefs.visible = nextVisible;
-        if (resetWidths) prefs.widths = {};
+        if (resetWidths) {
+          if (byFolder.has(directory)) byFolder.set(directory,{});
+          else prefs.widths = {};
+        }
         persist();
         renderHeader();
         onChange(addedAssetColumn);
@@ -332,6 +421,7 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
   }
 
   function openMenu(x,y,th = null) {
+    hideOverflow();
     const key = th?.dataset.explorerColumnKey;
     menuAnchor = th?.querySelector('button') || trigger;
     const options = definitions.filter(col => quickColumns.includes(col.id)).map(col =>
@@ -347,6 +437,10 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
         fitColumns(visibleColumns().map(col => col.id));
         closeMenu(true);
       }),
+      menuCommand(byFolder.has(directory) ? '恢复通用列宽' : '为此文件夹记住列宽',() => {
+        toggleFolderWidths();
+        closeMenu(true);
+      },!directory),
       separator(),...options,separator(),menuCommand('其他…',openMoreColumns),
     );
     menu.hidden = false;
@@ -374,9 +468,16 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
     event.preventDefault();
     closeMenu(true);
   });
+  table.addEventListener('pointerover',event => { if (event.pointerType !== 'touch') showOverflow(event.target); });
+  table.addEventListener('pointerout',event => { if (overflowCell && !overflowCell.contains(event.relatedTarget)) hideOverflow(); });
+  table.addEventListener('focusin',event => showOverflow(event.target));
+  table.addEventListener('focusout',hideOverflow);
+  table.addEventListener('pointerdown',hideOverflow);
+  table.closest('.local-explorer-table-scroll').addEventListener('scroll',hideOverflow,{passive:true});
+  owner.defaultView.addEventListener('resize',hideOverflow);
   renderHeader();
   return {
-    appendCells,updateDetails,updateAssetDetails,setSort,
+    appendCells,updateDetails,updateAssetDetails,setSort,setDirectory,
     openHeaderMenu(target) {
       const th = target.closest('th');
       if (!th || !header.contains(th)) return false;

@@ -67,6 +67,8 @@ def load_module(name):
 class SmartImporter:
     scoped_preferences = True
     max_texture_bindings = True
+    archive_textures = True
+    pbr_material_sets = True
 
     def __init__(self, c4d, app_root):
         self.c4d = c4d
@@ -83,6 +85,8 @@ class SmartImporter:
         self.materials = load_module("c4d_materials")
         self.max_decode = load_module("c4d_max_decode")
         self.project_export = load_module("c4d_project_export")
+        self.texture_archive = load_module("c4d_texture_archive")
+        self.archive_target = None
         self.document = None
         self.generation = 0
         self.results = queue.Queue()
@@ -96,6 +100,8 @@ class SmartImporter:
         self.document = self.c4d.documents.GetActiveDocument()
         if self.document is None and not job.get("projectExport"):
             raise RuntimeError("请先打开一个 Cinema 4D 工程。")
+        scene = (job.get("options") or {}).get("scene_import") or {}
+        self.archive_target = self.texture_archive.project_directory(self.document) if scene.get("storeTextures") else None
         self.generation += 1
         self.active_job = job["id"]
         self.cancel_event = threading.Event()
@@ -116,6 +122,7 @@ class SmartImporter:
         self.cancel_event = None
         self.active_job = None
         self.document = None
+        self.archive_target = None
         self._clear_status()
 
     def _prepare(self, job, generation, cancel=None):
@@ -263,6 +270,8 @@ class SmartImporter:
             doc = c4d.documents.GetActiveDocument()
             if doc is None or doc != self.document:
                 raise RuntimeError("准备期间切换了工程。请回到目标工程重新导入。")
+            if self.archive_target is not None and self.texture_archive.project_directory(doc) != self.archive_target:
+                raise RuntimeError("准备期间更改了工程保存目录，请重新导入。")
             self._stage(job_id, "importing")
             self._show_status("importing")
             message = self._apply(doc, plan)
@@ -273,6 +282,7 @@ class SmartImporter:
             self.document = None
             self.active_job = None
             self.cancel_event = None
+            self.archive_target = None
             self._clear_status()
 
     def _apply(self, doc, plan):
@@ -281,6 +291,8 @@ class SmartImporter:
         if plan["kind"] == "scene":
             path = plan["path"]
             options = plan.get("scene_import")
+            store_textures = bool(options and options.get("storeTextures"))
+            previous_materials = doc.GetMaterials() if store_textures else ()
             link_maps = bool(plan.get("maps"))
             convert_materials = (Path(path).suffix.lower() == ".fbx"
                                  and self.materials.wants_octane(c4d, doc, plan.get("renderer", "auto")))
@@ -308,6 +320,24 @@ class SmartImporter:
                             details += " · " + message
                 except Exception as error:
                     warnings.append("关联材质未生成：" + str(error))
+            if store_textures:
+                try:
+                    materials = [material for material in doc.GetMaterials() if material not in previous_materials]
+                    resolve = self.materials._texture_resolver(Path(path), plan.get("source_path"), doc.GetDocumentPath())
+                    count, failures = self.texture_archive.collect(
+                        c4d, doc, [*materials, *imported], resolve,
+                        self.project_export._rename_without_replacing,
+                    )
+                    if count:
+                        details += f" · 已将 {count} 项贴图改为工程内相对引用"
+                    if failures:
+                        warnings.append("未归档贴图：" + "、".join(failures[:4])
+                                        + (f" 等 {len(failures)} 项" if len(failures) > 4 else ""))
+                    if not count and not failures:
+                        details += " · 无需归档贴图"
+                    c4d.EventAdd()
+                except Exception as error:
+                    warnings.append("贴图归档失败：" + str(error))
         else:
             details = self.materials.apply(c4d, doc, plan) or "已导入"
         return " · ".join([details] + warnings)
@@ -371,6 +401,7 @@ class SmartImporter:
                     conversion = self.materials.restore_standard_textures(c4d, doc, materials, plan)
                 except Exception as error:
                     conversion = "标准材质贴图恢复失败：" + (str(error) or type(error).__name__)
+                conversions.append(conversion)
             if not doc.StartUndo():
                 raise RuntimeError("无法开启 Cinema 4D 撤销记录。")
             try:

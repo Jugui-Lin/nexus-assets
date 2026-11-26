@@ -35,16 +35,17 @@ pub(super) enum Preview {
     Binary(Vec<u8>),
 }
 
-pub(super) fn read(path: &Path, extension: &str, thumbnail: bool) -> Result<Preview, String> {
-    let limit = match extension {
-        "obj" | "fbx" => MAX_NATIVE_MESH_SOURCE_BYTES,
-        ext if thumbnail => mesh_source_limit(ext).unwrap_or(0),
-        ext if mesh_source_limit(ext).is_some() => MAX_DIRECT_PREVIEW_BYTES,
-        _ => 0,
-    };
-    if limit == 0 {
-        return Err("交互预览支持 OBJ、FBX、STL、PLY、GLB 和内嵌几何的 glTF".into());
+pub(super) fn source_byte_limit(extension: &str, thumbnail: bool) -> Option<u64> {
+    match extension {
+        "obj" | "fbx" => Some(MAX_NATIVE_MESH_SOURCE_BYTES),
+        ext if thumbnail => mesh_source_limit(ext),
+        ext => mesh_source_limit(ext).map(|_| MAX_DIRECT_PREVIEW_BYTES),
     }
+}
+
+pub(super) fn read(path: &Path, extension: &str, thumbnail: bool) -> Result<Preview, String> {
+    let limit = source_byte_limit(extension,thumbnail)
+        .ok_or("交互预览支持 OBJ、FBX、STL、PLY、GLB 和内嵌几何的 glTF")?;
     let file = File::open(path).map_err(|error| error.to_string())?;
     if file.metadata().map_err(|error| error.to_string())?.len() > limit {
         return Err("网格文件超过此预览模式的文件大小限制".into());

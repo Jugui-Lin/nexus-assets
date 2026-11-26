@@ -18,6 +18,14 @@
   position: static;
   min-height: 0;
 }
+#app > .sidebar[data-sidebar-peek] {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: min(var(--sidebar-peek-width),80vw);
+  z-index: 12;
+  box-shadow: 8px 0 25px #0004;
+}
 
 #app > .content-shell {
   grid-area: content;
@@ -97,6 +105,8 @@
   background: var(--accent-dark);
   color: var(--accent);
 }
+.workspace-inspector-dock[hidden] { display: none; }
+.workspace-inspector-dock[aria-pressed="true"] svg { transform: rotate(90deg); color: var(--accent); }
 
 .workspace-pane[data-pane-inspector] {
   display: grid;
@@ -113,6 +123,30 @@
   border-inline-start: 1px solid var(--line);
   box-shadow: -6px 0 20px #0003;
 }
+.work-area[data-inspector-bottom] {
+  grid-template: minmax(0,1fr) minmax(0,min(36%,260px)) / minmax(0,1fr);
+}
+.work-area[data-inspector-bottom]:has(#inspector-empty:not(.hidden)) {
+  grid-template-rows: minmax(0,1fr) minmax(0,min(25%,140px));
+}
+.workspace-pane[data-pane-inspector-bottom] {
+  grid-template-rows: auto minmax(0,1fr) minmax(0,min(37%,245px));
+}
+:is(.work-area[data-inspector-bottom],.workspace-pane[data-pane-inspector-bottom]) > .inspector:not([hidden]) {
+  display: block;
+  grid-column: 1;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  justify-self: stretch;
+  align-self: stretch;
+  border-inline-start: 0;
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -6px 18px #0002;
+}
+.workspace-pane[data-pane-inspector-bottom] > .inspector { grid-row: 3; }
+:is(.work-area[data-inspector-bottom],.workspace-pane[data-pane-inspector-bottom]) .preview-stage { height: 140px; }
+:is(.work-area[data-inspector-bottom],.workspace-pane[data-pane-inspector-bottom]) .inspector-empty { padding: 5px 0; }
 
 .sidebar[hidden],
 .inspector[hidden],
@@ -178,6 +212,23 @@
 .workspace-divider:focus-visible {
   outline: none;
 }
+.workspace-divider-measurement {
+  position: absolute;
+  display: none;
+  top: 50%;
+  inset-inline-start: 12px;
+  translate: 0 -50%;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--card);
+  font: 11px/1.4 system-ui,sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.workspace-divider:is(:hover,:focus-visible,.is-resizing) .workspace-divider-measurement { display: block; }
+.workspace-divider--inspector .workspace-divider-measurement { inset-inline: auto 12px; }
 
 .workspace-divider--shared::after { display: none; }
 

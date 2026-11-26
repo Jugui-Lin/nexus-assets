@@ -17,11 +17,19 @@ import {initWhiteboardPresence} from './whiteboard-presence.js';
 import {readWhiteboardMediaDimensions} from './whiteboard-media-dimensions.js';
 import {canOptimizeArrangement, optimizeArrangement} from './whiteboard-optimize.js';
 import {initWhiteboardStackSettings, stackSettingsLabel} from './whiteboard-stack-settings.js';
+import {initWhiteboardReview} from './whiteboard-review.js';
+import {readVideoClip,videoClipRange,writeVideoClip} from './whiteboard-video-clip-reference.js';
+import {initWhiteboardVideoReview} from './whiteboard-video-review.js';
+import {initWhiteboardReplaceImage} from './whiteboard-replace-image.js';
+import {initWhiteboardRegions, isWhiteboardRegion, newWhiteboardRegionId, readWhiteboardRegion,
+  suggestedRegionShot, whiteboardRegionText} from './whiteboard-regions.js';
+import {formatTime} from './video-controls.js';
 
 const storageKey = 'nexus-whiteboard-v1:';
 const clipboardType = 'application/x-nexus-whiteboard+json';
 const webClipboardType = 'web ' + clipboardType;
 const outboxKey = 'nexus-whiteboard-outbox-v1:';
+const colorFilterKey = 'nexus-whiteboard-color-filter-v1:';
 const colors = {yellow:'黄色', mint:'薄荷绿', sky:'天蓝色', rose:'玫瑰色', violet:'紫色', slate:'灰色'};
 const kinds = {note:'便签', text:'文字', rect:'矩形', ellipse:'椭圆', stroke:'画笔', arrow:'连接线', frame:'画框', image:'图片'};
 const tools = {select:['选择','V','locate'], pan:['平移','H','arrow'], note:['便签','N','notes'],
@@ -70,6 +78,15 @@ const normalizeModes = {first:'以首个选中项为准',average:'取平均值'}
 const normalizeModeKey = 'nexus-whiteboard-normalize-mode';
 const portNames = {top:'上边',right:'右边',bottom:'下边',left:'左边'};
 
+function readColorFilter(key) {
+  try {
+    const stored = localStorage.getItem(colorFilterKey + key);
+    return Object.hasOwn(colors,stored) ? stored : '';
+  } catch { return ''; }
+}
+
+const boardColorOf = item => Object.hasOwn(colors,item.color) ? item.color : 'slate';
+
 function fromItems(items) {
   return new Map(items.slice(0, limits.items).filter(item => typeof item?.id === 'string' &&
     Object.hasOwn(kinds, item.kind) && [item.x, item.y, item.width, item.height].every(Number.isFinite) &&
@@ -80,7 +97,12 @@ function applyOperations(base, operations) {
   const items = new Map(base);
   for (const {id, patch, delete:remove} of operations) {
     if (remove) items.delete(id);
-    else if (items.has(id) || patch.kind) items.set(id, {...items.get(id), ...patch, id});
+    else if (items.has(id) || patch.kind) {
+      const next = {...items.get(id), ...patch, id};
+      if (patch.assetId) delete next.imageId;
+      else if (patch.imageId) delete next.assetId;
+      items.set(id,next);
+    }
   }
   return items;
 }
@@ -239,6 +261,8 @@ export function personalBoardReferencesAsset(key, assetId) {
   return false;
 }
 
+export const personalBoardRegions = key => [...loadPersonal(key).values()].map(readWhiteboardRegion).filter(Boolean);
+
 function loadOutbox(key, teamId) {
   try {
     const saved = JSON.parse(localStorage.getItem(outboxKey + key));
@@ -258,7 +282,8 @@ function loadOutbox(key, teamId) {
 }
 
 export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage = async () => null, openLink,
-  locateAsset, loadPresenceAvatar, revealPastedFile, importPastedFiles, handleDroppedFiles, loadFilePreview}) {
+  locateAsset, openVideoSource, projectName, reviewAssignees, copyReviewText, searchReplacementImages,loadPresenceAvatar,
+  revealPastedFile, importPastedFiles, handleDroppedFiles, loadFilePreview, colorFilter}) {
   const stackSettings = initWhiteboardStackSettings(notify);
   let normalizeSource = 'first';
   try { if (localStorage.getItem(normalizeModeKey) === 'average') normalizeSource = 'average'; } catch {}
@@ -357,7 +382,6 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   const redoButton = get('[data-board-history="redo"]');
   const zoomLabel = get('[data-board-view="reset"]');
   const imageTools = get('.whiteboard-image-actions');
-  const colorTools = get('.whiteboard-color-actions');
   const cropHint = get('.whiteboard-crop-hint');
   const groupFrameLayer = get('.whiteboard-group-frames');
   const groupOutline = get('.whiteboard-group-outline');
@@ -400,6 +424,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   let visibilityRevision = 0;
   let tool = 'select';
   let activeColor = 'yellow';
+  const colorForNewItem = () => scope?.colorFilter || activeColor;
   let selected = new Set();
   let gesture;
   let gestureFrame = 0;
@@ -440,7 +465,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     source(node) { return videoReferences.get(node)?.asset.playback(); },
     canPreview(node) {
       const reference = videoReferences.get(node);
-      return reference?.active() && reference.video.paused && !reference.play.disabled;
+      return reference?.active() && !reference.segment && reference.video.paused && !reference.play.disabled;
     },
     isBlocked: () => !visible || tool !== 'select' || Boolean(gesture || editing || pendingNode || linkStart ||
       cropMode || cropKey || cropAdjustKey || zoomKey ||
@@ -493,14 +518,137 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }
 
   const emptyBoard = new Map();
-  const items = () => scope
+  const records = () => scope
     ? (scope.board ??= orderedItems(scope, applyOperations(scope.base, scope.queue)))
     : emptyBoard;
+  function canvasItems() {
+    if (!scope) return emptyBoard;
+    const all = records();
+    if (scope.canvasSource !== all) {
+      scope.canvasSource = all;
+      scope.canvasItems = new Map([...all].filter(([,item]) => !isWhiteboardRegion(item)));
+    }
+    return scope.canvasItems;
+  }
+  function items() {
+    const all = canvasItems();
+    const filter = scope?.colorFilter;
+    if (!filter || review.presenting()) return all;
+    if (scope.colorItemsSource !== all || scope.shownColor !== filter) {
+      scope.colorItemsSource = all;
+      scope.shownColor = filter;
+      const shown = new Map([...all].filter(([,item]) => boardColorOf(item) === filter));
+      for (const [id,item] of shown) {
+        if (item.connection && (!shown.has(item.connection.from?.id) || !shown.has(item.connection.to?.id))) shown.delete(id);
+      }
+      scope.colorItems = shown;
+    }
+    return scope.colorItems;
+  }
+  const review = initWhiteboardReview({shell,stage,icon,items:canvasItems,minimapItems:items,bounds:itemBounds,
+    boardKey:() => visible ? scope?.key : null,
+    getView:() => scope?.view,
+    setView(view) { if (scope) { scope.view = view; paintView(); } },
+    canPresent:() => visible && !gesture && !editing && !cropMode && !normalizeRequest,
+    onPresent() {
+      whiteboardHover.stop();
+      videoReviews.close();
+      videoReviews.closeDispatch();
+      regions.close();
+      for (const video of stage.querySelectorAll('video')) video.pause();
+      dismissNodePicker(true);
+      setLinkStart(null);
+      if (colorFilter) colorFilter.disabled = true;
+      if (scope?.colorFilter) render();
+    },
+    onExit() {
+      if (colorFilter) colorFilter.disabled = false;
+      if (scope?.colorFilter) render();
+    },
+  });
+  if (colorFilter) {
+    colorFilter.replaceChildren(new Option('全部颜色',''),...Object.entries(colors).map(([id,label]) => new Option(label,id)));
+    colorFilter.addEventListener('change',() => {
+      if (!visible || !scope || review.presenting()) return;
+      endGesture();
+      stopEditing(true);
+      scope.colorFilter = Object.hasOwn(colors,colorFilter.value) ? colorFilter.value : '';
+      try {
+        if (scope.colorFilter) localStorage.setItem(colorFilterKey + scope.key,scope.colorFilter);
+        else localStorage.removeItem(colorFilterKey + scope.key);
+      } catch {}
+      render();
+    });
+  }
   const current = id => items().get(id);
+  const videoReviews = initWhiteboardVideoReview({world,current,items,notify,
+    visible:() => visible && !review.presenting(),
+    mayEdit:() => Boolean(scope?.loaded && (!scope.teamId || canUseAssetReferences() && !scope.error)),
+    projectName:projectName || (() => '白板'),
+    scope:() => visible && !review.presenting() ? scope?.key : null,
+    assignees:() => reviewAssignees?.(scope?.workspaceKey) || [],copyText:copyReviewText,
+    commit:(id,text) => commit({id,patch:{text}}),
+  });
   const canTransformImages = () => Boolean(scope && (!scope.teamId || scope.imageTransforms));
   const canUseAssetReferences = () => Boolean(scope && (!scope.teamId || scope.assetReferences));
   const canUseGroups = () => Boolean(scope && (!scope.teamId || scope.groups));
   const canUseConnections = () => Boolean(scope && (!scope.teamId || scope.connections));
+  const savedRegions = () => [...records().values()].map(readWhiteboardRegion).filter(Boolean);
+  const canEditRegions = () => Boolean(visible && scope?.loaded && (!scope.teamId || canUseAssetReferences() && !scope.error));
+  const regions = initWhiteboardRegions({regions:savedRegions,
+    context:() => visible && !review.presenting() && !gesture && scope?.view ? scope : null,
+    canEdit:canEditRegions,
+    capture:captureRegion,
+    save(target,id,name,shot,geometry) {
+      if (target !== scope || !canEditRegions()) throw Error('当前白板无法修改区域');
+      if (id && !readWhiteboardRegion(records().get(id))) throw Error('该区域已移除');
+      if (!id && (records().size >= limits.items || savedRegions().length >= 60)) throw Error('此白板已达到区域或项目容量上限');
+      commit({id:id || newWhiteboardRegionId(),patch:{...geometry,
+        ...(!id && {kind:'frame',points:[],color:'slate'}),text:whiteboardRegionText(name,shot)}});
+    },
+    remove(target,id) {
+      if (target !== scope || !canEditRegions()) throw Error('当前白板无法修改区域');
+      if (!readWhiteboardRegion(records().get(id))) throw Error('该区域已移除');
+      commit({id,delete:true});
+    },
+    jump:jumpToRegion,
+  });
+  const replaceImage = searchReplacementImages ? initWhiteboardReplaceImage({search:searchReplacementImages,
+    async preview(request,candidate) {
+      if (!request.current() || !searchReplacementImages(request.scope,'',candidate.id).length) return null;
+      const media = await prepareReferenceMedia(candidate.id,request.target);
+      return media?.kind === 'image' && media.previewImage.naturalWidth ? media : null;
+    },
+    async commit(request,stillRequested) {
+      if (request.target.teamId) await sync(request.target);
+      if (!request.current() || !stillRequested()) throw Error('白板卡片已变更，请重新选择');
+      if (!searchReplacementImages(request.scope,'',request.candidate.id).length) throw Error('所选图片暂不可用');
+      preparedAssets.set(request.id,request.media);
+      commit({id:request.id,patch:{assetId:request.candidate.id}});
+      notify('已替换白板参考图');
+      return true;
+    },
+  }) : null;
+
+  function canReplaceImage(item) {
+    return Boolean(replaceImage && item?.kind === 'image' && scope?.loaded &&
+      (!scope.teamId || canUseAssetReferences() && !scope.error) && !review.presenting() &&
+      (item.imageId || nodes.get(item.id)?.whiteboardAsset?.kind === 'image'));
+  }
+
+  function showReplaceImage(item) {
+    if (!canReplaceImage(item)) return;
+    const target = scope;
+    const revision = visibilityRevision;
+    const signature = record => record && JSON.stringify([record.assetId,record.imageId,record.x,record.y,
+      record.width,record.height,record.text,record.imageTransform,record.groupId]);
+    const expected = signature(item);
+    replaceImage.open({target,id:item.id,scope:target.workspaceKey,original:item.assetId,
+      title:item.text || nodes.get(item.id)?.whiteboardAsset?.name || '参考图',
+      current:() => visible && target === scope && revision === visibilityRevision && selected.size === 1 &&
+        selected.has(item.id) && canReplaceImage(current(item.id)) && signature(current(item.id)) === expected,
+    });
+  }
 
   function showSync() {
     let text = !scope ? '' : !scope.teamId ? '本机白板'
@@ -513,6 +661,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (status.textContent !== text) status.textContent = text;
     status.title = scope?.error || '';
     retry.hidden = !scope?.error;
+    regions.refresh();
   }
 
   function savePersonal(state) {
@@ -540,9 +689,12 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }
 
   async function sync(state = scope) {
-    if (!state?.teamId || state.busy || state.workspaceKey !== scope?.workspaceKey ||
+    if (!state?.teamId || state.workspaceKey !== scope?.workspaceKey ||
       (state === scope && gesture && !state.queue.length) ||
       ((!visible || state !== scope) && !state.queue.length)) return;
+    if (state.busy) return state.syncCompletion;
+    let finished;
+    state.syncCompletion = new Promise(resolve => { finished = resolve; });
     state.busy = true;
     if (!state.batch && state.queue.length) {
       state.batch = {batchId:crypto.randomUUID(), operations:state.queue.slice(0, limits.batch)};
@@ -586,6 +738,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       state.error = String(failure?.message || failure || '无法连接团队白板').slice(0, 180);
     } finally {
       state.busy = false;
+      finished();
       if (scope === state && visible) {
         if (changed) render();
         else showSync();
@@ -609,7 +762,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   function commit(...operations) {
     if (!scope || !operations.length) return;
-    const before = items();
+    const before = records();
     const next = applyOperations(before, operations);
     const entry = boardHistoryEntry(before, next, operations);
     if (!entry.length) { render(); return; }
@@ -625,7 +778,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const stack = scope[direction];
     const entry = stack.at(-1);
     if (!entry) return;
-    const board = items();
+    const board = records();
     const {operations,applied} = boardHistoryOperations(entry, board, direction);
     if (!canTransformImages() && operations.some(operation => operation.patch?.imageTransform)) {
       notify('请更新团队服务后修改图片。', true);
@@ -655,7 +808,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
           continue;
         }
         const original = operation.id;
-        operation.id = crypto.randomUUID();
+        operation.id = isWhiteboardRegion({id:original,kind:operation.patch.kind}) ? newWhiteboardRegionId() : crypto.randomUUID();
         scope.order.set(operation.id,scope.order.get(original) ?? scope.nextOrder++);
         for (const group of [...scope.undo,...scope.redo,applied]) {
           for (const change of group) {
@@ -666,7 +819,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       }
       scope[direction === 'undo' ? 'redo' : 'undo'].push(applied);
       applyChanges(operations, applyOperations(board, operations));
-    } else renderSelection(board);
+    } else renderSelection();
   }
 
   function itemContent(node, item) {
@@ -745,6 +898,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     filePreviews?.remove(node);
     whiteboardHover.stopFor(node);
     videoCoverObserver.unobserve(node);
+    if (videoReferences.has(node)) videoReviews.release(node.dataset.boardId);
     videoReferences.get(node)?.coverAbort.abort();
     videoReferences.delete(node);
     node.whiteboardAsset = null;
@@ -819,6 +973,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const {title,time} = readVideoCover(item.text);
     const key = time === null ? null : videoCoverKey(scope.workspaceKey,item.assetId,time);
     reference.image.alt = title || '白板图片';
+    videoReviews.update(item.id);
     node.title = (reference.asset.name || title || '资产') + ' · 资产库引用';
     if (reference.coverKey === key) return;
 
@@ -844,6 +999,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     video.preload = 'none';
     video.hidden = true;
     const {time:coverTime} = readVideoCover(item.text);
+    const {text:segmentTitle,range:segment} = readVideoClip(item.text);
     const coverKey = coverTime === null ? null : videoCoverKey(scope.workspaceKey,item.assetId,coverTime);
     const cachedCover = coverKey && pinnedVideoFrames.get(coverKey);
     if (cachedCover) image.src = cachedCover;
@@ -854,7 +1010,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const play = document.createElement('button');
     play.type = 'button';
     play.dataset.boardPlayVideo = '';
-    const reference = {asset,active,clip,image,video,play,coverTime,coverKey,
+    const reference = {asset,active,clip,image,video,play,coverTime,coverKey,segment,
       assetId:item.assetId,imageId:item.imageId,coverAbort:new AbortController()};
     videoReferences.set(node,reference);
     if (coverKey && !cachedCover) videoCoverObserver.observe(node);
@@ -868,15 +1024,54 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     video.addEventListener('play', () => setPlaying(true));
     video.addEventListener('pause', () => setPlaying(false));
     video.addEventListener('ended', () => setPlaying(false));
+    if (segment) {
+      const label = document.createElement('span');
+      label.className = 'whiteboard-video-clip-label';
+      label.textContent = `${segmentTitle} · ${formatTime(segment.start)}–${formatTime(segment.end)}`;
+      label.title = `${segmentTitle} · ${segment.start.toFixed(3)}s–${segment.end.toFixed(3)}s`;
+      node.append(label);
+      if (openVideoSource) {
+        const source = document.createElement('button');
+        source.type = 'button';
+        source.className = 'whiteboard-video-clip-source';
+        source.dataset.boardOpenVideoSource = '';
+        source.textContent = '打开原片';
+        const workspace = scope.workspaceKey;
+        source.addEventListener('click',() => {
+          if (active() && visible) { video.pause(); openVideoSource(item.assetId,segment.start,workspace); }
+        });
+        node.append(source);
+      }
+      let monitor;
+      function boundPlayback() {
+        if (!active() || !visible || video.paused) return;
+        const limit = Math.min(segment.end,video.duration);
+        if (Number.isFinite(limit) && video.currentTime >= limit - .002) {
+          video.pause();
+          if (video.currentTime > limit) video.currentTime = limit;
+          return;
+        }
+        if (video.currentTime < segment.start - .004) video.currentTime = segment.start;
+      }
+      function tick() {
+        boundPlayback();
+        if (active() && visible && !video.paused) monitor = requestAnimationFrame(tick);
+      }
+      video.addEventListener('playing',() => { cancelAnimationFrame(monitor); tick(); });
+      video.addEventListener('timeupdate',boundPlayback);
+      video.addEventListener('pause',() => cancelAnimationFrame(monitor));
+    }
     play.addEventListener('click', async () => {
       whiteboardHover.stopFor(node);
       if (!video.paused) { video.pause(); return; }
       const revision = visibilityRevision;
       const stillVisible = () => active() && visible && revision === visibilityRevision;
-      const startTime = video.hidden || video.ended ? reference.lastFrame?.time ?? reference.coverTime ?? 0 : null;
+      const segmentRestart = segment && (video.currentTime < segment.start || video.currentTime >= segment.end - .002);
+      const startTime = video.hidden || video.ended || segmentRestart ? segment?.start ?? reference.lastFrame?.time ?? reference.coverTime ?? 0 : null;
       const startPlayback = () => {
         if (startTime !== null) {
           const end = Number.isFinite(video.duration) ? Math.max(0,video.duration - .05) : Infinity;
+          if (segment && Number.isFinite(video.duration) && video.duration <= segment.start) throw Error('原片时长已改变');
           video.currentTime = Math.min(startTime,end);
         }
         return video.play();
@@ -905,6 +1100,8 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       } finally { play.disabled = false; }
     });
     node.append(play);
+    videoReviews.attach({id:item.id,assetId:item.assetId,node,clip,video,image,asset,active,segment,initialTime:coverTime,
+      title:readVideoCover(item.text).title || asset.name || '视频'});
   }
 
   function renderImage(node, item) {
@@ -934,7 +1131,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         else if (asset?.url) {
           if (!image.hasAttribute('src')) image.src = asset.url;
         } else throw Error('资产暂时无法读取');
-        node.title = (asset.name || title || '资产') + ' · 资产库引用';
+        node.title = (readVideoClip(item.text).range ? title : asset.name || title || '资产') + ' · 资产库引用';
       }).catch(() => {
         if (!active()) return;
         image.hidden = true;
@@ -965,7 +1162,11 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     node.style.top = item.y + 'px';
     node.style.width = item.width + 'px';
     node.style.height = item.height + 'px';
-    node.dataset.color = Object.hasOwn(colors, item.color) ? item.color : 'slate';
+    const color = boardColorOf(item);
+    if (node.dataset.color !== color) {
+      node.dataset.color = color;
+      node.setAttribute('aria-label',`${kinds[item.kind]} · ${colors[color]}`);
+    }
     if (item.kind === 'image') {
       const {rotation, flipX, flipY, opacity, crop:[left,top,right,bottom]} = normalizeImageTransform(item.imageTransform);
       const width = right - left;
@@ -977,6 +1178,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       node.style.setProperty('--image-height', 100 / height + '%');
       node.style.setProperty('--image-left', -100 * left / width + '%');
       node.style.setProperty('--image-top', -100 * top / height + '%');
+      if (videoReferences.has(node)) videoReviews.reposition(item.id);
     }
   }
 
@@ -1040,11 +1242,15 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     renderGroupFrames(board);
     renderConnections(board);
     empty.hidden = board.size > 0 || Boolean(gesture?.preview) || !scope?.loaded;
+    empty.textContent = scope?.colorFilter && canvasItems().size && !review.presenting()
+      ? '此颜色下没有元素，切回全部颜色可查看画布' : '粘贴图片，或选择工具开始';
     renderSelection(board);
     showSync();
+    review.refresh();
   }
 
   function renderSelection(board = items()) {
+    for (const id of selected) if (!board.has(id)) selected.delete(id);
     selected = extendGroupSelection(board,selected);
     updateNormalizeControls(board);
     const canAlign = canAlignSelection(board,selected);
@@ -1064,7 +1270,6 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     redoButton.disabled = !scope?.redo.length;
     const imageOnly = selected.size > 0 && [...selected].every(id => board.get(id).kind === 'image');
     imageTools.hidden = !imageOnly;
-    colorTools.hidden = imageOnly;
     for (const button of imageTools.children) {
       button.disabled = !canTransformImages() || (button.dataset.boardImageAction === 'crop' && selected.size !== 1);
     }
@@ -1122,10 +1327,11 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       node.append(wrapper);
     }
     deleteButton.disabled = !selected.size;
-    const colors = new Set([...selected].map(id => board.get(id).color));
-    const active = selected.size ? (colors.size === 1 ? colors.values().next().value : null) : activeColor;
+    const selectionColors = new Set([...selected].map(id => boardColorOf(board.get(id))));
+    const active = selected.size ? (selectionColors.size === 1 ? selectionColors.values().next().value : null) : colorForNewItem();
     for (const button of panel.querySelectorAll('[data-board-color]')) {
       button.setAttribute('aria-pressed', String(button.dataset.boardColor === active));
+      button.disabled = Boolean(scope?.colorFilter && !selected.size && button.dataset.boardColor !== scope.colorFilter);
     }
   }
 
@@ -1501,7 +1707,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (!start || !end) return;
     const connection = {from:{id:from.id,side:from.side},to:{id:to.id,side:to.side}};
     const text = writeBoardConnectionOffsets({from:from.offset,to:to.offset});
-    add({kind:'arrow',...arrowGeometry(start,end),color:activeColor,connection,...(text && {text})});
+    add({kind:'arrow',...arrowGeometry(start,end),color:colorForNewItem(),connection,...(text && {text})});
   }
 
   function previewConnection(drag, event, point) {
@@ -1510,7 +1716,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const target = connectionTarget(event,drag.from,point);
     const destination = target && current(target.id);
     const end = destination && boardPortPoint(destination,target.side,target.offset) || point;
-    const arrow = {kind:'arrow',...connectedGeometry(drag.start,end,current(drag.from.id),drag.from.side,destination,target?.side),color:activeColor};
+    const arrow = {kind:'arrow',...connectedGeometry(drag.start,end,current(drag.from.id),drag.from.side,destination,target?.side),color:colorForNewItem()};
     place(drag.preview,arrow);
     paintStroke(drag.preview,arrow);
     drag.preview.hidden = false;
@@ -1528,7 +1734,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   function openNodePicker(drag, event) {
     const hit = document.elementFromPoint(event.clientX,event.clientY);
     if (!stage.contains(hit) || hit.closest('[data-board-id]')) return false;
-    if (items().size + 2 > limits.items) {
+    if (records().size + 2 > limits.items) {
       notify('白板空间不足，添加连接节点需要两个空位。', true);
       return false;
     }
@@ -1549,7 +1755,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const board = items();
     const start = boardPortPoint(board.get(from.id),from.side);
     if (!start) return;
-    if (board.size + 2 > limits.items) {
+    if (records().size + 2 > limits.items) {
       notify('白板空间不足，添加连接节点需要两个空位。', true);
       return;
     }
@@ -1557,9 +1763,9 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     const [portX,portY] = boardPorts[side];
     const id = crypto.randomUUID();
     const node = {...patch,x:coordinate(point.x - patch.width * (1 + portX) / 2),
-      y:coordinate(point.y - patch.height * (1 + portY) / 2),color:activeColor};
+      y:coordinate(point.y - patch.height * (1 + portY) / 2),color:colorForNewItem()};
     const to = {id,side};
-    const arrow = {kind:'arrow',...arrowGeometry(start,boardPortPoint(node,side)),color:activeColor,connection:{from,to}};
+    const arrow = {kind:'arrow',...arrowGeometry(start,boardPortPoint(node,side)),color:colorForNewItem(),connection:{from,to}};
     if (asset) preparedAssets.set(id,asset);
     selected = new Set([id]);
     commit({id,patch:node},{id:crypto.randomUUID(),patch:arrow});
@@ -1624,7 +1830,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         if (request.scope.teamId) {
           const {teamId,workspaceKey} = request.scope;
           const available = () => visible && scope === request.scope && visibilityRevision === request.revision &&
-            items().has(request.from.id) && items().size + 2 <= limits.items;
+            items().has(request.from.id) && records().size + 2 <= limits.items;
           if (!available() || !importPastedFiles) return;
           const result = await importPastedFiles({teamId,workspaceKey,files:[file],paths:[],available,limit:1});
           const reference = result?.files?.[0];
@@ -1666,6 +1872,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       zoomLabel.textContent = Math.round(zoom * 100) + '%';
     }
     positionSelectionTools();
+    review.requestMap();
   }
 
   function world(clientX, clientY, bounds = stage.getBoundingClientRect()) {
@@ -1681,9 +1888,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }
 
   function insertItems(entries, assets, itemIds = []) {
-    const available = limits.items - items().size;
+    const available = limits.items - records().size;
     if (entries.length > available) notify('白板最多可添加 500 个项目。', true);
-    const operations = entries.slice(0, available).map((patch,index) => ({id:itemIds[index] || crypto.randomUUID(),patch}));
+    const operations = entries.slice(0, available).map((patch,index) => ({id:itemIds[index] || crypto.randomUUID(),
+      patch:scope.colorFilter && !patch.color ? {...patch,color:scope.colorFilter} : patch}));
     if (!operations.length) return false;
     setTool('select');
     selected = new Set(operations.map(operation => operation.id));
@@ -1715,7 +1923,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     for await (const file of files) {
       if (target !== scope || !visible) return;
       if (!isWhiteboardImage(file)) { skipped++; continue; }
-      const room = limits.items - items().size;
+      const room = limits.items - records().size;
       if (entries.length >= room) { notify('白板最多可添加 500 个项目。', true); break; }
       try {
         const {id, width, height} = await media.prepare(target, file);
@@ -1755,7 +1963,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (!available() || !target) return true;
     if (target.teamId) {
       if (handler) {
-        const limit = limits.items - items().size;
+        const limit = limits.items - records().size;
         if (!limit) { notify('白板最多可添加 500 个项目。', true); return true; }
         try {
           const result = await handler({teamId:target.teamId, workspaceKey:target.workspaceKey,
@@ -1793,33 +2001,34 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       height:previewImage.naturalHeight || (video ? 270 : 240)};
   }
 
-  async function insertAssetReferences(references, point, placement) {
+  async function insertAssetReferences(references, point, placement, availableNow = () => true) {
     const target = scope;
     const revision = visibilityRevision;
-    const current = () => visible && target === scope && revision === visibilityRevision;
+    const current = () => visible && target === scope && revision === visibilityRevision && availableNow();
     if (!target || references.workspaceKey !== target.workspaceKey) {
       notify('请在这组资产所在的库里打开白板后添加引用。', true);
       return;
     }
-    const sources = [...(references.assetIds || []).map(assetId => ({assetId})), ...(references.files || [])];
+    const sources = [...(references.assetIds || []).map(assetId => ({assetId})), ...(references.files || []), ...(references.clips || [])];
     const canUseAssets = canUseAssetReferences();
     if (!canUseAssets && sources.every(source => !source.file)) {
       notify('请确认团队白板已联网，并更新团队服务以添加资产引用。', true);
       return;
     }
-    const available = limits.items - items().size;
+    const available = limits.items - records().size;
     if (sources.length > available) notify('白板最多可添加 500 个项目。', true);
     const entries = [];
     const assets = new Map();
     let offset = placement ? 32 : 0;
-    for (const {assetId,file} of sources.slice(0, available)) {
+    for (const {assetId,file,segment,title} of sources.slice(0, available)) {
       if (!current()) return;
       const asset = await prepareReferenceMedia(assetId,target);
+      if (segment && asset?.kind !== 'video') continue;
       if (!asset) {
         const text = file?.teamId === target.teamId && writeWhiteboardFile(file);
         if (text) {
           entries.push({kind:'text',text,x:coordinate(point.x + offset),y:coordinate(point.y + offset),
-            width:272,height:64,color:activeColor});
+            width:272,height:64,color:colorForNewItem()});
           offset += 32;
         }
         continue;
@@ -1831,7 +2040,8 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       const itemHeight = length(height * scale);
       const x = point.x + (lead ? -itemWidth * placement.gripX : offset);
       const y = point.y + (lead ? -itemHeight * placement.gripY : offset);
-      entries.push({kind:'image',assetId,text:(asset.name || '').slice(0,limits.text),
+      const text = segment ? writeVideoClip(title,segment) : (asset.name || '').slice(0,limits.text);
+      entries.push({kind:'image',assetId,text,
         x:coordinate(x),y:coordinate(y),width:itemWidth,height:itemHeight});
       assets.set(assetId,asset);
       if (!lead) offset += 32;
@@ -1856,7 +2066,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
           pair.every(value => Number.isFinite(value) && Math.abs(value) <= 100000));
     });
     if (!entries.length) return false;
-    const available = limits.items - items().size;
+    const available = limits.items - records().size;
     if (entries.length > available) {
       notify('白板最多可添加 500 个项目。', true);
       entries = entries.slice(0,available);
@@ -1976,7 +2186,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     if (!value) return;
     insertItems([{kind:'text',x:coordinate(point.x),y:coordinate(point.y),width:280,
       height:Math.min(480,Math.max(62,(value.split('\n').length + Math.floor(value.length / 32)) * 22 + 22)),
-      text:value,color:activeColor}]);
+      text:value,color:colorForNewItem()}]);
   }
 
   async function pasteClipboardPayload({files,json,text}, point) {
@@ -2013,7 +2223,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   function boardClipboardEvent(event) {
     const target = event.target;
-    return visible && scope && (target === stage || panel.contains(target)) &&
+    return visible && scope && !review.presenting() && (target === stage || panel.contains(target)) &&
       !target.closest('textarea,input,[contenteditable="true"]') && !document.querySelector('dialog[open]');
   }
 
@@ -2091,6 +2301,36 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       scope.view = {x:(w - zoom * (left + right)) / 2,y:(h - zoom * (top + bottom)) / 2,zoom};
     }
     paintView();
+  }
+
+  function captureRegion() {
+    const {x,y,zoom} = scope.view;
+    const entries = selectedItems();
+    const geometry = (left,top,right,bottom) => ({x:coordinate(left),y:coordinate(top),
+      width:length(right-left),height:length(bottom-top)});
+    let selection;
+    if (entries.length) {
+      const boxes = entries.map(itemBounds);
+      const padding = 48 / zoom;
+      selection = geometry(Math.min(...boxes.map(box => box.left))-padding,Math.min(...boxes.map(box => box.top))-padding,
+        Math.max(...boxes.map(box => box.right))+padding,Math.max(...boxes.map(box => box.bottom))+padding);
+    }
+    return {view:geometry(-x/zoom,-y/zoom,(stage.clientWidth-x)/zoom,(stage.clientHeight-y)/zoom),
+      selection,shot:suggestedRegionShot(entries)};
+  }
+
+  function jumpToRegion(id,shot) {
+    if (!visible || !scope?.view || editing || gesture || review.presenting()) return false;
+    const region = readWhiteboardRegion(records().get(id));
+    if (!region || (shot && region.shot !== shot) || !stage.clientWidth || !stage.clientHeight) return false;
+    const {x,y,width,height} = region.item;
+    const zoom = clamp(Math.min(stage.clientWidth/width,stage.clientHeight/height),.2,3);
+    beforeFocus = focusedImage = undefined;
+    scope.view = {x:stage.clientWidth/2-zoom*(x+width/2),y:stage.clientHeight/2-zoom*(y+height/2),zoom};
+    paintView();
+    const target = scope;
+    requestAnimationFrame(() => { if (scope === target && visible) stage.focus({preventScroll:true}); });
+    return true;
   }
 
   function optimizeCanvas() {
@@ -2235,15 +2475,15 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       const y = coordinate(Math.min(...drag.points.map(p => p.y)) - 4);
       const points = drag.points.map(p => [length(p.x - x), length(p.y - y)]);
       return {kind,x,y,points,width:length(Math.max(...points.map(p => p[0])) + 4),
-        height:length(Math.max(...points.map(p => p[1])) + 4),color:activeColor};
+        height:length(Math.max(...points.map(p => p[1])) + 4),color:colorForNewItem()};
     }
     const sized = Math.hypot(point.x - start.x, point.y - start.y) > 10;
     if (kind === 'arrow') {
       const end = sized ? point : {x:start.x + 110,y:start.y};
-      return {kind,...arrowGeometry(start,end),color:activeColor};
+      return {kind,...arrowGeometry(start,end),color:colorForNewItem()};
     }
     return {kind,x:coordinate(sized ? Math.min(point.x, start.x) : start.x),
-      y:coordinate(sized ? Math.min(point.y, start.y) : start.y),color:activeColor,
+      y:coordinate(sized ? Math.min(point.y, start.y) : start.y),color:colorForNewItem(),
       width:length(sized ? Math.abs(point.x-start.x) : kind === 'frame' ? 420 : 160),
       height:length(sized ? Math.abs(point.y-start.y) : kind === 'frame' ? 280 : 110)};
   }
@@ -2261,7 +2501,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   }
 
   function add(item) {
-    if (items().size >= limits.items) { notify('白板最多可添加 500 个项目。', true); return; }
+    if (records().size >= limits.items) { notify('白板最多可添加 500 个项目。', true); return; }
     const id = crypto.randomUUID();
     selected = new Set(item.kind === 'stroke' ? [] : [id]);
     commit({id,patch:item});
@@ -2273,7 +2513,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   function addTextAt(kind, point) {
     add({kind,x:coordinate(point.x),y:coordinate(point.y),width:kind === 'note' ? 195 : 255,
-      height:kind === 'note' ? 145 : 80,text:'',color:activeColor});
+      height:kind === 'note' ? 145 : 80,text:'',color:colorForNewItem()});
   }
 
   function moveOrigins(board) {
@@ -2551,7 +2791,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       updateNormalizeControls(items());
     }
     if (!scope || gesture || !event.isPrimary || ![0,1].includes(event.button) ||
-        event.target.closest('.whiteboard-editor,.whiteboard-node-picker,[data-board-play-video],[data-board-open-link],[data-board-reveal-file],[data-board-cut-connector]')) return;
+        event.target.closest('.whiteboard-editor,.whiteboard-node-picker,[data-board-play-video],[data-board-open-video-source],[data-board-open-link],[data-board-reveal-file],[data-board-cut-connector]')) return;
     if (viewFrame) paintView();
     event.preventDefault();
     stopEditing(true);
@@ -2747,11 +2987,13 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
   stage.addEventListener('dblclick', event => {
     const item = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-board-id]');
     if (pendingCoverPin?.id === item?.dataset.boardId) finishVideoCoverPin(false);
-    if (tool === 'select' && !event.shiftKey && !event.target.closest('.whiteboard-editor,[data-board-port],[data-board-endpoint],[data-board-play-video],[data-board-open-link],[data-board-reveal-file],[data-board-cut-connector]')) {
+    if (tool === 'select' && !event.shiftKey && !event.target.closest('.whiteboard-editor,[data-board-port],[data-board-endpoint],[data-board-play-video],[data-board-open-video-source],[data-board-open-link],[data-board-reveal-file],[data-board-cut-connector]')) {
       if (!plane.contains(item)) return;
       whiteboardHover.stop();
       const entry = current(item.dataset.boardId);
-      if (entry?.kind === 'image') toggleImageFocus([entry]);
+      const reference = videoReferences.get(item);
+      if (reference?.segment) reference.play.click();
+      else if (entry?.kind === 'image') toggleImageFocus([entry]);
       else if (item.hasAttribute('data-board-file-card')) item.querySelector('[data-board-reveal-file]')?.click();
       else edit(item.dataset.boardId);
     }
@@ -2990,7 +3232,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   return {
     busyForUpdate() {
-      return Boolean(gesture || editing || pendingMedia || pendingNode || pendingNodeImage || pendingCoverPin || normalizeRequest || stackSettings.isOpen() ||
+      return Boolean(review.presenting() || videoReviews.isOpen() || replaceImage?.isOpen() || regions.isOpen() || gesture || editing || pendingMedia || pendingNode || pendingNodeImage || pendingCoverPin || normalizeRequest || stackSettings.isOpen() ||
         [...states.values()].some(state => state.storageError && (!state.teamId || state.queue.length)) ||
         [...stage.querySelectorAll('video')].some(video => !video.paused && !video.ended));
     },
@@ -3000,21 +3242,43 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       render();
       sync();
     },
+    exportRepairList:videoReviews.exportReport,
+    dispatchReviewNotes:videoReviews.openDispatch,
+    showRegions:regions.open,
+    async focusShotRegion(id,shot,stillRequested) {
+      const target = scope;
+      const revision = visibilityRevision;
+      if (!visible || !target || !stillRequested()) return false;
+      if (target.teamId) await sync(target);
+      return visible && target === scope && revision === visibilityRevision && stillRequested() &&
+        !target.error && jumpToRegion(id,shot);
+    },
     dropNativeImages(paths, position) {
-      if (!visible || !scope) return false;
+      if (!visible || !scope || review.presenting()) return false;
       const point = position ? {x:position.x / window.devicePixelRatio,y:position.y / window.devicePixelRatio} : undefined;
       insertMedia(insertExternalFiles,{paths,drop:true},insertionPoint(point));
       return true;
     },
     dropAssetReferences(references, offset) {
-      if (!visible || !scope?.view) return false;
+      if (!visible || !scope?.view || review.presenting()) return false;
       const {left,top} = stage.getBoundingClientRect();
       const zoom = scope.view.zoom;
       const placement = offset.media && {...offset.media, width:offset.media.width / zoom, height:offset.media.height / zoom};
       return insertMedia(insertAssetReferences, references, world(left + offset.x, top + offset.y), placement);
     },
+    async addVideoClip({workspaceKey,id,title,start,end},stillRequested) {
+      const target = scope;
+      const revision = visibilityRevision;
+      const segment = videoClipRange(start,end);
+      const current = () => visible && target === scope && revision === visibilityRevision && stillRequested() && !review.presenting();
+      if (!segment || !current() || workspaceKey !== target?.workspaceKey) return false;
+      if (target.teamId && !target.loaded) await sync(target);
+      if (!current()) return false;
+      if (!canUseAssetReferences()) throw Error('当前团队白板尚未确认支持资产引用，请连接团队服务后再试');
+      return insertMedia(insertAssetReferences,{workspaceKey,clips:[{assetId:id,title,segment}]},insertionPoint(),null,current);
+    },
     dropLink(text, offset) {
-      if (!visible || !scope?.view) return false;
+      if (!visible || !scope?.view || review.presenting()) return false;
       const {left,top} = stage.getBoundingClientRect();
       const point = world(left + offset.x, top + offset.y);
       const patch = whiteboardLinkPatch(text, {x:coordinate(point.x), y:coordinate(point.y)});
@@ -3060,6 +3324,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         editActions.unshift(['locate', '在资产库中定位', () => locateAsset(item.assetId,
           () => available() && current(clicked)?.assetId === item.assetId)]);
       }
+      if (selection.length === 1 && canReplaceImage(item)) editActions.unshift(['picture','替换参考图…',() => showReplaceImage(item)]);
 
       const canAlign = canAlignSelection(board,selected);
       const canDock = !canAlign && canDockSelection(board,selected);
@@ -3112,6 +3377,11 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     setVisible(value) {
       if (visible === value) return;
       if (!value) {
+        review.exit(false);
+        replaceImage?.close();
+        regions.close();
+        videoReviews.close();
+        videoReviews.closeDispatch();
         stackSettings.close();
         cancelNormalizeRequest();
         setNormalizeOpen(false);
@@ -3157,6 +3427,11 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     },
     setScope({key,teamId,projectId,workspaceKey = key}) {
       if (!key || scope?.key === key) return;
+      review.exit(false);
+      replaceImage?.close();
+      regions.close();
+      videoReviews.close();
+      videoReviews.closeDispatch();
       stackSettings.close();
       cancelNormalizeRequest();
       setNormalizeOpen(false);
@@ -3174,8 +3449,9 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       setTool('select');
       if (!states.has(key)) states.set(key, {key,teamId,projectId,workspaceKey,base:teamId ? new Map() : loadPersonal(key),
         ...(teamId ? loadOutbox(key, teamId) : {queue:[]}),loaded:!teamId,error:'',undo:[],redo:[],
-        order:new Map(),nextOrder:0});
+        order:new Map(),nextOrder:0,colorFilter:readColorFilter(key)});
       scope = states.get(key);
+      if (colorFilter) colorFilter.value = scope.colorFilter;
       for (const node of nodes.values()) {
         releaseImage(node);
         node.remove();

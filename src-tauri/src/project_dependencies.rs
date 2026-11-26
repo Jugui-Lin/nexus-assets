@@ -13,10 +13,11 @@ use std::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_REFERENCES: usize = 1024;
 const MAX_URI_BYTES: usize = 4096;
+pub(crate) mod repair;
 
 #[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum DependencyKind {
+pub(crate) enum DependencyKind {
     Buffer,
     Image,
 }
@@ -32,7 +33,7 @@ impl DependencyKind {
 
 const KINDS: [DependencyKind; 2] = [DependencyKind::Buffer, DependencyKind::Image];
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum DependencyStatus {
     Available,
@@ -40,6 +41,8 @@ enum DependencyStatus {
     Unavailable,
     Embedded,
     Unsupported,
+    Incompatible,
+    Unverified,
 }
 
 #[derive(Serialize)]
@@ -50,12 +53,18 @@ struct DependencyReference {
     status: DependencyStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    temporary: bool,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectDependencies {
     revision: String,
     references: Vec<DependencyReference>,
+    required_extensions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +72,7 @@ pub(crate) struct DependencyReplacement {
     kind: DependencyKind,
     index: usize,
     path: PathBuf,
+    stamp: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -180,6 +190,21 @@ fn read_manifest(path: &Path) -> Result<(Value, String), String> {
     if document.pointer("/asset/version").and_then(Value::as_str) != Some("2.0") {
         return Err("此工程未声明为 glTF 2.0".into());
     }
+    if let Some(minimum) = document.pointer("/asset/minVersion") {
+        let version = minimum
+            .as_str()
+            .and_then(|value| value.split_once('.'))
+            .and_then(|(major, minor)| {
+                Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
+            })
+            .ok_or("工程声明了无效的 glTF 最低版本")?;
+        if version > (2, 0) {
+            return Err(format!(
+                "工程要求 glTF {}.{}，此工具支持 glTF 2.0",
+                version.0, version.1
+            ));
+        }
+    }
     let mut count = 0;
     for kind in KINDS {
         let entries = rows(&document, kind)?;
@@ -286,10 +311,128 @@ fn buffer_length(entry: &Value) -> Option<u64> {
         .filter(|&size| size > 0)
 }
 
+fn required_extensions(document: &Value) -> Result<Vec<String>, String> {
+    let Some(field) = document.get("extensionsRequired") else {
+        return Ok(Vec::new());
+    };
+    let items = field
+        .as_array()
+        .filter(|items| items.len() <= 64)
+        .ok_or("工程的必需扩展列表无效或超过 64 项")?;
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .filter(|value| {
+                    !value.is_empty() && value.len() <= 120 && !value.chars().any(char::is_control)
+                })
+                .map(str::to_owned)
+                .ok_or_else(|| "工程包含无效的必需扩展名称".to_owned())
+        })
+        .collect()
+}
+
+fn temporary_root() -> Option<PathBuf> {
+    let raw = std::env::temp_dir();
+    fs::canonicalize(&raw)
+        .ok()
+        .map(|path| PathBuf::from(clean_path(&path)))
+        .or_else(|| raw.is_absolute().then_some(raw))
+}
+
+fn within_temporary(path: &Path, root: Option<&Path>) -> bool {
+    let Some(root) = root else {
+        return false;
+    };
+    if cfg!(windows) {
+        let mut segments = path.components();
+        root.components().all(|component| {
+            segments.next().is_some_and(|part| {
+                component.as_os_str().to_string_lossy().to_lowercase()
+                    == part.as_os_str().to_string_lossy().to_lowercase()
+            })
+        })
+    } else {
+        path.starts_with(root)
+    }
+}
+
+fn reference_status(
+    kind: DependencyKind,
+    entry: &Value,
+    path: &Path,
+) -> (DependencyStatus, Option<String>) {
+    let metadata = match regular_file(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return (DependencyStatus::Missing, None)
+        }
+        Err(_) => {
+            return (
+                DependencyStatus::Unavailable,
+                Some("文件不可读取，或路径经过链接".into()),
+            )
+        }
+    };
+    match kind {
+        DependencyKind::Buffer => {
+            let Some(length) = buffer_length(entry) else {
+                return (
+                    DependencyStatus::Incompatible,
+                    Some("工程未声明有效的缓冲区长度".into()),
+                );
+            };
+            if metadata.len() < length {
+                return (
+                    DependencyStatus::Incompatible,
+                    Some(format!(
+                        "实际 {} 字节，工程需要至少 {} 字节",
+                        metadata.len(),
+                        length
+                    )),
+                );
+            }
+        }
+        DependencyKind::Image => {
+            let media = entry
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .or_else(|| image_media_type(path));
+            if !matches!(
+                media,
+                Some("image/png" | "image/jpeg" | "image/webp" | "image/ktx2")
+            ) {
+                return (
+                    DependencyStatus::Unverified,
+                    Some("可读取原文件，贴图格式需在相应工具中核对".into()),
+                );
+            }
+            match image_signature(path, media.unwrap_or_default()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return (
+                        DependencyStatus::Incompatible,
+                        Some("贴图文件内容与声明或扩展名不符".into()),
+                    )
+                }
+                Err(_) => {
+                    return (
+                        DependencyStatus::Unavailable,
+                        Some("无法读取贴图文件头".into()),
+                    )
+                }
+            }
+        }
+    }
+    (DependencyStatus::Available, None)
+}
+
 fn inspect(path: &Path) -> Result<ProjectDependencies, String> {
     let path = project_path(path)?;
     let parent = path.parent().ok_or("工程没有有效的父目录")?;
     let (document, revision) = read_manifest(&path)?;
+    let required_extensions = required_extensions(&document)?;
+    let temp = temporary_root();
     let mut references = Vec::new();
     for kind in KINDS {
         for (index, entry) in rows(&document, kind)?.iter().enumerate() {
@@ -304,22 +447,10 @@ fn inspect(path: &Path) -> Result<ProjectDependencies, String> {
             let path = (!embedded)
                 .then(|| relative_uri_path(parent, uri))
                 .flatten();
-            let status = match path.as_ref() {
-                Some(path) => match regular_file(path) {
-                    Ok(metadata)
-                        if kind == DependencyKind::Image
-                            || buffer_length(entry)
-                                .is_some_and(|bytes| metadata.len() >= bytes) =>
-                    {
-                        DependencyStatus::Available
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        DependencyStatus::Missing
-                    }
-                    _ => DependencyStatus::Unavailable,
-                },
-                None if embedded => DependencyStatus::Embedded,
-                None => DependencyStatus::Unsupported,
+            let (status, detail) = match path.as_ref() {
+                Some(path) => reference_status(kind, entry, path),
+                None if embedded => (DependencyStatus::Embedded, None),
+                None => (DependencyStatus::Unsupported, None),
             };
             let visible_uri = if data {
                 "data:"
@@ -328,18 +459,24 @@ fn inspect(path: &Path) -> Result<ProjectDependencies, String> {
             } else {
                 uri
             };
+            let temporary = path
+                .as_ref()
+                .is_some_and(|path| within_temporary(path, temp.as_deref()));
             references.push(DependencyReference {
                 kind,
                 index,
                 uri: visible_uri.to_owned(),
                 status,
                 path: path.as_deref().map(clean_path),
+                detail,
+                temporary,
             });
         }
     }
     Ok(ProjectDependencies {
         revision,
         references,
+        required_extensions,
     })
 }
 
@@ -358,22 +495,23 @@ fn validate_image(path: &Path, expected: Option<&str>) -> Result<(), String> {
     if expected.is_some_and(|expected| expected != media) {
         return Err("替换贴图的格式须与原依赖一致".into());
     }
+    if !image_signature(path, media).map_err(|error| format!("无法读取贴图文件头（{error}）"))?
+    {
+        return Err("贴图文件内容与扩展名不符".into());
+    }
+    Ok(())
+}
+
+fn image_signature(path: &Path, media: &str) -> io::Result<bool> {
     let mut header = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(12).read_to_end(&mut header))
-        .map_err(|error| format!("无法读取贴图文件头（{error}）"))?;
-    let valid = match media {
+    File::open(path)?.take(12).read_to_end(&mut header)?;
+    Ok(match media {
         "image/png" => header.starts_with(b"\x89PNG\r\n\x1a\n"),
         "image/jpeg" => header.starts_with(b"\xff\xd8\xff"),
         "image/webp" => header.starts_with(b"RIFF") && header.get(8..12) == Some(b"WEBP"),
         "image/ktx2" => header.starts_with(b"\xabKTX 20\xbb\r\n\x1a\n"),
         _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err("贴图文件内容与扩展名不符".into())
-    }
+    })
 }
 
 fn sibling_output(parent: &Path, output_name: &str) -> Result<PathBuf, String> {
@@ -423,10 +561,13 @@ fn write_copy(
         }
     }
     let mut changed = HashSet::new();
+    let mut checked_files = Vec::new();
+    let temporary_root = temporary_root();
     for DependencyReplacement {
         kind,
         index,
         path: replacement,
+        stamp,
     } in replacements
     {
         if !changed.insert((kind, index)) {
@@ -437,33 +578,21 @@ fn write_copy(
             .and_then(Value::as_array_mut)
             .and_then(|rows| rows.get_mut(index))
             .ok_or("选中的依赖条目不存在")?;
-        let old = entry
-            .get("uri")
-            .and_then(Value::as_str)
-            .and_then(|uri| relative_uri_path(parent, uri))
-            .ok_or("只支持替换本机相对路径引用的依赖")?;
-        let replacement = canonical_regular_file(&replacement)?;
-        let new_uri = sibling_uri(parent, &replacement)?;
-        match kind {
-            DependencyKind::Buffer => {
-                let length = buffer_length(entry).ok_or("原缓冲区未声明有效的 byteLength")?;
-                if regular_file(&replacement)
-                    .map_err(|error| error.to_string())?
-                    .len()
-                    < length
-                {
-                    return Err("替换缓冲区小于原工程声明的大小，无法使用".into());
-                }
+        let candidate = repair::validate_candidate(
+            kind,
+            entry,
+            parent,
+            &replacement,
+            false,
+            temporary_root.as_deref(),
+        )?;
+        if let Some(expected) = stamp {
+            if candidate.stamp != expected {
+                return Err("已经检查的依赖文件发生变化，请重新选择".into());
             }
-            DependencyKind::Image => validate_image(
-                &replacement,
-                entry
-                    .get("mimeType")
-                    .and_then(Value::as_str)
-                    .or_else(|| image_media_type(&old)),
-            )?,
         }
-        entry["uri"] = Value::String(new_uri);
+        checked_files.push((PathBuf::from(candidate.path), candidate.stamp));
+        entry["uri"] = Value::String(candidate.uri);
     }
 
     let bytes = serde_json::to_vec(&document).map_err(|error| error.to_string())?;
@@ -478,6 +607,11 @@ fn write_copy(
         .map_err(|error| format!("保存副本失败（{error}）"))?;
     if version_bytes(&path)?.1 != current {
         return Err("原工程已改变，请重新检查依赖后再保存副本".into());
+    }
+    for (file, stamp) in checked_files {
+        if repair::file_stamp(&regular_file(&file).map_err(|error| error.to_string())?)? != stamp {
+            return Err("依赖文件在保存时发生变化，请重新检查".into());
+        }
     }
     staged.persist_noclobber(&output).map_err(|error| {
         if error.error.kind() == io::ErrorKind::AlreadyExists {
@@ -505,13 +639,28 @@ pub(crate) async fn inspect_project_dependencies(
 pub(crate) async fn pick_project_dependency_file(
     window: tauri::WebviewWindow,
     project_path: PathBuf,
+    gltf_only: Option<bool>,
+    folder: Option<bool>,
 ) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = self::project_path(&project_path)?;
         let picker = rfd::FileDialog::new()
             .set_parent(&window)
-            .set_title("选择依赖文件")
             .set_directory(path.parent().ok_or("工程没有有效的父目录")?);
+        if folder == Some(true) {
+            return Ok(picker
+                .set_title("选择查找候选依赖的文件夹")
+                .pick_folder()
+                .as_deref()
+                .map(clean_path));
+        }
+        let picker = if gltf_only == Some(true) {
+            picker
+                .set_title("选择参考 glTF 工程版本")
+                .add_filter("glTF 工程", &["gltf"])
+        } else {
+            picker.set_title("选择依赖文件")
+        };
         Ok(picker.pick_file().as_deref().map(clean_path))
     })
     .await
@@ -548,6 +697,7 @@ mod tests {
             kind: DependencyKind::Buffer,
             index,
             path: path.to_owned(),
+            stamp: None,
         }
     }
 
@@ -585,7 +735,7 @@ mod tests {
             [
                 "available",
                 "missing",
-                "unavailable",
+                "incompatible",
                 "embedded",
                 "embedded",
                 "unsupported",
@@ -632,6 +782,7 @@ mod tests {
                     kind: DependencyKind::Image,
                     index: 0,
                     path: replacement_image.clone(),
+                    stamp: None,
                 },
             ],
         )

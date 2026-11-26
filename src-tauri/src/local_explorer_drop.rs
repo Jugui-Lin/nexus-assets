@@ -8,7 +8,7 @@ pub(crate) enum DropEffect {
 }
 
 #[cfg(windows)]
-static FILE_OPERATION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+pub(super) static FILE_OPERATION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[cfg(windows)]
 #[derive(Debug)]

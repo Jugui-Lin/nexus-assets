@@ -16,6 +16,7 @@ function readLayout(preferences) {
   return {
     sidebar: Number.isFinite(saved?.sidebar) ? saved.sidebar : null,
     inspector: Number.isFinite(saved?.inspector) ? saved.inspector : null,
+    inspectorDock: saved?.inspectorDock === 'bottom' ? 'bottom' : 'right',
     collapsed: {
       sidebar: saved?.collapsed?.sidebar === true,
       inspector: saved?.collapsed?.inspector === true,
@@ -44,6 +45,10 @@ function createDivider(panel, key, label) {
   divider.setAttribute('aria-controls', panel.id);
   divider.setAttribute('aria-label', label);
   divider.title = `${label}，双击恢复默认宽度`;
+  const measurement = document.createElement('span');
+  measurement.className = 'workspace-divider-measurement';
+  measurement.setAttribute('aria-hidden','true');
+  divider.append(measurement);
   return divider;
 }
 
@@ -93,6 +98,11 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
   navigation.before(leading);
   leading.append(toggles.sidebar, navigation);
   viewControls.append(toggles.inspector);
+  const inspectorDock = document.createElement('button');
+  inspectorDock.type = 'button';
+  inspectorDock.className = 'icon-button workspace-inspector-dock';
+  inspectorDock.innerHTML = '<svg aria-hidden="true"><use href="#i-compare"/></svg>';
+  viewControls.append(inspectorDock);
 
   const preferred = readLayout(preferences);
   const { collapsed } = preferred;
@@ -103,10 +113,12 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
   let context = {assetView:true, split:false, pane:null, tabId:null};
   let overlayOpen = false;
   let overlayPane = null;
+  let sidebarPeek = false;
+  let peekTimer;
 
-  const inspectorAvailable = () => geometry.hasInspector && context.assetView;
+  const inspectorAvailable = () => context.assetView && (geometry.hasInspector || preferred.inspectorDock === 'bottom');
   const inspectorExpanded = () => inspectorAvailable() && (context.split ? overlayOpen : !collapsed.inspector);
-  const reservedDetailWidth = () => geometry.hasInspector && !collapsed.inspector ? limits.inspector.min : 0;
+  const reservedDetailWidth = () => geometry.hasInspector && preferred.inspectorDock === 'right' && !collapsed.inspector ? limits.inspector.min : 0;
 
   function readGeometry() {
     const viewport = window.innerWidth;
@@ -140,7 +152,7 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
   }
 
   function renderWidths() {
-    const inspectorDocked = !context.split && inspectorExpanded();
+    const inspectorDocked = !context.split && preferred.inspectorDock === 'right' && inspectorExpanded();
     const sidebarWidth = collapsed.sidebar
       ? 0
       : sharedSidebar?.value() ?? clamp(preferred.sidebar ?? defaults.sidebar, geometry.sideMin,
@@ -150,6 +162,7 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
       : 0;
     widths = { sidebar: sidebarWidth, inspector: inspectorWidth };
     app.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+    app.style.setProperty('--sidebar-peek-width', `${sharedSidebar?.value() ?? (preferred.sidebar ?? defaults.sidebar)}px`);
     app.style.setProperty('--detail-width', `${inspectorWidth}px`);
     if (overlayPane) {
       const overlayWidth = clamp(preferred.inspector ?? defaults.inspector, limits.inspector.min, limits.inspector.max);
@@ -163,16 +176,25 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
       divider.setAttribute('aria-valuemax', String(max));
       divider.setAttribute('aria-valuenow', String(widths[key]));
       divider.setAttribute('aria-valuetext', `${widths[key]} 像素`);
+      divider.firstElementChild.textContent = `${widths[key]} px`;
     }
   }
 
   function renderPanels() {
+    if (!collapsed.sidebar) sidebarPeek = false;
+    const bottom = preferred.inspectorDock === 'bottom';
+    sidebar.toggleAttribute('data-sidebar-peek',sidebarPeek);
+    workArea.toggleAttribute('data-inspector-bottom',bottom && !context.split && inspectorExpanded());
+    inspectorDock.hidden = !context.assetView;
+    inspectorDock.setAttribute('aria-pressed',String(bottom));
+    inspectorDock.title = bottom ? '将资产详情移到右侧' : '将资产详情移到底部';
+    inspectorDock.setAttribute('aria-label',inspectorDock.title);
     for (const key of Object.keys(panels)) {
       const { activeElement } = document;
       const sidebarPanel = key === 'sidebar';
       const available = sidebarPanel || inspectorAvailable();
-      const expanded = sidebarPanel ? !collapsed.sidebar : inspectorExpanded();
-      const docked = expanded && (sidebarPanel || !context.split);
+      const expanded = sidebarPanel ? !collapsed.sidebar || sidebarPeek : inspectorExpanded();
+      const docked = expanded && (sidebarPanel ? !sidebarPeek : !context.split && !bottom);
       const focusInPanel = panels[key].contains(activeElement) || dividers[key] === activeElement;
       if ((!expanded && focusInPanel) || (!available && toggles[key] === activeElement) ||
           (!docked && dividers[key] === activeElement)) {
@@ -182,13 +204,14 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
       dividers[key].hidden = !docked;
       toggles[key].hidden = !available;
       toggles[key].setAttribute('aria-expanded', String(expanded));
-      const label = `${expanded ? '收起' : '展开'}${panelNames[key]}`;
+      const label = sidebarPanel && sidebarPeek ? '固定显示左侧导航' : `${expanded ? '收起' : '展开'}${panelNames[key]}`;
       toggles[key].setAttribute('aria-label', label);
       toggles[key].title = label;
     }
     const nextPane = context.split && inspectorExpanded() ? context.pane : null;
     if (overlayPane !== nextPane) {
       overlayPane?.removeAttribute('data-pane-inspector');
+      overlayPane?.removeAttribute('data-pane-inspector-bottom');
       if (nextPane) {
         nextPane.setAttribute('data-pane-inspector', '');
         nextPane.append(inspector);
@@ -197,6 +220,7 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
       }
       overlayPane = nextPane;
     }
+    overlayPane?.toggleAttribute('data-pane-inspector-bottom',bottom);
     renderWidths();
   }
 
@@ -245,6 +269,48 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
     renderWidths();
     writeLayout(preferred, preferences);
   }
+
+  inspectorDock.addEventListener('click',() => {
+    if (drag?.key === 'inspector') endDrag(true);
+    preferred.inspectorDock = preferred.inspectorDock === 'bottom' ? 'right' : 'bottom';
+    if (context.split) overlayOpen = true;
+    else collapsed.inspector = false;
+    renderPanels();
+    writeLayout(preferred,preferences);
+  });
+  const sidebarToggle = toggles.sidebar;
+  const inSidebar = target => target instanceof Node && (sidebar.contains(target) || sidebarToggle.contains(target));
+  function setSidebarPeek(value) {
+    clearTimeout(peekTimer);
+    const next = value && collapsed.sidebar;
+    if (next === sidebarPeek) return;
+    sidebarPeek = next;
+    renderPanels();
+  }
+  for (const zone of [sidebar,sidebarToggle]) {
+    zone.addEventListener('pointerenter', event => {
+      if (event.pointerType !== 'mouse' || !collapsed.sidebar) return;
+      clearTimeout(peekTimer);
+      if (!sidebarPeek) peekTimer = setTimeout(() => setSidebarPeek(true),250);
+    });
+    zone.addEventListener('pointerleave',event => {
+      if (event.pointerType !== 'mouse' || inSidebar(event.relatedTarget)) return;
+      clearTimeout(peekTimer);
+      if (sidebarPeek && !sidebar.contains(document.activeElement)) peekTimer = setTimeout(() => setSidebarPeek(false),180);
+    });
+    zone.addEventListener('focusout',event => {
+      if (sidebarPeek && !inSidebar(event.relatedTarget) && !sidebar.matches(':hover')) setSidebarPeek(false);
+    });
+    zone.addEventListener('keydown',event => {
+      if (event.key !== 'Escape' || !sidebarPeek) return;
+      event.preventDefault();
+      setSidebarPeek(false);
+      sidebarToggle.focus({preventScroll:true});
+    });
+  }
+  document.addEventListener('pointerdown',event => {
+    if (sidebarPeek && !inSidebar(event.target)) setSidebarPeek(false);
+  });
 
   for (const key of Object.keys(dividers)) {
     toggles[key].addEventListener('click', () => {
@@ -321,6 +387,32 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
   onResize();
   sharedSidebar?.subscribe(renderWidths);
   return {
+    snapshot() {
+      return {
+        sidebar:sharedSidebar ? sharedSidebar.preferred() : preferred.sidebar,
+        inspector:preferred.inspector,
+        inspectorDock:preferred.inspectorDock,
+        collapsed:{...collapsed},
+      };
+    },
+    applySnapshot(input) {
+      if (drag) endDrag(true);
+      const values = {
+        sidebar:Number.isFinite(input?.sidebar) ? clamp(input.sidebar,0,480) : null,
+        inspector:Number.isFinite(input?.inspector) ? clamp(input.inspector,limits.inspector.min,limits.inspector.max) : null,
+        inspectorDock:input?.inspectorDock === 'bottom' ? 'bottom' : 'right',
+        collapsed:{sidebar:input?.collapsed?.sidebar === true,inspector:input?.collapsed?.inspector === true},
+      };
+      preferences.setItem(storageKey,JSON.stringify(values));
+      if (sharedSidebar) {
+        sharedSidebar.set(values.sidebar);
+        sharedSidebar.persist();
+      }
+      Object.assign(preferred,{sidebar:values.sidebar,inspector:values.inspector,inspectorDock:values.inspectorDock});
+      Object.assign(collapsed,values.collapsed);
+      overlayOpen = false;
+      onResize();
+    },
     setInspectorContext(next) {
       if (next.assetView === context.assetView && next.split === context.split &&
           next.pane === context.pane && next.tabId === context.tabId) return;
@@ -334,6 +426,7 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
       const saved = readLayout(preferences);
       preferred.sidebar = saved.sidebar;
       preferred.inspector = saved.inspector;
+      preferred.inspectorDock = saved.inspectorDock;
       Object.assign(collapsed, saved.collapsed);
       onResize();
     },

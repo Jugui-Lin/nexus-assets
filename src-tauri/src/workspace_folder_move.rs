@@ -347,7 +347,7 @@ pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> 
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
     use std::{
         ffi::{c_char, c_int, c_uint, CString},
         os::unix::ffi::OsStrExt,
@@ -382,7 +382,7 @@ fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::Error::new(
         ErrorKind::Unsupported,
         "系统不支持无覆盖目录移动",

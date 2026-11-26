@@ -1,7 +1,13 @@
+import {readVideoClip} from './whiteboard-video-clip-reference.js';
+import {readReviewNotes,writeReviewNotes} from './whiteboard-review-notes.js';
+
 const coverTag = /\n\[nexus-video-cover:v1:(\d+(?:\.\d{1,3})?)\]$/;
 
 export function readVideoCover(text = '') {
   if (typeof text !== 'string') return {title:'', time:null};
+  const segment = readVideoClip(text);
+  if (segment.range) return {title:segment.text,time:segment.range.start};
+  text = segment.text;
   const match = coverTag.exec(text);
   const time = match ? Number(match[1]) : NaN;
   return Number.isSafeInteger(Math.round(time * 1000))
@@ -10,7 +16,10 @@ export function readVideoCover(text = '') {
 }
 
 export function writeVideoCover(text, time) {
-  return readVideoCover(text).title.slice(0, 1970) + '\n[nexus-video-cover:v1:' + time.toFixed(3) + ']';
+  if (readVideoClip(text).range) return text;
+  const {notes} = readReviewNotes(text);
+  const cover = readVideoCover(text).title.slice(0,1970) + '\n[nexus-video-cover:v1:' + time.toFixed(3) + ']';
+  try { return writeReviewNotes(cover,notes); } catch { return text; }
 }
 
 export function copyVideoFrame(video, canvas = document.createElement('canvas')) {

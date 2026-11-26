@@ -9,10 +9,16 @@
 !src-tauri/src/lib.rs
 !src-tauri/src/asset_recycle.rs
 !src-tauri/src/baidu_cloud.rs
+!src-tauri/src/browser_sites.rs
 !src-tauri/src/c4d_preview.rs
 !src-tauri/src/collections.rs
 !src-tauri/src/creative_subscriptions.rs
+!src-tauri/src/file_import.rs
+!src-tauri/src/ies_preview.rs
 !src-tauri/src/linear_preview.rs
+!src-tauri/src/linear_preview/
+!src-tauri/src/linear_preview/exr_compare.rs
+!src-tauri/src/max_preview.rs
 !src-tauri/src/team.rs
 !src-tauri/src/team_organization.rs
 !src-tauri/src/thumbnail_cache.rs

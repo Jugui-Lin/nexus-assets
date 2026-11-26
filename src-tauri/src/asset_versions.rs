@@ -125,7 +125,7 @@ fn read_version(catalog: &Catalog, id: &str, version_id: &str) -> Result<AssetVe
         .ok_or_else(|| "版本不存在".into())
 }
 
-fn stage_copy(source: &Path, dir: &Path) -> Result<(NamedTempFile, u64), String> {
+pub(super) fn stage_copy(source: &Path, dir: &Path) -> Result<(NamedTempFile, u64), String> {
     if !fs::metadata(source)
         .map_err(|error| format!("无法读取资产文件：{error}"))?
         .is_file()

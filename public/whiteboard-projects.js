@@ -1,5 +1,7 @@
-import {initWhiteboard, personalBoardReferencesAsset} from './whiteboard.js';
+import {initWhiteboard, personalBoardReferencesAsset, personalBoardRegions} from './whiteboard.js';
 import {listWhiteboardImageCache, readWhiteboardImageCache, clearSyncedWhiteboardImageCache} from './whiteboard-images.js';
+import {readWhiteboardRegion} from './whiteboard-regions.js';
+import {reviewShotCode} from './whiteboard-review-notes.js';
 
 const directoryKey = 'nexus-whiteboard-projects-v1:';
 const fileFolderKey = 'nexus-whiteboard-file-folder-v1:';
@@ -65,8 +67,8 @@ function hasFileFolder(libraries, {libraryId, folder}) {
   return libraries.some(library => library.id === libraryId && (folder === '' || library.folders.includes(folder)));
 }
 
-export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAssetImage, openLink, locateAsset,
-  loadPresenceAvatar, getFileFolders, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles, copyCachedImages}) {
+export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAssetImage, openLink, locateAsset, openVideoSource,reviewAssignees,copyReviewText,
+  searchReplacementImages,loadPresenceAvatar, getFileFolders, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles, copyCachedImages}) {
   const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
   panel.innerHTML = `<section class="whiteboard-project-home" aria-labelledby="whiteboard-project-heading">
     <header class="whiteboard-project-bar">
@@ -87,6 +89,10 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
       <button type="button" class="button subtle" data-project-back>${icon('arrow')}返回项目</button>
       <h2 id="whiteboard-project-name"></h2>
       <div class="whiteboard-project-actions whiteboard-project-editor-actions">
+        <select data-project-color-filter aria-label="按卡片颜色筛选" title="按卡片颜色筛选，切回全部颜色可恢复显示"></select>
+        <button type="button" class="button subtle" data-project-regions aria-haspopup="dialog">${icon('pin')}区域…</button>
+        <button type="button" class="button subtle" data-project-dispatch-reviews>${icon('list')}分发镜头意见…</button>
+        <button type="button" class="button subtle" data-project-export-repair>${icon('download')}导出返修单</button>
         <button type="button" class="button subtle" data-project-cache aria-haspopup="dialog" aria-controls="whiteboard-cache-dialog" hidden>${icon('stack')}${cacheLabel}</button>
       </div>
     </header>
@@ -103,8 +109,12 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
   const retry = $('[data-project-retry]');
   const status = $('.whiteboard-project-status');
   const statusText = status.querySelector('span');
-  const board = initWhiteboard({panel:canvas, api, notify, resolveAssetImage, openLink, locateAsset,
-    loadPresenceAvatar, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles});
+  const board = initWhiteboard({panel:canvas, api, notify, resolveAssetImage, openLink, locateAsset, openVideoSource,projectName:() => editorName.textContent,
+    reviewAssignees,copyReviewText,searchReplacementImages,loadPresenceAvatar, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles,
+    colorFilter:$('[data-project-color-filter]')});
+  $('[data-project-export-repair]').addEventListener('click',() => board.exportRepairList());
+  $('[data-project-dispatch-reviews]').addEventListener('click',() => board.dispatchReviewNotes());
+  $('[data-project-regions]').addEventListener('click',() => board.showRegions());
 
   const dialog = document.createElement('dialog');
   dialog.className = 'modal whiteboard-project-dialog';
@@ -565,6 +575,38 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
     });
   }
 
+  async function findShotRegions(shot,workspaceKey,{projectId,stillRequested} = {}) {
+    const code = reviewShotCode(shot);
+    const target = scope;
+    const current = () => target === scope && target?.key === workspaceKey && (stillRequested?.() ?? true);
+    if (!code || !current()) return [];
+    if (!target.ready || target.error || projectId && !target.projects.some(project => project.id === projectId)) {
+      await refreshProjects({includeHidden:true});
+    }
+    if (!current()) return [];
+    if (target.error) throw Error(target.error);
+    const projects = projectId ? target.projects.filter(project => project.id === projectId) : target.projects;
+    const matches = [];
+    const find = async project => {
+      let regions;
+      if (target.teamId) {
+        const snapshot = await api('team_whiteboard_get',{teamId:target.teamId,
+          ...(project.id !== defaultProject.id && {projectId:project.id})});
+        if (!Array.isArray(snapshot?.items)) throw Error('团队白板暂不可用');
+        regions = snapshot.items.map(readWhiteboardRegion).filter(Boolean);
+      } else {
+        regions = personalBoardRegions(project.id === defaultProject.id ? target.key : JSON.stringify([target.key,project.id]));
+      }
+      return regions.filter(region => region.shot === code).map(({id,name,shot}) => ({id,name,shot,projectId:project.id,
+        projectName:project.name}));
+    };
+    for (let i = 0; i < projects.length && current(); i += 4) {
+      const batch = await Promise.all(projects.slice(i,i+4).map(find));
+      matches.push(...batch.flat());
+    }
+    return current() ? matches : [];
+  }
+
   function renderStatus() {
     statusText.textContent = scope.error || (scope.teamId && !scope.ready ? '正在同步项目…' : '');
     status.hidden = !statusText.textContent;
@@ -609,9 +651,9 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
     renderStatus();
   }
 
-  async function refreshProjects() {
+  async function refreshProjects({includeHidden = false} = {}) {
     const target = scope;
-    if (!visible || activeProject || !target?.teamId || target.saving) return;
+    if ((!includeHidden && (!visible || activeProject)) || !target?.teamId || target.saving) return;
     if (target.request) return target.request.wait.catch(() => {});
     const request = {wait:api('team_whiteboard_projects', {teamId:target.teamId})};
     target.request = request;
@@ -765,6 +807,27 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
       return activeProject === id;
     },
     captureProject() { return activeProject; },
+    findShotRegions,
+    async focusShotRegion(match,workspaceKey,stillRequested) {
+      const target = scope;
+      const current = () => visible && scope === target && scope?.key === workspaceKey && stillRequested();
+      if (!current()) return false;
+      if (activeProject !== match.projectId) openProject(match.projectId,false);
+      if (activeProject !== match.projectId) return false;
+      return board.focusShotRegion(match.id,match.shot,() => current() && activeProject === match.projectId);
+    },
+    async listClipProjects(workspaceKey) {
+      const target = scope;
+      if (target?.key !== workspaceKey) return [];
+      if (!target.ready) await refreshProjects({includeHidden:true});
+      if (scope !== target) return [];
+      if (!target.ready && target.error) throw Error(target.error);
+      return target.projects.map(({id,name}) => ({id,name}));
+    },
+    addVideoClip(projectId,clip,stillRequested) {
+      if (!visible || activeProject !== projectId || scope?.key !== clip.workspaceKey) return false;
+      return board.addVideoClip(clip,stillRequested);
+    },
     findPersonalAssetReferences(key, assetId) {
       if (scope?.key !== key || scope?.teamId) return [];
       return scope.projects.filter(project => personalBoardReferencesAsset(

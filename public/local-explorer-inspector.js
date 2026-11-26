@@ -19,7 +19,8 @@ function sizeValue(value) {
   return number.format(value) + ' ' + units[unit];
 }
 
-export function initExplorerInspector({root,selected,selectedEntries,thumbnail,fileIcon,closeAssetPane,assetMetadata}) {
+export function initExplorerInspector({root,selected,selectedEntries,thumbnail,fileIcon,closeAssetPane,assetMetadata,
+  linkDetails,openLinkLocation}) {
   const pane = root.querySelector('#file-explorer-inspector');
   const menu = root.querySelector('#file-workspace-view-menu');
   const options = [...menu.querySelectorAll('[data-file-side-pane]')];
@@ -31,11 +32,40 @@ export function initExplorerInspector({root,selected,selectedEntries,thumbnail,f
   const status = pane.querySelector('[data-file-inspector-status]');
   const visual = pane.querySelector('[data-file-inspector-visual]');
   const fallback = visual.querySelector('svg');
+  const linkLabel = pane.querySelector('[data-file-inspector-link-label]');
+  const link = pane.querySelector('[data-file-inspector-link]');
+  const linkText = link?.querySelector('span');
+  const linkButton = link?.querySelector('button');
   const values = Object.fromEntries([...pane.querySelectorAll('[data-file-inspector-value]')]
     .map(node => [node.dataset.fileInspectorValue,node]));
   const metadata = assetMetadata && initExplorerAssetMetadata({host:content.parentElement,...assetMetadata});
   let mode, rendered, generation = 0;
   let timer;
+  let linkTarget;
+
+  function clearLink() {
+    linkTarget = null;
+    if (link) link.hidden = linkLabel.hidden = true;
+  }
+
+  async function readLinkTarget(path,version) {
+    if (!link || !linkDetails) return;
+    try {
+      const records = await linkDetails({paths:[path],columns:['linkTarget']});
+      const target = records?.[0]?.values?.linkTarget;
+      if (version !== generation || mode !== 'details' || typeof target !== 'string' || !target) return;
+      linkTarget = target;
+      linkText.textContent = target;
+      link.hidden = linkLabel.hidden = false;
+      linkButton.hidden = !openLinkLocation;
+    } catch { /* Details remain available for links with inaccessible or non-filesystem targets. */ }
+  }
+
+  linkButton?.addEventListener('click',() => {
+    if (linkTarget && openLinkLocation) void Promise.resolve(openLinkLocation(linkTarget)).catch(failure => {
+      if (mode === 'details') status.textContent = String(failure?.message || failure);
+    });
+  });
 
   function metadataEntries() {
     return selectedEntries?.() ?? [selected()].filter(Boolean);
@@ -69,6 +99,7 @@ export function initExplorerInspector({root,selected,selectedEntries,thumbnail,f
     rendered = next;
     const version = ++generation;
     clearTimeout(timer);
+    clearLink();
     visual.querySelector('img')?.remove();
     fallback.hidden = false;
     content.hidden = !entry;
@@ -92,6 +123,7 @@ export function initExplorerInspector({root,selected,selectedEntries,thumbnail,f
       values.modified.textContent = dateValue(entry.modified);
       values.created.textContent = dateValue(entry.created);
       values.path.textContent = entry.path || '—';
+      void readLinkTarget(entry.path,version);
     }
 
     if (entry.isDirectory) return;
@@ -111,6 +143,7 @@ export function initExplorerInspector({root,selected,selectedEntries,thumbnail,f
     mode = rendered = null;
     generation++;
     clearTimeout(timer);
+    clearLink();
     visual.querySelector('img')?.remove();
     metadata?.hide();
     pane.hidden = true;
@@ -150,7 +183,8 @@ export function initExplorerInspector({root,selected,selectedEntries,thumbnail,f
     closeAndFocus();
   });
   return {
-    hide,refresh,togglePreview:() => togglePane('preview'),showDetails:() => showPane('details',true),
+    hide,refresh,togglePreview:() => togglePane('preview'),showPreview:() => showPane('preview',true),
+    showDetails:() => showPane('details',true),
     hasUnsavedChanges:() => metadata?.hasUnsavedChanges() ?? false,
     discardMetadataDrafts:() => metadata?.discardDrafts() ?? true,
     refreshMetadata:() => mode === 'details' ? metadata?.refresh(metadataEntries(),true) : undefined,

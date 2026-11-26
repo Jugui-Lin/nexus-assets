@@ -681,6 +681,34 @@ def _downscale(path, cache, resolution, warnings):
         return path
 
 
+def _exact_material_maps(path, maps, name):
+    if (path.suffix.lower() not in _IMAGE_TYPES | _HDR_TYPES
+            or not isinstance(name, str) or not name.strip() or len(name) > 255
+            or not isinstance(maps, dict) or not maps or len(maps) > len(_MAP_TYPES)):
+        raise ValueError("材质套图的名称或通道无效。")
+    sources = set()
+    resolved = {}
+    for channel, variants in maps.items():
+        if channel not in _MAP_TYPES or not isinstance(variants, list) or not variants or len(variants) > 48:
+            raise ValueError("材质套图的通道或贴图数量无效。")
+        resolved[channel] = []
+        for value in variants:
+            if not isinstance(value, str):
+                raise ValueError("材质套图包含无法识别的贴图路径。")
+            source = Path(value)
+            if not source.is_absolute() or source.is_symlink():
+                raise ValueError("材质套图需要可访问的原始文件。")
+            source = source.resolve(strict=True)
+            if (source.parent != path.parent or source in sources or not source.is_file()
+                    or source.suffix.lower() not in _IMAGE_TYPES | _HDR_TYPES or len(sources) >= 48):
+                raise ValueError("材质套图中的贴图需要来自同一目录，并且每个文件只对应一个通道。")
+            sources.add(source)
+            resolved[channel].append(source)
+    if path not in sources:
+        raise ValueError("材质套图缺少用于定位的贴图。")
+    return resolved
+
+
 def prepare(c4d, path, options, cache_root):
     """Return a resolved import plan with permanent operative file paths."""
     options = options or {}
@@ -689,7 +717,10 @@ def prepare(c4d, path, options, cache_root):
         raise ValueError("未知的 Cinema 4D 资产导入类型。")
     resolution = _resolution(options.get("texture_resolution"))
     target_lod = _lod_option(options.get("lod"))
-    rules = _compile_map_keywords(options.get("map_keywords"))
+    exact_set = "pbr_maps" in options
+    if exact_set and requested != "pbr":
+        raise ValueError("材质套图需要 PBR 导入模式。")
+    rules = None if exact_set else _compile_map_keywords(options.get("map_keywords"))
     path = Path(path).resolve()
     cache = Path(cache_root).resolve()
     if not path.is_file() and not path.is_dir():
@@ -698,7 +729,11 @@ def prepare(c4d, path, options, cache_root):
     extension = path.suffix.lower()
     file = path if path.is_file() else None
     baked = False
-    if file is None:
+    if exact_set:
+        name = options.get("pbr_name")
+        maps = _exact_material_maps(path, options["pbr_maps"], name)
+        paths = []
+    elif file is None:
         paths = _scan(path)
     elif extension == ".zip":
         paths, file = _scan(_extract(path, cache)), None
@@ -718,8 +753,10 @@ def prepare(c4d, path, options, cache_root):
     if requested == "scene" or requested == "auto" and (file is None or extension in _SCENE_TYPES):
         scene = _prefer_scene(scene_paths, file, target_lod, name)
 
-    groups = _map_groups(paths, baked, rules)
-    maps = _prefer_maps(groups, scene or file, name)
+    groups = {}
+    if not exact_set:
+        groups = _map_groups(paths, baked, rules)
+        maps = _prefer_maps(groups, scene or file, name)
     warnings = set()
     if scene is not None:
         kind, selected = "scene", scene

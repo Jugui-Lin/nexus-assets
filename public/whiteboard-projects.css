@@ -117,6 +117,21 @@
   flex-wrap: nowrap;
   margin-inline-start: auto;
 }
+[data-project-color-filter] {
+  max-inline-size: 104px;
+  min-block-size: 32px;
+  padding-inline: 7px;
+  font: inherit;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+[data-project-color-filter]:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 1190px) {
+  .whiteboard-project-editor-bar { gap: 6px 10px; flex-wrap: wrap; }
+  .whiteboard-project-editor-actions { flex-wrap: wrap; max-inline-size: 100%; gap: 5px; }
+}
 [data-project-back] { flex: none; }
 [data-project-back] svg { transform: rotate(180deg); }
 .whiteboard-project-canvas { flex: 1; min-height: 0; }

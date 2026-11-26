@@ -1,8 +1,10 @@
 import {matchFolderAddress} from './folder-address.js';
+import {initExplorerShortcutEditor,normalizeExplorerShortcuts} from './local-explorer-shortcuts.js';
 
 const storageKey = 'nexus-file-workspace-preferences-v1';
 const newTabActions = new Set(['menu','files','current','all','favorites','recent']);
-const defaults = Object.freeze({
+const controlTextScales = new Set(['100','115','130','150']);
+export const defaultFileWorkspacePreferences = Object.freeze({
   startWorkspace:'assets',
   startLocation:'computer',
   startMode:'new',
@@ -10,6 +12,7 @@ const defaults = Object.freeze({
   newTabAction:'menu',
   openMode:'double',
   compact:false,
+  controlTextScale:'100',
   showFrequent:true,
   showHidden:false,
   showThumbnails:true,
@@ -20,16 +23,26 @@ const defaults = Object.freeze({
   showBookmarks:true,
   openBookmarkInNewTab:false,
   quickPreview:true,
+  altClickMenu:false,
+  shortcutBindings:normalizeExplorerShortcuts(),
   confirmCloseTabs:true,
   doubleClickUp:true,
   ctrlDoubleClickTab:true,
   doubleClickCloseTab:true,
   wheelSwitchTabs:false,
 });
+const defaults = defaultFileWorkspacePreferences;
+const preferenceChoices = {
+  startWorkspace:new Set(['assets','files']), startLocation:new Set(['computer','home']),
+  startMode:new Set(['new','restore','paths']), openMode:new Set(['single','double']),
+  newTabAction:newTabActions,
+  controlTextScale:controlTextScales,
+};
 const fields = {
   startWorkspace:'start-workspace',
   startLocation:'start-location',
   compact:'compact-view',
+  controlTextScale:'control-text-scale',
   showFrequent:'show-frequent',
   showHidden:'show-hidden',
   showThumbnails:'show-thumbnails',
@@ -40,6 +53,7 @@ const fields = {
   showBookmarks:'show-bookmarks',
   openBookmarkInNewTab:'open-bookmark-in-new-tab',
   quickPreview:'quick-preview',
+  altClickMenu:'alt-click-menu',
   confirmCloseTabs:'confirm-close-tabs',
   doubleClickUp:'double-click-up',
   ctrlDoubleClickTab:'ctrl-double-click-tab',
@@ -75,6 +89,23 @@ function normalizeStartWorkspace(value) {
   return value === 'files' ? 'files' : defaults.startWorkspace;
 }
 
+export function validateFilePreference(key, value) {
+  if (!Object.hasOwn(defaults,key)) throw Error('此版本没有这项偏好。');
+  if (key === 'startupPaths' && Array.isArray(value) && value.length <= 24 &&
+      value.every(path => typeof path === 'string' && path.trim())) return startupPaths(value);
+  if (key === 'shortcutBindings' && value && typeof value === 'object' && !Array.isArray(value))
+    return normalizeExplorerShortcuts(value);
+  if (typeof defaults[key] === 'boolean' ? typeof value === 'boolean' : preferenceChoices[key]?.has(value)) return value;
+  throw Error('此设置值与当前版本不兼容。');
+}
+
+export function mergeFilePreferences(current, changes) {
+  const next = {...current};
+  for (const [key,value] of Object.entries(changes)) next[key] = validateFilePreference(key,value);
+  if (next.startMode === 'paths' && !next.startupPaths.length) throw Error('指定路径启动至少需要一个有效路径，请同时勾选启动方式或启动路径。');
+  return next;
+}
+
 export function readFileWorkspacePreferences() {
   const values = {...defaults};
   try {
@@ -84,6 +115,8 @@ export function readFileWorkspacePreferences() {
     if (stored?.startMode === 'restore' || stored?.startMode === 'paths') values.startMode = stored.startMode;
     if (stored?.openMode === 'single') values.openMode = 'single';
     values.newTabAction = normalizeNewTabAction(stored?.newTabAction);
+    if (controlTextScales.has(stored?.controlTextScale)) values.controlTextScale = stored.controlTextScale;
+    values.shortcutBindings = normalizeExplorerShortcuts(stored?.shortcutBindings);
     for (const key of Object.keys(defaults)) {
       if (typeof stored?.[key] === 'boolean' && typeof defaults[key] === 'boolean') values[key] = stored[key];
     }
@@ -102,6 +135,7 @@ export function initFileWorkspacePreferences({apply,resetSidebar,clearFrequent,o
     [key,dialog.querySelector('#file-workspace-' + suffix)]));
   const tabs = [...dialog.querySelectorAll('[data-file-preferences-tab]')];
   const pathsField = dialog.querySelector('#file-workspace-startup-paths');
+  const shortcutEditor = initExplorerShortcutEditor(dialog.querySelector('[data-explorer-shortcut-editor]'));
   const startModes = [...dialog.querySelectorAll('[name="file-workspace-start-mode"]')];
   const tabDialog = document.querySelector('#workspace-tab-preferences-dialog');
   const newTabAction = tabDialog.querySelector('#workspace-new-tab-action');
@@ -129,6 +163,7 @@ export function initFileWorkspacePreferences({apply,resetSidebar,clearFrequent,o
       option.checked = values.openMode === option.value;
     for (const option of startModes) option.checked = values.startMode === option.value;
     if (pathsField) pathsField.value = values.startupPaths.join('\n');
+    shortcutEditor?.fill(values.shortcutBindings);
     syncStartupControls();
   }
 
@@ -144,6 +179,7 @@ export function initFileWorkspacePreferences({apply,resetSidebar,clearFrequent,o
     next.openMode = dialog.querySelector('[name="file-workspace-open-mode"]:checked')?.value === 'single' ? 'single' : 'double';
     next.startMode = startModes.find(option => option.checked)?.value || 'new';
     next.startupPaths = startupPaths((pathsField?.value ?? '').split(/\r?\n/));
+    if (shortcutEditor) next.shortcutBindings = shortcutEditor.value();
     if (next.startMode === 'paths' && !next.startupPaths.length) throw Error('请输入至少一个启动文件夹。');
     return {...saved,...next};
   }
@@ -153,11 +189,12 @@ export function initFileWorkspacePreferences({apply,resetSidebar,clearFrequent,o
       option.setAttribute('aria-pressed',String(saved[viewOptions[option.dataset.fileViewOption]]));
   }
 
-  function save(next) {
+  function save(next, requireStorage = false) {
     next = {...next,startWorkspace:normalizeStartWorkspace(next.startWorkspace),
       newTabAction:normalizeNewTabAction(next.newTabAction)};
+    try { localStorage.setItem(storageKey,JSON.stringify(next)); }
+    catch (failure) { if (requireStorage) throw Error('无法在本机保存偏好。',{cause:failure}); }
     saved = next;
-    try { localStorage.setItem(storageKey,JSON.stringify(saved)); } catch {}
     syncMenu();
     Promise.resolve().then(() => apply(next)).catch(failure => report(String(failure?.message || failure),true));
   }
@@ -253,5 +290,6 @@ export function initFileWorkspacePreferences({apply,resetSidebar,clearFrequent,o
     if (view.open && !view.contains(event.target)) view.open = false;
   });
   syncMenu();
-  return {open,openTabSettings,get:() => saved};
+  return {open,openTabSettings,get:readFileWorkspacePreferences,
+    replace:changes => save(mergeFilePreferences(readFileWorkspacePreferences(),changes),true)};
 }

@@ -29,6 +29,7 @@ pub mod whiteboard;
 pub use asset_recycle::RecycledAsset;
 pub use collections::AssetCollection;
 pub use file_import::{FileFingerprint, FileImport, FileImportOutcome};
+pub use linear_preview::read_exr_views;
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -218,6 +219,10 @@ impl Catalog {
           CREATE INDEX IF NOT EXISTS asset_library ON assets(library_id);
           CREATE INDEX IF NOT EXISTS asset_favorite ON assets(favorite);
           CREATE INDEX IF NOT EXISTS asset_content_size ON assets(json_extract(data,'$.size'));
+          CREATE TABLE IF NOT EXISTS asset_relink_fingerprints (
+            asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+            path TEXT NOT NULL, size INTEGER NOT NULL, modified INTEGER NOT NULL,
+            digest BLOB NOT NULL CHECK(length(digest)=32));
           CREATE TABLE IF NOT EXISTS libraries (id TEXT PRIMARY KEY,path TEXT NOT NULL UNIQUE,data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY,session TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL);
@@ -892,7 +897,7 @@ pub fn scaled_preview_image(
             fs::read(p).map_err(|e| e.to_string())?,
         )));
     }
-    if !embedded_scene && ext != "ies" && !preview_image_format(&ext) {
+    if !embedded_scene && asset_raster_preview_limit(&ext).is_none() {
         return Ok(None);
     }
     if !embedded_scene && metadata.len() > MAX_PREVIEW_SOURCE_BYTES {
@@ -932,6 +937,10 @@ pub fn scaled_preview_image(
 }
 
 const MAX_PREVIEW_SOURCE_BYTES: u64 = 192 * 1024 * 1024;
+
+pub fn asset_raster_preview_limit(ext: &str) -> Option<u64> {
+    (ext == "ies" || preview_image_format(ext)).then_some(MAX_PREVIEW_SOURCE_BYTES)
+}
 
 fn attachment_extension(path: &Path) -> String {
     path.extension()

@@ -54,6 +54,8 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
   const sceneFields = get('c4d-drop-scene-fields');
   const normals = form.elements.normals;
   const normalsField = normals.closest('label');
+  const storeTextures = form.elements.storeTextures;
+  const storeTexturesField = get('c4d-drop-store-textures');
   const renderer = get('c4d-drop-renderer');
   const rendererOptions = Object.fromEntries([...renderer.options].map(option => [option.value, option]));
   const octanePreviewNote = get('c4d-drop-octane-preview-note');
@@ -66,7 +68,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
   const meter = get('c4d-drop-meter');
   const dismiss = get('c4d-drop-dismiss');
   const submitProgress = get('c4d-drop-submit-progress');
-  const checks = [...sceneFields.querySelectorAll('input')];
+  const checks = [...sceneFields.querySelectorAll('input')].filter(input => input !== storeTextures);
   const tracked = new Map();
   let draft;
   let busy = false;
@@ -95,6 +97,8 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
     const importMaterials = form.elements.materials.checked;
     form.elements.textures.disabled = !importMaterials || !importObjects;
     const linkTextures = !form.elements.textures.disabled && form.elements.textures.checked;
+    storeTexturesField.hidden = sceneFields.hidden || !draft.archiveTextures;
+    storeTextures.disabled = storeTexturesField.hidden || !linkTextures;
     renderer.disabled = !importMaterials || (!fbxMaterials && !linkTextures);
     rendererOptions.standard.text = fbxMaterials && !linkTextures ? '保留 FBX 原材质' : 'Standard / Physical（补建材质）';
     rendererOptions.octane.text = fbxMaterials ? 'Octane（转换 FBX 材质）' : 'Octane（补建材质）';
@@ -119,7 +123,8 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
     const list = ids.map(asset).filter(Boolean);
     const supported = list.filter(item => supports(item, target));
     if (!supported.length) throw Error('所选资产没有可导入 Cinema 4D 的格式');
-    draft = {scope:scope(), sessionId, custom:target.smartImport === true && target.sceneImportOptions === true, entries:[]};
+    draft = {scope:scope(), sessionId, custom:target.smartImport === true && target.sceneImportOptions === true,
+      archiveTextures:target.archiveTextures === true, entries:[]};
     for (const row of sources.querySelectorAll('label')) row.remove();
     for (const item of supported) {
       const label = document.createElement('label');
@@ -139,6 +144,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
       draft.entries.push({select});
     }
     for (const input of checks) input.checked = true;
+    storeTextures.checked = draft.archiveTextures;
     mode.value = 'direct';
     renderer.value = defaultRenderer();
     get('c4d-drop-target').textContent = target.label || 'Cinema 4D';
@@ -209,6 +215,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
     const current = draft;
     const selected = picks();
     const scene = Object.fromEntries(checks.map(input => [input.name, input.checked && !input.disabled]));
+    if (storeTextures.checked && !storeTextures.disabled) scene.storeTextures = true;
     const method = mode.value;
     const materialRenderer = renderer.disabled ? null : renderer.value;
     if (current.scope !== scope()) {

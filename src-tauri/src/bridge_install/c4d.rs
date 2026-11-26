@@ -11,6 +11,7 @@ const ASSET_PREP: &[u8] = include_bytes!("../../../bridges/install/c4d_asset_pre
 const MATERIALS: &[u8] = include_bytes!("../../../bridges/install/c4d_materials.py");
 const CONVERSION: &[u8] = include_bytes!("../../../bridges/install/c4d_conversion.py");
 const PROJECT_EXPORT: &[u8] = include_bytes!("../../../bridges/install/c4d_project_export.py");
+const TEXTURE_ARCHIVE: &[u8] = include_bytes!("../../../bridges/install/c4d_texture_archive.py");
 const IMPORT_CACHE: &[u8] = include_bytes!("../../../bridges/install/c4d_cache.py");
 const MAX_DECODE: &[u8] = include_bytes!("../../../bridges/install/c4d_max_decode.py");
 const MAX_ADDON: &[u8] = include_bytes!("../../../bridges/install/nexus_io_scene_max_1_9_2.zip");
@@ -177,6 +178,10 @@ pub(super) fn discover(env: &InstallEnvironment) -> (Vec<InstallTarget>, Vec<(St
                     InstallFile::managed(
                         plugin.join("nexus_c4d_project_export.py"),
                         PROJECT_EXPORT.to_vec(),
+                    ),
+                    InstallFile::managed(
+                        plugin.join("nexus_c4d_texture_archive.py"),
+                        TEXTURE_ARCHIVE.to_vec(),
                     ),
                     InstallFile::managed(plugin.join("nexus_c4d_cache.py"), IMPORT_CACHE.to_vec()),
                     InstallFile::managed(

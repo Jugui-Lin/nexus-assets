@@ -14,6 +14,7 @@ pub(crate) async fn local_explorer_clipboard(
     action: ClipboardAction,
     path: String,
     paths: Option<Vec<String>>,
+    sequence: Option<u32>,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -32,10 +33,13 @@ pub(crate) async fn local_explorer_clipboard(
                 .map_err(|error| error.to_string())?
             }
             ClipboardAction::Paste => {
-                let (paths, moved, sequence) =
+                let (paths, moved, current_sequence) =
                     tauri::async_runtime::spawn_blocking(windows_clipboard::read)
                         .await
                         .map_err(|error| error.to_string())??;
+                if sequence.is_some_and(|expected| expected != current_sequence) {
+                    return Err("剪贴板内容已变化，请重新粘贴".into());
+                }
                 let effect = if moved {
                     DropEffect::Move
                 } else {
@@ -44,7 +48,7 @@ pub(crate) async fn local_explorer_clipboard(
                 local_explorer_drop_files(window, paths, path, effect).await?;
                 if moved {
                     let _ = tauri::async_runtime::spawn_blocking(move || {
-                        windows_clipboard::clear_if_unchanged(owner, sequence);
+                        windows_clipboard::clear_if_unchanged(owner, current_sequence);
                     })
                     .await;
                 }
@@ -54,10 +58,13 @@ pub(crate) async fn local_explorer_clipboard(
     }
     #[cfg(not(windows))]
     {
-        let _ = (window, action, path, paths);
+        let _ = (window, action, path, paths, sequence);
         Err("当前平台暂不支持系统文件剪贴板".into())
     }
 }
+
+#[cfg(windows)]
+pub(super) use windows_clipboard::read as read_files;
 
 #[cfg(windows)]
 mod windows_clipboard {
@@ -162,7 +169,7 @@ mod windows_clipboard {
         effect.publish(format).map_err(|error| error.to_string())
     }
 
-    pub(super) fn read() -> Result<(Vec<String>, bool, u32), String> {
+    pub(crate) fn read() -> Result<(Vec<String>, bool, u32), String> {
         let _clipboard = Clipboard::open(None)?;
         let files = unsafe { GetClipboardData(u32::from(CF_HDROP.0)) }
             .map_err(|_| "剪贴板里没有可粘贴的文件")?;

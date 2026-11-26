@@ -43,6 +43,9 @@ fn read_details(
     cancelled: &AtomicBool,
 ) -> Vec<EntryDetails> {
     let read_creation_date = columns.iter().any(|column| column == "created");
+    let read_link_target = columns.iter().any(|column| column == "linkTarget");
+    let find_parent = columns.iter().any(|column| column == "nearestParent");
+    let classify_folder = columns.iter().any(|column| column == "isDirectory");
     #[cfg(windows)]
     let properties = windows_details::Properties::new(columns);
 
@@ -58,6 +61,19 @@ fn read_details(
                         values.insert("created", value);
                     }
                 }
+                if read_link_target {
+                    if let Some(value) = link_target(file) {
+                        values.insert("linkTarget", value);
+                    }
+                }
+                if find_parent {
+                    if let Some(value) = nearest_parent(file, cancelled) {
+                        values.insert("nearestParent", value);
+                    }
+                }
+                if classify_folder && std::fs::metadata(file).is_ok_and(|entry| entry.is_dir()) {
+                    values.insert("isDirectory", "yes".into());
+                }
                 #[cfg(windows)]
                 if let Some(properties) = &properties {
                     properties.read(file, &mut values, cancelled);
@@ -66,6 +82,35 @@ fn read_details(
             EntryDetails { path, values }
         })
         .collect()
+}
+
+fn link_target(path: &Path) -> Option<String> {
+    let symlink = std::fs::read_link(path).ok();
+    #[cfg(windows)]
+    let symlink = symlink.or_else(|| {
+        path.extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| value.eq_ignore_ascii_case("lnk"))?;
+        crate::desktop_shortcut::read_file_shortcut(path)
+    });
+    let target = symlink?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent()?.join(target)
+    };
+    validate_file_path(&target).ok()?;
+    target.to_str().map(str::to_owned)
+}
+
+fn nearest_parent(path: &Path, cancelled: &AtomicBool) -> Option<String> {
+    path.ancestors()
+        .skip(1)
+        .take_while(|_| !cancelled.load(Ordering::Acquire))
+        .filter(|parent| parent.is_absolute())
+        .find(|parent| std::fs::metadata(parent).is_ok_and(|entry| entry.is_dir()))?
+        .to_str()
+        .map(str::to_owned)
 }
 
 fn creation_milliseconds(path: &Path) -> Option<String> {

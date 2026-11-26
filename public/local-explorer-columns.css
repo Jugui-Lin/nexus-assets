@@ -44,6 +44,20 @@
 
 [data-column-resizing] { cursor: col-resize; user-select: none; }
 
+.local-explorer-column-overflow {
+  position: fixed;
+  z-index: 8;
+  max-inline-size: min(620px, calc(100vw - 8px));
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--text);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  box-shadow: 0 3px 9px #0005;
+}
+
 .local-explorer-columns-menu {
   position: fixed;
   z-index: 12;

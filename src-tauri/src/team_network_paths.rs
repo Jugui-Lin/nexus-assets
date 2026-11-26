@@ -109,6 +109,68 @@ pub(super) fn folder_unc(path: &Path) -> Option<UncDirectory> {
     UncDirectory::parse(path.to_str()?).or_else(|| mapped_drive_unc(path))
 }
 
+#[tauri::command]
+pub(super) async fn search_network_paths(
+    paths: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    if paths.len() > 512 || paths.iter().any(|path| path.len() > MAX_UNC_LENGTH) {
+        return Err("超出本次共享路径识别范围".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| folder_unc(Path::new(path)).map(|network| network.text()))
+            .collect()
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(super) async fn workspace_network_path(path: String, to_local: bool) -> Result<String, String> {
+    let reference = Path::new(&path);
+    if !reference.is_absolute()
+        || path.len() > MAX_UNC_LENGTH
+        || reference
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return Err("共享位置需要完整且有效的路径".into());
+    }
+    let Some(network) = folder_unc(reference) else {
+        return Ok(path);
+    };
+    if to_local {
+        if let Some(mapped) = local_mapped_path(&network) {
+            return Ok(mapped);
+        }
+    }
+    Ok(network.text())
+}
+
+#[cfg(windows)]
+fn local_mapped_path(network: &UncDirectory) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::GetLogicalDrives;
+
+    // GetLogicalDrives returns a mask for A: through Z: in this Windows account.
+    let drives = unsafe { GetLogicalDrives() };
+    (0..26)
+        .filter(|index| drives & (1 << index) != 0)
+        .filter_map(|index| {
+            let root = format!("{}:\\", char::from(b'A' + index as u8));
+            let address = mapped_drive_unc(Path::new(&root))?;
+            let tail = network.relative_to(&address)?.replace('/', "\\");
+            Some((address.components.len(), root + &tail))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, path)| path)
+}
+
+#[cfg(not(windows))]
+fn local_mapped_path(_network: &UncDirectory) -> Option<String> {
+    None
+}
+
 #[cfg(windows)]
 fn mapped_drive_unc(path: &Path) -> Option<UncDirectory> {
     use std::path::{Component, Prefix};

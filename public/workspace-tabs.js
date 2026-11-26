@@ -1,5 +1,6 @@
 import {dockAxis, dockRect, initWorkspaceTabDrag} from './workspace-tab-drag.js';
 import {captureWorkspacePane} from './workspace-pane-preview.js';
+import {distinguishTabLabels} from './workspace-tab-labels.js';
 
 const dividerSize = 8;
 const deckBottomInset = 4;
@@ -57,7 +58,7 @@ export function initWorkspaceTabs({
     close.type = 'button';
     close.className = 'workspace-tab-close';
     close.innerHTML = icon('close');
-    const tab = {id:'workspace-tab-' + ++sequence, title, snapshot, initialView, group, trigger, label, close,pin,pinned:false};
+    const tab = {id:'workspace-tab-' + ++sequence, title, snapshot, initialView, group, trigger, label, close,pin,pinned:false,location:''};
     trigger.id = tab.id;
     group.dataset.tabId = tab.id;
     group.append(trigger, close);
@@ -95,6 +96,7 @@ export function initWorkspaceTabs({
 
   function paint() {
     const split = Boolean(secondary.active);
+    const labels = distinguishTabLabels(panes.flatMap(pane => pane.tabs));
     const axis = dockAxis(splitSide);
     deck.toggleAttribute('data-workspace-split', split);
     deck.dataset.splitSide = splitSide;
@@ -122,9 +124,12 @@ export function initWorkspaceTabs({
       pane.tabs.forEach((tab, index) => {
         const selected = tab === pane.active;
         if (pane.list.children[index] !== tab.group) pane.list.insertBefore(tab.group, pane.list.children[index] ?? null);
-        if (tab.label.textContent !== tab.title) tab.label.textContent = tab.title;
-        tab.trigger.title = tab.title + (tab.pinned ? ' · 已固定' : '');
-        tab.trigger.setAttribute('aria-label',tab.trigger.title);
+        const label = labels.get(tab.id);
+        if (tab.label.textContent !== label) tab.label.textContent = label;
+        tab.trigger.dataset.tabTitle = tab.title;
+        tab.trigger.dataset.tabLocation = tab.location;
+        tab.trigger.title = [tab.title,tab.location,tab.pinned && '已固定'].filter(Boolean).join(' · ');
+        tab.trigger.setAttribute('aria-label',label + (tab.pinned ? ' · 已固定' : ''));
         tab.group.toggleAttribute('data-pinned',tab.pinned);
         tab.pin.hidden = !tab.pinned;
         tab.trigger.setAttribute('aria-controls', pane.element.id);
@@ -491,12 +496,14 @@ export function initWorkspaceTabs({
     ensureScope();
     if (operation || !shown) return;
     try {
+      const sourceId = shown.id;
       shown.snapshot = capture();
       const tab = createTab(shown.title, shown.snapshot);
+      tab.location = shown.location;
       insertTab(tab);
       shown = tab;
       paint();
-      onDuplicate();
+      onDuplicate(sourceId);
       focusTab(tab);
     } catch (failure) { onError(failure); }
   }
@@ -587,13 +594,14 @@ export function initWorkspaceTabs({
   });
   resetScope();
   return {
-    render(title) {
+    render(title, location = '') {
       ensureScope();
       placeAssetControls();
       if (!shown) return;
       const label = String(title || '').trim() || '资产工作台';
-      if (shown.title === label) return;
+      if (shown.title === label && shown.location === location) return;
       shown.title = label;
+      shown.location = location;
       paint();
     },
     activeId() {

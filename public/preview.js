@@ -1,12 +1,13 @@
 import { MAX_FACES, MAX_VERTICES, MESH_LIMIT_ERROR, parseStl } from './mesh-formats.js';
 import { PLY_FORMAT_ERROR, parsePly } from './ply.js';
 import { GLTF_FORMAT_ERROR, parseGltf } from './gltf.js';
+import { drawMeshGuides, inspectMesh, polygonNormal, projectedPolygonContains } from './mesh-inspection.js';
 
 const DEFAULT_COLOR = '#baa98d';
 
 // OBJ and STL share the same interactive canvas renderer.
 export class MeshPreview {
-  constructor(canvas, fixedSize = null) {
+  constructor(canvas, fixedSize = null, {inspection = false} = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.yaw = -0.65;
@@ -17,11 +18,18 @@ export class MeshPreview {
     this.vertices = [];
     this.pendingFrame = null;
     this.fixedSize = fixedSize;
+    this.inspection = inspection;
+    this.modelBackground = '';
+    this.guides = false;
+    this.backfaces = false;
+    this.selectedFace = null;
+    this.selectedVertex = null;
     if (fixedSize) return;
     let drag = null;
     canvas.addEventListener('pointerdown', event => {
       if (drag) return;
-      drag = { id: event.pointerId, x: event.clientX, y: event.clientY };
+      if (event.button !== 0) return;
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX:event.clientX, startY:event.clientY };
       canvas.setPointerCapture(event.pointerId);
     });
     canvas.addEventListener('pointermove', event => {
@@ -33,7 +41,14 @@ export class MeshPreview {
       this.scheduleDraw();
     });
     const endDrag = event => {
-      if (drag?.id === event.pointerId) drag = null;
+      if (drag?.id !== event.pointerId) return;
+      if (inspection && event.type === 'pointerup' && Math.hypot(drag.startX - event.clientX,drag.startY - event.clientY) < 4) {
+        const rect = canvas.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        if (this.projectedPoints) this.focusFace(this.faces.findLast(face => projectedPolygonContains(this.projectedPoints,face.indices,x,y))?.order);
+      }
+      drag = null;
     };
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
@@ -50,9 +65,12 @@ export class MeshPreview {
   load(text, color = DEFAULT_COLOR) {
     const vertices = [];
     const faces = [];
+    const names = [];
+    let group = '';
     for (const line of text.split(/\r?\n/)) {
       const tokens = line.split('#', 1)[0].trim().split(/\s+/);
       const [record, ...values] = tokens;
+      if (this.inspection && (record === 'o' || record === 'g')) group = values.join(' ').slice(0,160);
       if (record === 'v' && values.length >= 3) {
         const point = values.slice(0, 3).map(Number);
         if (point.every(Number.isFinite)) vertices.push(point);
@@ -61,12 +79,13 @@ export class MeshPreview {
           .map(index => index < 0 ? vertices.length + index : index - 1);
         if (indices.every(index => Number.isInteger(index) && index >= 0 && index < vertices.length)) {
           faces.push(indices);
+          if (this.inspection) names.push(group);
         }
       }
       if (vertices.length > MAX_VERTICES || faces.length > MAX_FACES) throw Error(MESH_LIMIT_ERROR);
     }
     if (!vertices.length || !faces.length) throw Error('OBJ 中未找到可预览的网格');
-    return this.loadMesh(vertices, faces, color);
+    return this.loadMesh(vertices, faces, color, {names});
   }
 
   loadBinary(base64, ext, color = DEFAULT_COLOR) {
@@ -87,9 +106,9 @@ export class MeshPreview {
       return this.loadMesh(vertices, faces, color);
     }
     if (gltf) {
-      const {vertices, faces} = parseGltf(bytes, format);
+      const {vertices, faces, names} = parseGltf(bytes, format, this.inspection);
       if (!vertices.length || !faces.length) throw Error('glTF 中未找到可预览的三角形网格');
-      return this.loadMesh(vertices, faces, color);
+      return this.loadMesh(vertices, faces, color, {unit:'m',names});
     }
     const { vertices, faces } = parseStl(bytes);
     if (!vertices.length || !faces.length) throw Error('STL 中未找到可预览的网格');
@@ -97,7 +116,7 @@ export class MeshPreview {
     return this.loadMesh(vertices.map(([x, y, z]) => [x, z, -y]), faces, color);
   }
 
-  loadMesh(vertices, faces, color) {
+  loadMesh(vertices, faces, color, {unit = '', names = []} = {}) {
     const minimum = [Infinity, Infinity, Infinity];
     const maximum = [-Infinity, -Infinity, -Infinity];
     for (const vertex of vertices) {
@@ -115,13 +134,34 @@ export class MeshPreview {
       const [a, b, c] = indices.slice(0, 3).map(index => this.vertices[index]);
       const u = b.map((value, axis) => value - a[axis]);
       const v = c.map((value, axis) => value - a[axis]);
-      const normal = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const normal = this.inspection ? polygonNormal(this.vertices,indices) :
+        [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
       const length = Math.hypot(...normal) || 1;
       const light = 0.58 + 0.34 * Math.abs((normal[0] * -0.4 + normal[1] * 0.8 + normal[2] * 0.5) / length);
-      return { indices, order, depth: 0, fill: `rgb(${rgb.map(value => Math.round(value * light)).join(',')})` };
+      return {indices,order,depth:0,fill:`rgb(${rgb.map(value => Math.round(value * light)).join(',')})`,
+        ...(this.inspection && {name:names[order],normal})};
     });
+    const inspection = this.inspection ? inspectMesh(vertices,this.faces,minimum,maximum) : null;
+    this.guide = this.inspection ? {origin:center.map(value => -value / radius), radius,unit,
+      minimum:minimum.map((value,index) => (value - center[index]) / radius),
+      maximum:maximum.map((value,index) => (value - center[index]) / radius)} : null;
+    this.selectedFace = this.selectedVertex = null;
     this.reset();
-    return { vertices: vertices.length, faces: faces.length };
+    return {vertices:vertices.length,faces:faces.length,...(inspection && {inspection,unit})};
+  }
+
+  focusFace(index) {
+    this.selectedVertex = null;
+    this.selectedFace = this.faces.find(face => face.order === index) || null;
+    this.draw();
+    this.onFace?.(this.selectedFace);
+  }
+
+  focusVertex(index) {
+    this.selectedFace = null;
+    this.selectedVertex = index;
+    this.draw();
+    this.onFace?.(null);
   }
 
   reset() {
@@ -160,7 +200,7 @@ export class MeshPreview {
     const gradient = ctx.createRadialGradient(width * 0.5, height * 0.4, 5, width * 0.5, height * 0.5, width * 0.7);
     gradient.addColorStop(0, '#384849');
     gradient.addColorStop(1, '#263234');
-    ctx.fillStyle = gradient;
+    ctx.fillStyle = this.modelBackground || gradient;
     ctx.fillRect(0, 0, width, height);
 
     const cosYaw = Math.cos(this.yaw);
@@ -192,12 +232,17 @@ export class MeshPreview {
     if (!this.vertices.length) return;
 
     const points = this.vertices.map(project);
+    if (this.inspection) this.projectedPoints = points;
     for (const face of this.faces) {
       face.depth = face.indices.reduce((sum, index) => sum + points[index][2], 0) / face.indices.length;
     }
     this.faces.sort((a, b) => a.depth - b.depth || a.order - b.order);
     ctx.lineWidth = this.wire ? 0.65 : 0.45;
-    for (const { indices, fill } of this.faces) {
+    const towardsViewer = [sinYaw * cosPitch,sinPitch,cosYaw * cosPitch];
+    for (const face of this.faces) {
+      const {indices,normal} = face;
+      const facing = this.backfaces && normal.reduce((sum,value,axis) => sum + value * towardsViewer[axis],0);
+      const fill = facing < 0 ? '#c75d92' : face.fill;
       ctx.beginPath();
       for (let index = 0; index < indices.length; index++) {
         const point = points[indices[index]];
@@ -208,6 +253,24 @@ export class MeshPreview {
       ctx.fillStyle = fill;
       ctx.fill();
       ctx.strokeStyle = this.wire ? '#d4eee7aa' : fill;
+      ctx.stroke();
+    }
+    if (this.guides && this.guide) drawMeshGuides(ctx,project,this.guide,width,height,scale);
+    if (this.selectedFace || this.selectedVertex !== null) {
+      ctx.strokeStyle = '#82d2fb';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (this.selectedFace) {
+        for (const [index,vertex] of this.selectedFace.indices.entries()) {
+          const point = points[vertex];
+          if (index) ctx.lineTo(point[0],point[1]);
+          else ctx.moveTo(point[0],point[1]);
+        }
+        ctx.closePath();
+      } else {
+        const point = points[this.selectedVertex];
+        if (point) ctx.arc(point[0],point[1],5,0,Math.PI * 2);
+      }
       ctx.stroke();
     }
   }

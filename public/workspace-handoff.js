@@ -1,3 +1,5 @@
+import {downloadWorkspaceFile} from './workspace-download.js';
+
 const format = 'nexus-workspace-handoff';
 const version = 1;
 const maxSize = 8 * 1024 * 1024;
@@ -97,18 +99,6 @@ function parseManifest(text) {
   const date = new Date(metadataText(contents.createdAt,48));
   if (!Number.isFinite(date.getTime()) || !Array.isArray(contents.assets)) throw Error('交接文件的信息不完整。');
   return makeManifest(contents,date.toISOString());
-}
-
-function downloadManifest(doc, filename, text) {
-  const file = new Blob([text],{type:'application/json;charset=utf-8'});
-  const url = URL.createObjectURL(file);
-  const link = doc.createElement('a');
-  link.href = url;
-  link.download = filename;
-  doc.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url),30000);
 }
 
 export function initWorkspaceHandoff({capture,open,exportFile,notify}) {
@@ -343,7 +333,7 @@ export function initWorkspaceHandoff({capture,open,exportFile,notify}) {
         if (exportFile) {
           const saved = await exportFile({filename:basename,text});
           if (saved === false) { message(''); return; }
-        } else downloadManifest(doc,basename,text);
+        } else downloadWorkspaceFile(doc,basename,text);
         notify?.(exportFile ? '已保存交接文件' : '已开始下载交接文件');
       } else {
         const result = await open(manifest);

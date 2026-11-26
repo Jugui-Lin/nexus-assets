@@ -117,6 +117,8 @@
 .browser-site-dialog label { display: block; margin: 9px 0 4px; color: var(--muted); font-size: 12px; }
 .browser-site-dialog :is(input, textarea) { box-sizing: border-box; width: 100%; padding: 7px 8px; border: 1px solid var(--border, var(--line)); border-radius: 5px; background: var(--card, #202729); color: var(--text, #e5edec); font-size: 13px; }
 .browser-site-dialog textarea { resize: vertical; }
+.browser-site-entry-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: stretch; gap: 6px; }
+.browser-site-entry-row button { white-space: nowrap; }
 .browser-site-dialog :is(input, textarea):focus-visible { border-color: var(--accent); outline: 1px solid var(--accent); }
 .browser-site-name-row { display: flex; align-items: center; gap: 6px; }
 .browser-site-name-row input { min-width: 0; }

@@ -60,6 +60,27 @@ pub(super) async fn read_folder(
     .await
 }
 
+pub(super) async fn read_render_frame(state: AppState, path: String, size: u32) -> Result<Option<String>, String> {
+    let path = PathBuf::from(path);
+    validate_file_path(&path)?;
+    if !crate::render_sequences::is_numbered_render_frame(&path) {
+        return Ok(None);
+    }
+    let Some((ext, "texture")) = file_kind(&path) else { return Ok(None) };
+    folder_browser::read_with_slots(&EXPLORER_THUMBNAILS, THUMBNAIL_TIMEOUT, move |cancelled| {
+        let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() || crate::workspace_folder_move::link_or_reparse(&metadata) || cancelled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let actual = fs::canonicalize(path).map_err(|error| error.to_string())?;
+        // The sequence always uses the source frame. Asset-library cover overrides
+        // and shell icon fallbacks can show something different from the render.
+        let asset = unindexed_asset(clean_path(&actual), &actual, ext, "texture");
+        let directory = workspace_data_directory(&state.root, &[CACHE_DIR], true)?.ok_or("无法创建渲染帧预览缓存")?;
+        thumbnail_cache::read_or_generate(&asset,&directory,size).map(|image| image.map(data_url))
+    }).await
+}
+
 fn read_file_image(
     state: &AppState,
     path: &Path,

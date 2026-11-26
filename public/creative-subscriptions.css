@@ -68,6 +68,9 @@
 .creator-status { min-width: 0; color: var(--muted); font-size: 11px; }
 .creator-status[data-phase="ready"] { color: var(--accent); }
 .creator-status[data-phase="error"] { color: #f0af9f; }
+.creator-sync-line { margin: 2px 0 0; color: var(--muted); font-size: 11px; }
+.creator-sync-line:empty { display: none; }
+#creator-detail-sync-status { margin-block: 7px; overflow-wrap: anywhere; }
 .creative-empty { padding: 18px 11px; margin: 0; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); text-align: center; }
 #creator-back { display: inline-flex; align-items: center; gap: 4px; padding: 4px 1px; margin-bottom: 7px; }
 #creator-back svg { width: 13px; height: 13px; transform: rotate(180deg); }
@@ -141,7 +144,7 @@
   gap: 8px 12px;
 }
 .creator-reference-toolbar h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 600; }
-.creator-reference-actions { display: flex; min-inline-size: 0; align-items: center; gap: 6px; }
+.creator-reference-actions { display: flex; flex-wrap: wrap; min-inline-size: 0; align-items: center; gap: 6px; }
 .creator-reference-actions .creative-search { flex: 1 1 200px; min-inline-size: 0; }
 .creator-reference-actions > button { flex: none; white-space: nowrap; }
 .creator-reference-actions > button[aria-expanded="true"] { background: var(--accent-dark); color: var(--accent); }
@@ -177,6 +180,11 @@
 .creator-reference-caption { display: flex; align-items: center; gap: 3px; min-width: 0; }
 .creator-reference-caption .icon-button { flex: 0 0 25px; width: 25px; height: 26px; }
 .creator-reference-caption .icon-button svg { width: 14px; height: 14px; }
+.creator-reference-caption [data-has-notes] { color: var(--accent); }
+.modal.creator-reference-note-dialog { width: min(510px,calc(100vw - 28px)); }
+.creator-reference-note-dialog textarea { resize: vertical; }
+.creator-reference-note-dialog [data-note-source] { overflow-wrap: anywhere; }
+.creator-reference-note-dialog [data-note-status] { margin: 0; }
 .creator-reference-label { flex: 1; min-width: 0; padding-inline-start: 2px; }
 .creator-reference-card:hover .creator-work-title { color: var(--accent); }
 .creator-reference-host { display: block; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

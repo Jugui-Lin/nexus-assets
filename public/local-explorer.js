@@ -1,5 +1,15 @@
 import {createFrequentFolders,frequentFolderDwell} from './local-explorer-frequent-folders.js';
 import {initExplorerAssets,initExplorerCatalogSearch} from './local-explorer-assets.js';
+import {initExplorerAddressCompletion} from './local-explorer-address-completion.js';
+import {showExplorerBatchRename} from './local-explorer-batch-rename.js';
+import {initExplorerCommandSearch} from './local-explorer-command-search.js';
+import {createExplorerDirectorySelections,explorerShotCode,initExplorerProjectFilters} from './local-explorer-project-filters.js';
+import {showExplorerPasteConflicts} from './local-explorer-paste.js';
+import {showExplorerBatchTabs} from './local-explorer-batch-tabs.js';
+import {explorerPathFormats,formatExplorerPaths} from './local-explorer-path-format.js';
+import {explorerShortcutAction,normalizeExplorerShortcuts} from './local-explorer-shortcuts.js';
+import {distinguishTabLabels} from './workspace-tab-labels.js';
+import {simplifyAssetQuery} from './asset-empty-search.js';
 
 const dateFormat = new Intl.DateTimeFormat('zh-CN', {
   year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hourCycle:'h23',
@@ -14,6 +24,7 @@ const pinLimit = 32;
 const pinKey = 'nexus-file-workspace-pins-v1';
 const sidebarPinKey = 'nexus-file-workspace-sidebar-pins-v1';
 const tabSessionKey = 'nexus-file-workspace-tab-session-v1';
+const pendingShellPathKey = 'nexus-file-shell-pending-v1';
 const networkLocation = 'nexus:network';
 const treeWorkers = 3;
 const treeCacheLimit = 96;
@@ -403,21 +414,24 @@ function visibleEntryDetails(scroller,tbody,entryDetails,isActive,applyDetails) 
 
 export function initLocalExplorer({
   root,tabBar,browse,open,reveal,contextMenu,computer,driveDetails,thumbnail,columns,
-  folderThumbnail,fileIcon,entryDetails,selectAllEntries,clipboard,fileAction,onOpenAssetLibrary,onOpenFiles,treeChildren,
-  onBrowseAssets,onAddToAssets,onOpenAssetPane,onOpenAssetDetails,onSelectionChange,onQuickPreview,onDetachTab,
-  lookupAssets,onLoadAssets,onToggleFavorite,onAddToCollection,onProjectDependencies,searchAssets,assetSearchKey,
-  detachedWindow = false,deferInitialTab = false,preferences,
+  folderThumbnail,fileIcon,entryDetails,selectAllEntries,clipboard,pasteConflicts,fileAction,onOpenAssetLibrary,onOpenFiles,treeChildren,
+  onBrowseAssets,onAddToAssets,onOpenAssetPane,onOpenAssetDetails,onSelectionChange,onQuickPreview,onDetachTab,onInspectRenderSequence,onCompareExrChannels,
+  lookupAssets,onLoadAssets,onToggleFavorite,onAddToCollection,onAddToBasket,onProjectDependencies,onCreateFolderShortcut,onInspectCleanup,onOpenShotBoard,searchAssets,assetSearchKey,
+  projectFiltersEnabled = false,
+  checkFolderPaths,detachedWindow = false,deferInitialTab = false,preferences,
   copy = text => navigator.clipboard.writeText(text),
 }) {
   const panel = root?.querySelector('#local-explorer');
   if (!panel || !browse) {
-    return {refresh:() => false,focusAddress:() => false,exit:() => false,openPath:() => false,revealSource:() => false,show:() => false,
+    return {refresh:() => false,focusAddress:() => false,exit:() => false,openPath:() => false,openShellPath:() => false,
+      revealSource:() => false,show:() => false,
       restoreDetachedTab:() => false,
       getCurrentDirectory:() => null,getFileActionDirectory:() => null,getSelectedPath:() => null,getSelectedEntry:() => null,
       getSelectedEntries:() => [],getTabCount:() => 0,applyPreferences:() => {},clearRecentFolders:() => {},refreshAssetDetails:() => {},
       getTabIdentity:() => null,showTabIdentity:() => false,canDuplicateActive:() => false,duplicateActive:() => false,
       findManagedTab:() => null,setTabPinned:() => false,closeOtherTabs:() => false,canCloseOtherTabs:() => false,
       closeManagedTab:() => false,restoreClosedTab:() => false,hasClosedTabs:() => false,
+      openBatchPaths:() => false,
       getDropTarget:() => null,getSidebarPinTarget:() => null,getDragSource:() => null,
       refreshAfterTransfer:() => false,pinFolders:() => 0,pinSidebarFolders:() => 0};
   }
@@ -429,6 +443,20 @@ export function initLocalExplorer({
   const search = panel.querySelector('[data-explorer-search]');
   const searchScope = panel.querySelector('[data-explorer-search-scope]');
   const status = panel.querySelector('.local-explorer-status');
+  const recoveryButton = panel.querySelector('[data-explorer-recover-parent]');
+  const shellPending = panel.querySelector('[data-explorer-shell-pending]');
+  const shellPendingStatus = shellPending?.querySelector('[role="status"]');
+  const shellRetry = shellPending?.querySelector('[data-explorer-shell-retry]');
+  const shellClear = shellPending?.querySelector('[data-explorer-shell-clear]');
+  const pendingShellPaths = new Map();
+  let retryingShellPaths = false;
+  try {
+    const saved = JSON.parse(storage.getItem(pendingShellPathKey));
+    if (Array.isArray(saved)) for (const value of saved.slice(-tabLimit)) {
+      const path = startupPath(value);
+      if (path && path !== networkLocation) pendingShellPaths.set(treePathKey(path),path);
+    }
+  } catch {}
   const listing = panel.querySelector('.local-explorer-listing');
   const locations = panel.querySelector('.local-explorer-current');
   const scroller = panel.querySelector('.local-explorer-table-scroll');
@@ -436,6 +464,15 @@ export function initLocalExplorer({
   const table = scroller.querySelector('table');
   const tbody = table.tBodies[0];
   const empty = panel.querySelector('.local-explorer-empty');
+  const emptyHelp = panel.querySelector('[data-explorer-empty-help]');
+  const emptyShortcuts = emptyHelp?.querySelector('[data-explorer-empty-shortcuts]');
+  const emptyQuery = emptyHelp?.querySelector('[data-explorer-empty-query]');
+  const simplifiedQuery = emptyHelp?.querySelector('[data-explorer-simplify-query]');
+  simplifiedQuery?.addEventListener('click',() => {
+    search.value = simplifiedQuery.dataset.query;
+    search.dispatchEvent(new Event('input',{bubbles:true}));
+    search.focus({preventScroll:true});
+  });
   const count = panel.querySelector('.local-explorer-count');
   const footer = panel.querySelector('.local-explorer-list-footer');
   const sidebar = panel.querySelector('.local-explorer-sidebar');
@@ -492,6 +529,7 @@ export function initLocalExplorer({
   const treeListings = new Map();
   const openTreeBranches = new Set();
   const closedTreeBranches = new Set();
+  const temporaryTreeBranches = new Set();
   const knownServers = new Map();
   let listedDrives = [];
   let detailRunning = 0;
@@ -510,6 +548,10 @@ export function initLocalExplorer({
   let transferRevision = 0;
 
   const isActive = () => !root.hidden && !root.classList.contains('hidden');
+  const addressCompletion = initExplorerAddressCompletion({input:address,popup:form.querySelector('[data-address-completions]'),
+    read:treeChildren && (params => treeChildren({...params,...(prefs.showHidden && {showHidden:true})})),
+    isActive:() => isActive() && !tab.request && !tab.fileAction,
+  });
   const showThumbnails = gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isActive);
   const tabPath = item => item.history[item.index] ?? item.initialPath ?? '';
   const getTabCount = () => tabs.length;
@@ -520,6 +562,26 @@ export function initLocalExplorer({
   const isDriveView = snapshot => snapshot && (!snapshot.directory || snapshot.directory === networkLocation);
   const getCurrentDirectory = () => !isDriveView(tab.snapshot) && tab.snapshot?.directory || null;
   const getFileActionDirectory = () => isActive() && !catalogOnly() && !tab.request && !tab.fileAction ? getCurrentDirectory() : null;
+  const directorySelections = createExplorerDirectorySelections(storage,treePathKey);
+  const projectFilters = projectFiltersEnabled && initExplorerProjectFilters({
+    panel,storage,key:treePathKey,
+    onChange(root) {
+      const directory = getCurrentDirectory();
+      if (projectFilters.includes(root,directory))
+        void navigate(directory,{index:tab.index,offset:0,projectFilterBypass:null});
+    },
+    onToggle(rule) {
+      const directory = getFileActionDirectory();
+      if (directory) void navigate(directory,{index:tab.index,offset:0,
+        projectFilterBypass:tab.projectFilterBypass === rule.id ? null : rule.id});
+    },
+    onOpen(root) { void navigate(root,{focusList:true,clearCatalog:true}); },
+  });
+
+  function activeProjectFilter(path,bypass) {
+    const rule = projectFilters && projectFilters.resolve(path);
+    return rule && rule.id !== bypass ? rule.filter : null;
+  }
   const getSelectedEntry = () => tab.selection.size === 1 ? tab.selected || null : null;
   const getSelectedEntries = () => [...tab.selection.values()];
   const getSelectedPath = () => getSelectedEntry()?.path || null;
@@ -559,10 +621,16 @@ export function initLocalExplorer({
   };
   const totalCount = owner.createTextNode('');
   const selectionCount = element('span','local-explorer-selection-count');
+  selectionCount.tabIndex = -1;
+  const marqueeAnnouncement = element('span','local-explorer-speaking-status');
+  marqueeAnnouncement.setAttribute('role','status');
   const marquee = element('div','local-explorer-marquee');
   marquee.setAttribute('aria-hidden','true');
   marquee.hidden = true;
-  root.append(marquee);
+  const marqueeCount = element('div','local-explorer-marquee-count');
+  marqueeCount.setAttribute('aria-hidden','true');
+  marqueeCount.hidden = true;
+  root.append(marquee,marqueeCount,marqueeAnnouncement);
   const sidebarSystem = element('div','local-explorer-places-group local-explorer-sidebar-system');
   count.replaceChildren(totalCount,selectionCount);
   const columnLayout = columns?.({
@@ -734,9 +802,16 @@ export function initLocalExplorer({
   }
 
   function displayStatus() {
+    status.setAttribute('aria-live',tab.status === '正在读取文件列表…' ? 'off' : 'polite');
     status.textContent = tab.status;
     status.hidden = !tab.status;
     status.toggleAttribute('data-error',tab.error);
+    if (recoveryButton) {
+      const parent = tab.recovery?.parent;
+      recoveryButton.hidden = !parent;
+      recoveryButton.textContent = parent ? '打开最近可访问的上级文件夹' : '';
+      recoveryButton.title = parent || '';
+    }
   }
 
   function report(item, message = '', error = false) {
@@ -756,6 +831,7 @@ export function initLocalExplorer({
     const multiple = tab.selection.size > 1;
     const driveView = isDriveView(snapshot);
     const physical = driveView || catalogOnly() ? '' : snapshot?.directory;
+    projectFilters?.render?.(physical,Boolean(tab.projectFilterBypass),Boolean(blocked));
     listing.setAttribute('aria-busy',String(Boolean(request)));
     setDisabled('back',blocked || index <= 0);
     setDisabled('forward',blocked || index >= history.length - 1);
@@ -804,24 +880,27 @@ export function initLocalExplorer({
 
   function renderTabs() {
     const restoreFocus = tabsHost.contains(owner.activeElement);
+    const labels = distinguishTabLabels(tabs.map(item => ({id:item.identity,title:nameForPath(tabPath(item)),location:tabPath(item)})));
     tabsHost.replaceChildren(...tabs.map(item => {
       const path = tabPath(item);
       const name = nameForPath(path);
+      const label = labels.get(item.identity);
       const wrapper = element('div','local-explorer-tab');
       wrapper.dataset.explorerTabId = item.identity;
       wrapper.toggleAttribute('data-active',item === tab);
       wrapper.toggleAttribute('data-pinned',item.pinned);
       markDropTarget(wrapper,path,name);
       const select = element('button','local-explorer-tab-select');
+      select.dataset.tabTitle = name;
       select.append(svg(!path ? 'explorer-computer' : path === networkLocation ? 'explorer-network' :
         syncLocation(path) ? 'explorer-sync' : 'folder'),
-        element('span','',name));
+        element('span','',label));
       select.title = addressText(path);
+      select.setAttribute('aria-label',label + (item.pinned ? '，已固定' : ''));
       if (item.pinned) {
         const marker = svg('pin');
         marker.classList.add('local-explorer-tab-pin');
         select.prepend(marker);
-        select.setAttribute('aria-label',name + '，已固定');
       }
       if (item === tab) select.setAttribute('aria-current','page');
       if (onDetachTab) select.addEventListener('pointerdown',event => prepareTabDetach(item,select,event));
@@ -839,7 +918,7 @@ export function initLocalExplorer({
       });
       const close = element('button','local-explorer-tab-close');
       close.append(svg('close'));
-      close.setAttribute('aria-label','关闭 ' + name + ' 标签页');
+      close.setAttribute('aria-label','关闭 ' + label + ' 标签页');
       close.title = close.getAttribute('aria-label');
       close.addEventListener('click',() => closeTab(item));
       wrapper.append(select,close);
@@ -1014,11 +1093,12 @@ export function initLocalExplorer({
     return job;
   }
 
-  function treeNode(item,kind,activeChildren,fixedChildren) {
+  function treeNode(item,kind,activeChildren,fixedChildren,level = 1) {
     const key = treePathKey(item.path);
     const known = activeChildren.get(key);
-    const open = kind === 'computer' ? drivesExpanded : kind === 'network' ? networkExpanded :
+    const normallyOpen = kind === 'computer' ? drivesExpanded : kind === 'network' ? networkExpanded :
       !closedTreeBranches.has(key) && (openTreeBranches.has(key) || Boolean(known));
+    const open = normallyOpen || temporaryTreeBranches.has(key);
     const tree = element('div','local-explorer-tree');
     tree.dataset.treeKind = kind;
     const row = element('div','local-explorer-tree-row');
@@ -1034,7 +1114,7 @@ export function initLocalExplorer({
     children.hidden = !expanded;
     toggle.setAttribute('aria-expanded',String(expanded));
     const actionLabel = (expanded ? '折叠 ' : '展开 ') + item.name;
-    toggle.setAttribute('aria-label',actionLabel);
+    toggle.setAttribute('aria-label',actionLabel + '，导航第 ' + level + ' 层');
     toggle.title = actionLabel;
     toggle.dataset.treeKey = key;
     toggle.dataset.treeControl = 'toggle';
@@ -1058,6 +1138,8 @@ export function initLocalExplorer({
       ? 'explorer-network' : kind === 'drive' ? 'explorer-drive' : kind === 'sync' ? 'explorer-sync' : 'folder';
     const className = 'local-explorer-place' + (kind === 'drive' || kind === 'folder' ? ' local-explorer-tree-' + kind : '');
     const button = locationButton(item,className,icon,undefined,kind === 'server' ? toggleBranch : undefined);
+    button.setAttribute('aria-label',item.name + '，导航第 ' + level + ' 层' +
+      (toggle.disabled ? '' : expanded ? '，已展开' : '，已折叠'));
     button.dataset.treeKey = key;
     button.dataset.treeControl = 'location';
     if (key === activeTreeKey) button.setAttribute('aria-current','page');
@@ -1073,13 +1155,13 @@ export function initLocalExplorer({
     if (expanded) {
       if (fixedChildren) {
         const childKind = kind === 'computer' ? 'drive' : 'server';
-        children.append(...fixedChildren.map(entry => treeNode(entry,childKind,activeChildren)));
+        children.append(...fixedChildren.map(entry => treeNode(entry,childKind,activeChildren,undefined,level + 1)));
       } else {
         const listing = treeListing(item.path,known);
         const entries = listing?.items || [];
         const available = known && !entries.some(entry => treePathKey(entry.path) === treePathKey(known.path))
           ? [...entries,known] : entries;
-        children.append(...available.map(entry => treeNode(entry,'folder',activeChildren)));
+        children.append(...available.map(entry => treeNode(entry,'folder',activeChildren,undefined,level + 1)));
         if (treeChildren && !listing?.items) {
           if (known && !listing?.failed) activeTreeLoading = true;
           const note = element('span','local-explorer-tree-note',listing?.failed ? '无法读取子文件夹' : '正在读取…');
@@ -1215,22 +1297,99 @@ export function initLocalExplorer({
     frequentVisit = visit;
   }
 
+  const overflowLocation = contextMenu && element('button','local-explorer-location local-explorer-location-overflow','…');
+  const overflowDivider = contextMenu && svg('chevron');
+  let locationParts = [];
+  let hiddenLocations = [];
+
+  function fitLocations() {
+    if (!locations.clientWidth || !locationParts.length) return;
+    const focused = owner.activeElement;
+    locations.removeAttribute('data-explorer-breadcrumb-compact');
+    if (overflowLocation) {
+      overflowLocation.hidden = true;
+      overflowDivider.setAttribute('hidden','');
+    }
+    for (const {location,divider} of hiddenLocations) {
+      location.hidden = false;
+      divider.removeAttribute('hidden');
+    }
+    const overflowing = locations.scrollWidth > locations.clientWidth;
+    hiddenLocations = overflowing && overflowLocation ? locationParts.slice(1,-1) : [];
+    if (hiddenLocations.length) {
+      overflowLocation.hidden = false;
+      overflowDivider.removeAttribute('hidden');
+      for (const {location,divider} of hiddenLocations) {
+        location.hidden = true;
+        divider.setAttribute('hidden','');
+      }
+      if (focused === overflowLocation || hiddenLocations.some(({location}) => location === focused))
+        overflowLocation.focus({preventScroll:true});
+    } else if (overflowLocation && focused === overflowLocation) {
+      locationParts.at(-1).location.focus({preventScroll:true});
+    }
+    locations.toggleAttribute('data-explorer-breadcrumb-compact',overflowing);
+    locations.scrollLeft = overflowing && !overflowLocation ? locations.scrollWidth : 0;
+  }
+
+  if (overflowLocation) {
+    overflowLocation.title = '显示中间的路径层级';
+    overflowLocation.setAttribute('aria-label',overflowLocation.title);
+    overflowLocation.setAttribute('aria-haspopup','menu');
+    overflowLocation.setAttribute('aria-expanded','false');
+    overflowLocation.addEventListener('click',async () => {
+      if (!hiddenLocations.length || !isActive() || menuOpen || tab.request || tab.fileAction) return;
+      const current = tab;
+      const parts = locationParts;
+      const folded = hiddenLocations;
+      const {left,bottom} = overflowLocation.getBoundingClientRect();
+      const names = new Map();
+      for (const {name} of folded) names.set(name,(names.get(name) || 0) + 1);
+      const items = folded.map(({path,name},index) => ({id:String(index),label:names.get(name) > 1 ? addressText(path) : name}));
+      menuOpen = true;
+      overflowLocation.setAttribute('aria-expanded','true');
+      try {
+        const result = await contextMenu({x:left,y:bottom,items});
+        const selected = result != null && folded[Number(result)];
+        if (selected && isActive() && tab === current && locationParts === parts && !tab.request && !tab.fileAction)
+          void navigate(selected.path,{focusList:true});
+      } catch (failure) {
+        report(current,String(failure?.message || failure),true);
+      } finally {
+        overflowLocation.setAttribute('aria-expanded','false');
+        menuOpen = false;
+      }
+    });
+  }
+  if (owner.defaultView.ResizeObserver) new owner.defaultView.ResizeObserver(fitLocations).observe(locations);
+
   function renderLocations(path) {
     const pathEntries = pathLocations(path);
     const syncIndex = pathEntries.findLastIndex(entry => syncLocation(entry.path));
     const entries = syncIndex < 0 ? pathEntries : pathEntries.slice(syncIndex);
-    const fragments = entries.flatMap((entry,index) => {
+    const focused = locationParts.find(({location}) => location === owner.activeElement)?.path;
+    hiddenLocations = [];
+    locationParts = entries.map((entry,index) => {
       const current = index === entries.length - 1;
       const name = nameForPath(entry.path);
       const location = element(current ? 'span' : 'button','local-explorer-location',name);
       location.title = addressText(entry.path);
       markDropTarget(location,entry.path,name);
-      if (current) location.setAttribute('aria-current','page');
-      else location.addEventListener('click',() => navigate(entry.path,{focusList:true}));
-      return index === 0 ? [location] : [svg('chevron'),location];
+      if (current) {
+        location.setAttribute('aria-current','page');
+        location.tabIndex = -1;
+      } else location.addEventListener('click',() => navigate(entry.path,{focusList:true}));
+      return {path:entry.path,name,location,divider:index ? svg('chevron') : null};
     });
+    const fragments = locationParts.flatMap(({location,divider}) => divider ? [divider,location] : [location]);
+    if (overflowLocation) {
+      overflowLocation.hidden = true;
+      overflowDivider.setAttribute('hidden','');
+      if (locationParts.length > 2) fragments.splice(1,0,overflowDivider,overflowLocation);
+    }
     locations.replaceChildren(...fragments);
-    locations.scrollLeft = locations.scrollWidth;
+    if (focused != null) locationParts.find(entry => entry.path === focused)?.location.focus({preventScroll:true});
+    fitLocations();
   }
 
   function loadPlaces(force = false) {
@@ -1478,6 +1637,7 @@ export function initLocalExplorer({
       }
       tab.selected = selection.get(key) || selection.values().next().value;
     }
+    if (tab.selected && !catalogOnly()) directorySelections.remember(getCurrentDirectory(),tab.selected.path);
     drawSelection();
   }
 
@@ -1489,6 +1649,7 @@ export function initLocalExplorer({
     try {
       if (selectAllEntries && current.directory && !isDriveView(current) && current.total > entries.length) {
         const listing = await selectAllEntries({address:current.directory,...(item.query && {query:item.query}),
+          ...(current.projectFilter && {projectFilter:current.projectFilter}),
           ...(prefs.showHidden && {showHidden:true})});
         if (!Array.isArray(listing?.entries)) throw Error('无法选择此目录的项目。');
         entries = listing.entries;
@@ -1517,6 +1678,7 @@ export function initLocalExplorer({
     else table.removeAttribute('data-explorer-zoom');
     if (driveGrid) drivesHost.dataset.explorerZoom = tab.driveIconSize;
     else drivesHost.removeAttribute('data-explorer-zoom');
+    columnLayout?.setDirectory?.(getCurrentDirectory());
     if (tab.snapshot) columnLayout?.setSort(orderFor(tab,tab.snapshot.directory));
     const assetOnly = catalogOnly();
     scroller.toggleAttribute('data-explorer-catalog-only',assetOnly);
@@ -1544,17 +1706,19 @@ export function initLocalExplorer({
     table.hidden = !snapshot || driveView;
     drivesHost.hidden = !driveView;
     if (!sameLocation) {
+      addressCompletion.clear();
       renderLocations(directory);
       renderTabs();
     }
     if (!sameLocation || (driveView && !directory && !places)) renderLinks();
-    address.value = addressText(directory);
+    if (!sameLocation || owner.activeElement !== address) address.value = addressText(directory);
     const term = searchText();
     if (search.value !== term && (!sameLocation || owner.activeElement !== search)) search.value = term;
     if (!snapshot) {
       tbody.replaceChildren();
       drivesHost.replaceChildren();
       pages.hidden = empty.hidden = true;
+      if (emptyHelp) emptyHelp.hidden = true;
       totalCount.data = '';
       drawSelection();
       displayStatus();
@@ -1572,14 +1736,30 @@ export function initLocalExplorer({
           size === entry.size && modified === entry.modified && created === entry.created;
       });
     if (driveView) renderDrives(snapshot.entries);
-    else if (!sameRows || revealGroup || String(boundaries) !== String(renderedBoundaries))
+    else if (!sameRows || revealGroup || String(boundaries) !== String(renderedBoundaries)) {
+      const anchor = samePage && !snapshot.selectedPath ? visibleRowAnchor(previous.entries) : null;
       tbody.replaceChildren(entryRows(snapshot.entries,boundaries));
+      if (anchor) restoreRowAnchor(anchor,snapshot.entries);
+    }
     renderedBoundaries = boundaries;
     const showPage = snapshot.previousOffset != null || snapshot.nextOffset != null;
     pages.hidden = !showPage;
     empty.hidden = Boolean(snapshot.entries.length);
     empty.textContent = tab.query ? '没有匹配的项目。' : directory === networkLocation
       ? '在地址栏输入共享路径，即可前往网络位置。' : directory ? '此文件夹为空。' : '没有可浏览的位置。';
+    if (emptyHelp) {
+      emptyHelp.hidden = empty.hidden || directory === networkLocation || (!directory && !tab.query);
+      if (!emptyHelp.hidden) {
+        const query = tab.query || '';
+        const suggestion = simplifyAssetQuery(query);
+        emptyShortcuts.hidden = Boolean(query);
+        emptyQuery.hidden = !query;
+        emptyQuery.textContent = query ? `关键词「${query}」` : '';
+        simplifiedQuery.hidden = !suggestion;
+        simplifiedQuery.dataset.query = suggestion;
+        simplifiedQuery.textContent = suggestion ? `试试「${suggestion}」` : '';
+      }
+    }
     totalCount.data = (showPage ? displayNumber.format(snapshot.offset + 1) + '–' +
       displayNumber.format(snapshot.offset + snapshot.entries.length) + ' / ' : '') +
       displayNumber.format(snapshot.total) + ' 个项目' + (snapshot.truncated ? '（目录条目过多，已部分显示）' : '');
@@ -1588,6 +1768,34 @@ export function initLocalExplorer({
     if (snapshot.selectedPath) entryItem(snapshot.entries.indexOf(tab.selected))?.scrollIntoView({block:'nearest',inline:'nearest'});
     displayStatus();
     updateView();
+  }
+
+  function visibleRowAnchor(entries) {
+    if (!scroller.scrollTop || table.hidden) return null;
+    const {top,bottom} = marqueeViewport();
+    const selected = pathKey(tab.selected?.path);
+    let first;
+    for (const row of tbody.querySelectorAll('[data-entry-index]:not([hidden])')) {
+      const bounds = row.getBoundingClientRect();
+      if (bounds.bottom <= top) continue;
+      if (bounds.top >= bottom) break;
+      const key = pathKey(entries[Number(row.dataset.entryIndex)]?.path);
+      if (!key) continue;
+      const anchor = {key,top:bounds.top,offset:bounds.top - top,height:bounds.height};
+      if (key === selected) return anchor;
+      first ??= anchor;
+    }
+    return first;
+  }
+
+  function restoreRowAnchor(anchor,entries,newView = false) {
+    const index = entries.findIndex(entry => pathKey(entry.path) === anchor.key);
+    const row = index >= 0 && entryItem(index);
+    if (!row) return;
+    const bounds = row.getBoundingClientRect();
+    const offset = anchor.offset < 0 && anchor.height ? anchor.offset * bounds.height / anchor.height : anchor.offset;
+    const target = newView ? marqueeViewport().top + offset : anchor.top;
+    scroller.scrollTop += bounds.top - target;
   }
 
   function remember(item,path,index) {
@@ -1675,7 +1883,8 @@ export function initLocalExplorer({
     }
   }
 
-  async function navigate(destination, {index,offset,force = false,focusList = false,query,restored,clearCatalog = false} = {}) {
+  async function navigate(destination, {index,offset,force = false,focusList = false,query,restored,clearCatalog = false,
+    projectFilterBypass = tab.projectFilterBypass} = {}) {
     finishMarquee(true);
     clearTimeout(searchTimer);
     startupPending = false;
@@ -1691,12 +1900,18 @@ export function initLocalExplorer({
     let checkedRevision = transferRevision;
     const previousPath = tabPath(item);
     query ??= destinationKey === pathKey(previousPath) ? item.query : '';
+    let projectFilter = activeProjectFilter(destination,projectFilterBypass);
+    const canRemember = path => !restored && !query && offset == null &&
+      treePathKey(path) !== treePathKey(item.snapshot?.directory);
+    let rememberedPath = canRemember(destination) ? directorySelections.get(destination) : undefined;
     force ||= Boolean(staleRevision);
     const {sortBy,descending,groupBy} = orderFor(item,destination);
-    const request = {destination,offset,force,query,staleRevision,sortBy,descending,groupBy,restored,clearCatalog};
+    const request = {destination,offset,force,query,staleRevision,sortBy,descending,groupBy,restored,clearCatalog,
+      projectFilter,projectFilterBypass,rememberedPath};
     if (item.request && Object.keys(request).every(key => item.request[key] === request[key])) return;
     if (destinationKey !== pathKey(item.snapshot?.directory)) cancelFrequentVisit();
     item.request = request;
+    item.recovery = null;
     let committed = false;
     report(item,item.snapshot ? '' : '正在读取文件列表…');
     const loading = item.snapshot && setTimeout(() => {
@@ -1715,13 +1930,22 @@ export function initLocalExplorer({
           dateGroups = groupBy === 'date' ? dateGroupBoundaries() : undefined;
           const order = sortBy !== 'name' || descending || dateGroups ? {sortBy,descending,dateGroups} : undefined;
           return browse({address:destination,...(offset != null && {offset}),...(force && {refresh:true}),
-            ...(order && {order}),...(query && {query}),...(prefs.showHidden && {showHidden:true})});
+            ...(order && {order}),...(query && {query}),...(prefs.showHidden && {showHidden:true}),
+            ...(projectFilter && {projectFilter}),...(rememberedPath && {rememberedPath})});
         };
         const requestedOrder = orderFor(item,destination);
         result = await listDirectory(requestedOrder);
         if (!isCurrent()) return false;
         const actualOrder = orderFor(item,result?.directory);
-        if (listingOrderKey(actualOrder) !== appliedOrder) result = await listDirectory(actualOrder);
+        const resolvedFilter = activeProjectFilter(result?.directory,projectFilterBypass);
+        const actualRemembered = !result?.selectedPath && canRemember(result?.directory) &&
+          directorySelections.get(result?.directory);
+        if (listingOrderKey(actualOrder) !== appliedOrder || projectFilter !== resolvedFilter ||
+            actualRemembered && actualRemembered !== rememberedPath) {
+          projectFilter = resolvedFilter;
+          rememberedPath = actualRemembered || rememberedPath;
+          result = await listDirectory(actualOrder);
+        }
       }
       if (!isCurrent()) return false;
       if (!Array.isArray(result?.entries)) throw Error('无法读取这个位置。');
@@ -1729,6 +1953,9 @@ export function initLocalExplorer({
       else if (item.stalePaths.get(destinationKey) === staleRevision) item.stalePaths.delete(destinationKey);
       const previous = item.snapshot;
       const newDirectory = pathKey(result.directory) !== pathKey(previous?.directory);
+      if (newDirectory && item.selected && !isDriveView(previous))
+        directorySelections.remember(previous?.directory,item.selected.path);
+      const filterChanged = previous?.projectFilter !== projectFilter;
       if (newDirectory) item.collapsedDateGroups.clear();
       if (newDirectory || clearCatalog) item.catalogQuery = '';
       const newScope = newDirectory || item.query !== query;
@@ -1756,14 +1983,16 @@ export function initLocalExplorer({
           item.selected = selected;
         }
       } else if (item.selection.size) {
-        const completePage = !result.truncated && result.total === result.entries.length;
+        const completePage = filterChanged || !result.truncated && result.total === result.entries.length;
         for (const key of item.selection.keys()) {
           if (entriesOnPage.has(key)) item.selection.set(key,entriesOnPage.get(key));
           else if (completePage) item.selection.delete(key);
         }
         item.selected = item.selection.get(pathKey(item.selected?.path)) || item.selection.values().next().value;
       }
-      item.snapshot = {...result,dateGroups,listingOrderKey:appliedOrder,provisionalOrder:Boolean(appliedOrder && !places)};
+      const resultRule = projectFilters && projectFilters.resolve(result.directory);
+      item.projectFilterBypass = resultRule?.id === projectFilterBypass ? projectFilterBypass : null;
+      item.snapshot = {...result,projectFilter,dateGroups,listingOrderKey:appliedOrder,provisionalOrder:Boolean(appliedOrder && !places)};
       committed = true;
       item.query = query;
       if (!result.directory && !query && !places) listedDrives = result.entries;
@@ -1782,7 +2011,20 @@ export function initLocalExplorer({
       }
       return true;
     } catch (failure) {
-      if (item.request === request) report(item,String(failure?.message || failure || '无法读取这个位置。'),true);
+      if (item.request === request) {
+        const message = String(failure?.message || failure || '无法读取这个位置。');
+        report(item,message,true);
+        if (entryDetails && recoveryButton && destinationKey && destinationKey === pathKey(item.snapshot?.directory) &&
+            message.startsWith('找不到此位置')) {
+          const recovery = item.recovery = {path:destination,parent:null};
+          void Promise.resolve().then(() => entryDetails({paths:[destination],columns:['nearestParent']})).then(results => {
+            const parent = results?.[0]?.values?.nearestParent;
+            if (item.recovery !== recovery || typeof parent !== 'string' || !parent || !tabs.includes(item)) return;
+            recovery.parent = parent;
+            report(item,'原位置不可用：' + destination + '。最近可访问的上级文件夹：' + parent,true);
+          }).catch(() => {});
+        }
+      }
       return false;
     } finally {
       if (loading) clearTimeout(loading);
@@ -2012,6 +2254,51 @@ export function initLocalExplorer({
     return navigate(path,{focusList:true,query:'',clearCatalog:true,force});
   }
 
+  function renderShellPending() {
+    if (!shellPending) return;
+    const count = pendingShellPaths.size;
+    shellPending.hidden = !count;
+    shellPendingStatus.textContent = count ? count + ' 个系统打开请求待重试' : '';
+    shellPendingStatus.title = pendingShellPaths.values().next().value || '';
+    shellRetry.disabled = shellClear.disabled = retryingShellPaths;
+  }
+
+  function savePendingShellPaths() {
+    try { storage.setItem(pendingShellPathKey,JSON.stringify([...pendingShellPaths.values()])); } catch {}
+    renderShellPending();
+  }
+
+  async function openShellPath(path) {
+    const opened = await openPath(path);
+    const valid = startupPath(path);
+    if (!valid || valid === networkLocation) return opened;
+    const key = treePathKey(valid);
+    if (opened) {
+      if (pendingShellPaths.delete(key)) savePendingShellPaths();
+    } else if (!pendingShellPaths.has(key)) {
+      pendingShellPaths.set(key,valid);
+      if (pendingShellPaths.size > tabLimit) pendingShellPaths.delete(pendingShellPaths.keys().next().value);
+      savePendingShellPaths();
+    }
+    return opened;
+  }
+
+  shellRetry?.addEventListener('click',async () => {
+    if (!isActive() || retryingShellPaths || tab.request || tab.fileAction) return;
+    const path = pendingShellPaths.values().next().value;
+    if (!path) return;
+    retryingShellPaths = true;
+    renderShellPending();
+    try { await openShellPath(path); }
+    finally { retryingShellPaths = false; renderShellPending(); }
+  });
+  shellClear?.addEventListener('click',() => {
+    if (retryingShellPaths) return;
+    pendingShellPaths.clear();
+    savePendingShellPaths();
+  });
+  renderShellPending();
+
   function revealSource(path,{directory,preferredTab} = {}) {
     if (!isActive()) return false;
     const key = assetSearchKey || treePathKey;
@@ -2082,6 +2369,39 @@ export function initLocalExplorer({
     return true;
   }
 
+  function selectedControl() {
+    if (tab.selected && !catalogOnly()) {
+      const index = tab.snapshot?.entries.findIndex(entry => pathKey(entry.path) === pathKey(tab.selected.path)) ?? -1;
+      if (index >= 0) return itemButton(entryItem(index));
+    }
+  }
+
+  function focusContent() {
+    const target = selectedControl() || scroller;
+    target.focus({preventScroll:true});
+    if (target !== scroller) target.scrollIntoView({block:'nearest',inline:'nearest',container:'nearest'});
+  }
+
+  function cycleFocus(event) {
+    const fileTab = tabsHost.querySelector('[aria-current="page"]');
+    const sideTarget = placesHost.querySelector('[aria-current="page"]') || placesHost.querySelector('button');
+    const header = table.tHead;
+    const nameColumn = header.querySelector('.local-explorer-column-label');
+    const zones = event.key === 'F6'
+      ? [[navigation,fileTab],[form.parentElement,address],[sidebar,sideTarget],[scroller,selectedControl() || scroller]]
+      : [[header,nameColumn],[scroller,selectedControl() || scroller],[footer,selectionCount],[footer,count]];
+    const available = zones.filter(([,target]) => target?.getClientRects().length);
+    if (!available.length) return false;
+    const index = available.findIndex(([region,target]) => target === event.target ||
+      region?.contains(event.target) && region !== footer);
+    const offset = event.shiftKey ? -1 : 1;
+    const next = index < 0 ? event.shiftKey ? available.at(-1) : available[0]
+      : available[(index + offset + available.length) % available.length];
+    if (next[0] === scroller) focusContent();
+    else next[1].focus();
+    return true;
+  }
+
   function refresh() {
     if (!isActive()) return false;
     catalogSearch.refresh();
@@ -2096,6 +2416,11 @@ export function initLocalExplorer({
   }
 
   function refreshStaleTab(item,checkedRevision = 0) {
+    if (item === tab && item.snapshot?.directory && !item.request && !item.fileAction && !item.error &&
+        item.snapshot.projectFilter !== activeProjectFilter(item.snapshot.directory,item.projectFilterBypass)) {
+      void navigate(item.snapshot.directory,{index:item.index,offset:0});
+      return;
+    }
     const revision = item.stalePaths.get(pathKey(item.snapshot?.directory));
     if (item === tab && revision > checkedRevision) refresh();
     else reconcilePlaceListing(item);
@@ -2164,12 +2489,17 @@ export function initLocalExplorer({
     }
   }
 
-  function setView(view,size) {
+  function setView(view,size,{keepAnchor = true} = {}) {
     tab.emptyFallback = false;
     const drives = isDriveView(tab.snapshot);
+    const entries = tab.snapshot?.entries;
+    const anchor = keepAnchor && !drives && entries &&
+      (tab.view !== view || view === 'grid' && iconSizes.includes(size) && tab.iconSize !== size)
+      ? visibleRowAnchor(entries) : null;
     tab[drives ? 'driveView' : 'view'] = view;
     if (view === 'grid' && iconSizes.includes(size)) tab[drives ? 'driveIconSize' : 'iconSize'] = size;
     updateView();
+    if (anchor) restoreRowAnchor(anchor,entries,true);
   }
 
   function updateNavigationPreference() {
@@ -2183,11 +2513,13 @@ export function initLocalExplorer({
     panel.toggleAttribute('data-explorer-compact',prefs.compact);
     panel.toggleAttribute('data-explorer-hide-toolbar',!prefs.showToolbar);
     panel.toggleAttribute('data-explorer-hide-bookmarks',!prefs.showBookmarks);
+    panel.style.setProperty('--explorer-control-text-scale',String((Number(prefs.controlTextScale) || 100) / 100));
   }
 
   function applyPreferences(next) {
     const previous = prefs;
     prefs = {...prefs,...next};
+    if (previous.shortcutBindings !== prefs.shortcutBindings) updateShortcutLabels();
     if (previous.showHidden !== prefs.showHidden) treeListings.clear();
     updateChromePreferences();
     if (previous.showNavigation !== prefs.showNavigation) updateNavigationPreference();
@@ -2230,7 +2562,7 @@ export function initLocalExplorer({
     const bounds = item?.getBoundingClientRect();
     const fraction = bounds?.height ? (pointerY - bounds.top) / bounds.height : 0;
     if (next) tab[size] = iconSizes[next - 1];
-    setView(next ? 'grid' : 'details');
+    setView(next ? 'grid' : 'details',undefined,{keepAnchor:false});
     if (bounds?.height && item.isConnected) {
       const updated = item.getBoundingClientRect();
       scroller.scrollTop += updated.top + updated.height * fraction - pointerY;
@@ -2256,10 +2588,38 @@ export function initLocalExplorer({
     void navigate(current.directory,{index:tab.index,offset:0});
   }
 
+  function validateNameInput(input,filesystem) {
+    let composing = false;
+    let confirmingCandidate = false;
+    input.addEventListener('compositionstart',() => { composing = true; });
+    input.addEventListener('compositionend',() => { composing = false; });
+    input.addEventListener('keydown',event => {
+      if (event.key === 'Enter' && (composing || event.isComposing || event.keyCode === 229)) {
+        confirmingCandidate = true;
+        setTimeout(() => { confirmingCandidate = false; },0);
+      }
+    });
+    input.addEventListener('input',() => input.setCustomValidity(''));
+    input.form.addEventListener('submit',event => {
+      if (event.submitter?.value === 'cancel') return;
+      if (composing || confirmingCandidate) { event.preventDefault(); return; }
+      const name = input.value.trim();
+      const reservedName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+      const invalid = filesystem && (/[/\\<>:"|?*\u0000-\u001f]|\.$/.test(name) || reservedName.test(name));
+      const message = !name ? '请填写名称。' : invalid ? '名称含有 Windows 保留字符或保留名称。' : '';
+      if (!message) return;
+      event.preventDefault();
+      input.setCustomValidity(message);
+      input.focus({preventScroll:true});
+      input.reportValidity();
+    });
+  }
+
   function renameEntry(entry) {
     if (!fileAction || !entry || owner.querySelector('dialog[open]')) return;
     const item = tab;
     const directory = tab.snapshot?.directory;
+    const opener = owner.activeElement;
     const dialog = element('dialog','modal compact-dialog');
     dialog.setAttribute('aria-label','重命名');
     dialog.innerHTML = '<form method="dialog"><h2>重命名</h2><label class="field-label">名称' +
@@ -2268,9 +2628,11 @@ export function initLocalExplorer({
       '<button type="submit" class="button primary" value="rename">重命名</button></div></form>';
     const input = dialog.querySelector('input');
     input.value = entry.name;
+    validateNameInput(input,true);
     dialog.addEventListener('close',() => {
       const name = input.value.trim();
       dialog.remove();
+      if (opener?.isConnected) opener.focus({preventScroll:true});
       if (dialog.returnValue !== 'rename' || !name || name === entry.name || tab !== item ||
           tab.snapshot?.directory !== directory) return;
       void performFileAction(path => fileAction({action:'rename',path,name}),entry.path,'','remove');
@@ -2280,10 +2642,89 @@ export function initLocalExplorer({
     input.select();
   }
 
+  function selectVisibleName(entry) {
+    if (!entry || owner.querySelector('dialog[open]')) return;
+    const opener = owner.activeElement;
+    const dialog = element('dialog','modal compact-dialog');
+    dialog.setAttribute('aria-label','选择文件名');
+    dialog.innerHTML = '<form method="dialog"><h2>选择名称</h2><label class="field-label">当前显示名称' +
+      '<input class="text-field" readonly autofocus></label><p role="status"></p>' +
+      '<div class="modal-footer"><button type="submit" class="button subtle">关闭</button>' +
+      '<button type="button" class="button primary">复制所选文字</button></div></form>';
+    const input = dialog.querySelector('input');
+    const message = dialog.querySelector('[role="status"]');
+    input.value = displayEntryName(entry);
+    dialog.querySelector('button[type="button"]').addEventListener('click',async () => {
+      const text = input.value.slice(input.selectionStart,input.selectionEnd);
+      if (!text) { message.textContent = '请选中要复制的文字。'; input.focus(); return; }
+      try { await copy(text); message.textContent = '所选文字已复制。'; }
+      catch (failure) { message.textContent = String(failure?.message || failure); }
+    });
+    dialog.addEventListener('close',() => {
+      dialog.remove();
+      if (opener?.isConnected) opener.focus({preventScroll:true});
+    },{once:true});
+    panel.append(dialog);
+    dialog.showModal();
+    input.select();
+  }
+
+  function batchRename() {
+    if (!fileAction || tab.selection.size < 2 || !getCurrentDirectory()) return;
+    const item = tab;
+    const directory = getCurrentDirectory();
+    const entries = getSelectedEntries();
+    showExplorerBatchRename({panel,entries,apply:async changes => {
+      if (item !== tab || getCurrentDirectory() !== directory || item.request || item.fileAction)
+        throw Error('文件夹已切换，请重新选择要重命名的项目。');
+      item.fileAction = true;
+      updateControls();
+      const outcomes = [];
+      let changed = false;
+      try {
+        for (const change of changes) {
+          if (item !== tab || getCurrentDirectory() !== directory) {
+            outcomes.push('当前文件夹已切换');
+            continue;
+          }
+          try {
+            await fileAction({action:'rename',...change});
+            changed = true;
+            outcomes.push('');
+          } catch (failure) { outcomes.push(String(failure?.message || failure)); }
+        }
+      } finally {
+        item.fileAction = false;
+        if (item === tab) updateControls();
+        if (changed) refreshAfterTransfer({directoryPath:directory});
+      }
+      return outcomes;
+    }});
+  }
+
   async function paste(directoryPath) {
     if (!clipboard || !directoryPath) return;
-    const applied = await performFileAction(path => clipboard({action:'paste',path}),directoryPath);
-    if (applied) refreshAfterTransfer({directoryPath});
+    const item = tab;
+    const snapshot = tab.snapshot;
+    const current = () => isActive() && item === tab && item.snapshot === snapshot && !catalogOnly();
+    let changed = false;
+    await performFileAction(async path => {
+      const preview = await pasteConflicts?.preview({path});
+      if (!current()) return;
+      if (!preview?.signature || !preview.conflicts.length) {
+        await clipboard({action:'paste',path,...(preview?.sequence != null && {sequence:preview.sequence})});
+        changed = true;
+        return;
+      }
+      const result = await showExplorerPasteConflicts({panel,destination:path,preview,
+        apply(decisions) {
+          if (!current()) throw Error('文件夹已切换，请重新粘贴。');
+          return pasteConflicts.apply({path,sequence:preview.sequence,signature:preview.signature,decisions});
+        },
+      });
+      changed = Boolean(result?.copied);
+    },directoryPath);
+    if (changed) refreshAfterTransfer({directoryPath});
   }
 
   function applyAction(action,entry,current) {
@@ -2291,10 +2732,14 @@ export function initLocalExplorer({
     const path = entry?.path || directory;
     const paths = entry && tab.selection.has(pathKey(entry.path))
       ? [...tab.selection.values()].map(item => item.path) : [path];
+    if (action.startsWith('copy-path:') && path) {
+      const format = action.slice('copy-path:'.length);
+      return performFileAction(copy,formatExplorerPaths(paths,format),'路径已复制。');
+    }
     switch (action) {
       case 'open': return openEntry(entry);
       case 'open-tab': return addTab(path);
-      case 'copy-path': return performFileAction(copy,paths.join('\n'),'路径已复制。');
+      case 'copy-path': return performFileAction(copy,formatExplorerPaths(paths),'路径已复制。');
       case 'copy-visible-names': {
         const names = [...tbody.querySelectorAll('[data-entry-index]:not([hidden])')]
           .map((item,index) => (index + 1) + '. ' + current.entries[Number(item.dataset.entryIndex)].name);
@@ -2318,7 +2763,29 @@ export function initLocalExplorer({
           return performFileAction(() => onAddToCollection(files),directory);
         break;
       }
+      case 'add-to-basket': {
+        const items = getSelectedEntries();
+        if (onAddToBasket && directory && items.length) onAddToBasket(items);
+        break;
+      }
       case 'pin': return togglePin(path,entry?.name);
+      case 'create-folder-shortcut':
+        if (onCreateFolderShortcut && path && (entry?.isDirectory || !entry && directory))
+          return performFileAction(onCreateFolderShortcut,path);
+        break;
+      case 'inspect-cleanup':
+        if (onInspectCleanup && directory && (!entry || entry.isDirectory)) onInspectCleanup(path);
+        break;
+      case 'configure-project-filter':
+        if (projectFilters && (!entry || entry.isDirectory)) projectFilters.configure(path);
+        break;
+      case 'open-shot-board': {
+        const code = (!entry || entry.isDirectory) && explorerShotCode(path);
+        if (!code || !directory || !onOpenShotBoard) break;
+        const item = tab;
+        const stillRequested = () => isActive() && item === tab && item.snapshot === current;
+        return performFileAction(() => onOpenShotBoard(code,{stillRequested}),path);
+      }
       case 'copy': case 'cut':
         return clipboard && performFileAction(target => clipboard({action,path:target,
           ...(paths.length > 1 && {paths})}),path);
@@ -2327,6 +2794,18 @@ export function initLocalExplorer({
       case 'new-folder':
         return fileAction && performFileAction(target => fileAction({action,path:target}),directory,'',true);
       case 'rename': return renameEntry(entry);
+      case 'batch-rename': return batchRename();
+      case 'select-name': return selectVisibleName(entry);
+      case 'inspect-render-sequence': {
+        const target = assetTarget(entry,current);
+        if (target && onInspectRenderSequence)
+          return performFileAction(() => onInspectRenderSequence(target),target.path);
+        break;
+      }
+      case 'compare-exr-channels':
+        if (entry && !entry.isDirectory && /\.exr$/i.test(entry.name) && onCompareExrChannels)
+          return performFileAction(target => onCompareExrChannels({path:target}),path);
+        break;
       case 'trash':
         return fileAction && performFileAction(target => fileAction({action,path:target}),path,'','remove');
       case 'properties':
@@ -2346,7 +2825,9 @@ export function initLocalExplorer({
     const tools = [];
     if (entry && tab.selection.size > 1) {
       if (directory && clipboard) tools.push(row('cut','剪切','Ctrl+X'),row('copy','复制','Ctrl+C'));
-      tools.push(row('copy-path','复制路径'));
+      tools.push(row('copy-path','复制路径'),copyPathFormats(row));
+      if (directory && fileAction) tools.push(row('batch-rename','批量重命名…','F2'));
+      if (directory && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
       if (directory && onAddToCollection && [...tab.selection.values()].some(item => !item.isDirectory))
         tools.push(separator,row('add-to-collection','将所选文件加入合集…'));
       return tools;
@@ -2354,6 +2835,7 @@ export function initLocalExplorer({
     if (entry) {
       tools.push(row('open','打开','Enter',!entry.isDirectory && !open));
       if (entry.isDirectory) tools.push(row('open-tab','在新标签页打开',undefined,tabs.length >= tabLimit));
+      tools.push(row('select-name',entry.isDirectory ? '选择文件夹名称' : '选择文件名'));
       if (path) tools.push(separator);
     } else {
       if (directory && fileAction) tools.push(row('new-folder','新建文件夹','Ctrl+Shift+N'));
@@ -2361,16 +2843,21 @@ export function initLocalExplorer({
       if (tools.length) tools.push(separator);
       const view = driveView ? tab.driveView : tab.view;
       const order = orderFor(tab,current.directory);
-      tools.push(row('view-details','详细信息',undefined,false,view === 'details'),
-        row('view-grid','图标',undefined,false,view === 'grid'));
+      tools.push({id:'menu-view',label:'查看',children:[
+        row('view-details','详细信息',undefined,false,view === 'details'),
+        row('view-grid','图标',undefined,false,view === 'grid'),
+      ]});
       if (directory) {
-        tools.push(separator,
+        tools.push({id:'menu-sort',label:'排序方式',children:[
           ...[['name','名称'],['date','修改日期'],['created','创建日期'],['type','类型'],['size','大小']]
             .map(([sort,label]) => row('sort-' + sort,'按' + label + '排序',undefined,false,order.sortBy === sort)),
+          separator,
           row('sort-asc','升序',undefined,false,!order.descending),
           row('sort-desc','降序',undefined,false,order.descending),
+        ]},{id:'menu-group',label:'分组依据',children:[
           row('group-date','按修改日期分组',undefined,false,order.groupBy === 'date'),
-          row('group-none','取消分组',undefined,false,order.groupBy === 'none'));
+          row('group-none','取消分组',undefined,false,order.groupBy === 'none'),
+        ]});
       }
       tools.push(row('refresh','刷新','F5'));
       if (directory && tbody.querySelector('[data-entry-index]:not([hidden])'))
@@ -2384,6 +2871,11 @@ export function initLocalExplorer({
     if ((entry?.isDirectory || !entry && directory) && path) {
       tools.push(row('pin',pinnedInSidebar ? '已固定在侧栏' : pinned ? '取消固定' : '固定到常用位置',undefined,
         pinnedInSidebar || (!pinned && pins.length >= pinLimit)));
+      if (onCreateFolderShortcut) tools.push(row('create-folder-shortcut','创建 Nexus 桌面入口'));
+      if (onInspectCleanup && directory) tools.push(row('inspect-cleanup','标记可清理的中间产物…'));
+      if (projectFilters && directory) tools.push(row('configure-project-filter','为此文件夹设置项目筛选…'));
+      const shot = onOpenShotBoard && directory && explorerShotCode(path);
+      if (shot) tools.push(row('open-shot-board','跳到 ' + shot + ' 的白板书签…'));
     }
     if (path) {
       if (assetTarget(entry,current)) {
@@ -2393,10 +2885,15 @@ export function initLocalExplorer({
         const asset = file ? assetDetails.get(path) : null;
         if (asset && onToggleFavorite) tools.push(row('favorite-asset',asset.favorite ? '移出资产收藏' : '添加到资产收藏',undefined,favoriteRequests.has(asset.id)));
         if (file && onAddToCollection) tools.push(row('add-to-collection','加入合集…'));
+        if (entry && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
         if (file && onProjectDependencies && /\.gltf$/i.test(path)) tools.push(row('project-dependencies','检查与替换 glTF 依赖…'));
+        if (onInspectRenderSequence && (!file || /\d+\.(?:exr|png|jpe?g|tiff?|webp|bmp|hdr)$/i.test(entry.name)))
+          tools.push(row('inspect-render-sequence','检查渲染序列…'));
+        if (file && onCompareExrChannels && /\.exr$/i.test(entry.name))
+          tools.push(row('compare-exr-channels','对比 OpenEXR 通道…'));
         if (onBrowseAssets || onAddToAssets || asset && onToggleFavorite || file && onAddToCollection) tools.push(separator);
       }
-      tools.push(row('copy-path','复制路径'));
+      tools.push(row('copy-path','复制路径'),copyPathFormats(row));
       if (reveal) tools.push(row('reveal','在资源管理器中显示'));
       if (entry && directory && fileAction) {
         tools.push(row('rename','重命名','F2'),row('trash','移到回收站','Delete'));
@@ -2404,6 +2901,11 @@ export function initLocalExplorer({
       if (fileAction) tools.push(row('properties','属性','Alt+Enter'));
     }
     return tools;
+  }
+
+  function copyPathFormats(row) {
+    return {id:'copy-path-formats',label:'复制路径为',children:
+      explorerPathFormats.map(([format,label]) => row('copy-path:' + format,label))};
   }
 
   async function showContextMenu(entry,position = {}) {
@@ -2499,6 +3001,7 @@ export function initLocalExplorer({
       '<button type="submit" class="button primary" value="rename">保存</button></div></form>';
     const input = dialog.querySelector('input');
     input.value = pin.name;
+    validateNameInput(input,false);
     const key = pathKey(pin.path);
     const host = pinHostFor(rail);
     dialog.addEventListener('close',() => {
@@ -2576,7 +3079,7 @@ export function initLocalExplorer({
       const action = await contextMenu({x:position?.left,y:position?.bottom,items});
       if (item !== tab || history !== tab.history || snapshot !== tab.snapshot || index !== tab.index || !isActive()) return;
       if (action === 'copy-quoted-folder' && path) {
-        void performFileAction(copy,'"' + path.replaceAll('"','\\"') + '"','已复制带引号的路径。');
+        void performFileAction(copy,formatExplorerPaths([path],'windows'),'已复制带引号的路径。');
       } else if (action?.startsWith('history:')) {
         const target = Number(action.slice('history:'.length));
         if (Number.isInteger(target) && target !== index && target in history)
@@ -2603,6 +3106,56 @@ export function initLocalExplorer({
     'previous-page': () => navigate(tabPath(tab),{index:tab.index,offset:tab.snapshot.previousOffset}),
     'next-page': () => navigate(tabPath(tab),{index:tab.index,offset:tab.snapshot.nextOffset}),
   };
+  const canChangeView = () => Boolean(tab.snapshot && !tab.request && !tab.fileAction);
+  const commandSearch = initExplorerCommandSearch(owner.getElementById('explorer-command-search'),{
+    isActive,
+    onError:failure => report(tab,String(failure?.message || failure),true),
+    commands:[
+      ...[
+        ['back','后退',['back','返回','上一位置']],
+        ['forward','前进',['forward','下一位置']],
+        ['up','返回上一级',['up','parent','向上','上级目录']],
+        ['refresh','刷新当前位置',['refresh','reload','重读','f5']],
+        ['drives','打开此电脑',['computer','drives','this pc','盘符']],
+        ['history','浏览历史',['history','访问历史','路径历史']],
+        ['copy','复制路径',['copy path','复制地址','路径复制']],
+      ].map(([id,label,aliases]) => ({id,label,aliases,available:() => !buttons.get(id)?.disabled,run:actions[id]})),
+      {id:'address',label:'定位地址栏',aliases:['address','addr','location','path','跳路径'],
+        available:() => !address.disabled,run:focusAddress},
+      {id:'search',label:'搜索当前位置',aliases:['find','search','搜文件','目录搜索'],
+        available:() => !search.disabled,run:() => search.focus()},
+      {id:'new-tab',label:'新建文件夹标签页',aliases:['new tab','新标签'],
+        available:() => !addTabButton.disabled,run:() => addTab()},
+      {id:'batch-tabs',label:'从文本批量打开文件夹',aliases:['batch tabs','多目录','批量标签'],
+        available:() => Boolean(checkFolderPaths),run:openBatchPaths},
+      {id:'duplicate-tab',label:'复制当前标签页',aliases:['duplicate tab','duplicate','复制标签'],
+        available:canDuplicateActive,run:duplicateActive},
+      {id:'restore-tab',label:'重新打开已关闭的标签页',aliases:['reopen tab','undo close','恢复标签','重开标签'],
+        available:hasClosedTabs,run:restoreClosedTab},
+      {id:'new-folder',label:'新建文件夹',aliases:['new folder','mkdir','建目录','新建目录'],
+        available:() => Boolean(fileAction && canChangeView() && getCurrentDirectory()),
+        run:() => applyAction('new-folder',null,tab.snapshot)},
+      ...[
+        ['details','详细信息视图',['details','明细','详情']],
+        ['grid','图标视图',['icons','grid','网格','缩略图']],
+        ['list','列表视图',['list','列表']],
+      ].map(([view,label,aliases]) => ({id:'view-' + view,label,aliases,available:canChangeView,run:() => setView(view)})),
+    ],
+  });
+  panel.querySelector('[data-explorer-command-search]')?.addEventListener('click',commandSearch.show);
+  function updateShortcutLabels() {
+    const configured = normalizeExplorerShortcuts(prefs.shortcutBindings);
+    for (const [name,keys] of Object.entries(configured)) {
+      const node = name === 'address' ? address : name === 'search' ? search : buttons.get(name);
+      if (!node) continue;
+      const visible = keys.filter(Boolean);
+      if (visible.length) node.setAttribute('aria-keyshortcuts',visible.map(key => key.replace(/^Ctrl\+/,'Control+')).join(' '));
+      else node.removeAttribute('aria-keyshortcuts');
+      if (buttons.get(name) === node)
+        node.title = node.getAttribute('aria-label') + (visible.length ? '（' + visible.join(' / ') + '）' : '');
+    }
+  }
+  updateShortcutLabels();
   for (const [name,button] of buttons) {
     if (actions[name]) button.addEventListener('click',actions[name]);
   }
@@ -2662,9 +3215,15 @@ export function initLocalExplorer({
 
   form.addEventListener('submit',event => {
     event.preventDefault();
-    const path = cleanAddressText(address.value);
+    addressCompletion.clear();
+    const item = tab;
+    const input = address.value;
+    const path = cleanAddressText(input);
     if (path === null) { report(tab,'地址栏一次接收一个完整路径。',true); return; }
-    void navigate(path === '此电脑' ? '' : path === '网络' ? networkLocation : path,{query:'',focusList:true,clearCatalog:true});
+    void navigate(path === '此电脑' ? '' : path === '网络' ? networkLocation : path,{query:'',focusList:true,clearCatalog:true})
+      .then(opened => {
+        if (opened && tab === item && address.value === input) address.value = addressText(tabPath(item));
+      });
   });
   address.addEventListener('paste',event => {
     const text = event.clipboardData?.getData('text/plain');
@@ -2677,6 +3236,22 @@ export function initLocalExplorer({
     const end = address.selectionEnd ?? start;
     address.setRangeText(path.slice(0,Math.max(0,address.maxLength - (address.value.length - end + start))),start,end,'end');
     address.dispatchEvent(new Event('input',{bubbles:true}));
+  });
+  address.addEventListener('keydown',event => {
+    if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
+    event.preventDefault();
+    event.stopPropagation();
+    addressCompletion.clear();
+    address.value = addressText(tabPath(tab));
+    address.blur();
+    locationParts.at(-1)?.location.focus({preventScroll:true});
+  });
+  panel.querySelector('[data-explorer-skip-content]')?.addEventListener('click',event => {
+    event.preventDefault();
+    focusContent();
+  });
+  recoveryButton?.addEventListener('click',() => {
+    if (tab.recovery?.parent && !tab.request && !tab.fileAction) void navigate(tab.recovery.parent,{focusList:true,clearCatalog:true});
   });
   function submitSearch(query,scopeChanged = false) {
     clearTimeout(searchTimer);
@@ -2696,17 +3271,25 @@ export function initLocalExplorer({
     tab.searchScope = searchScope.value;
     submitSearch(query,true);
   });
-  search.addEventListener('input',event => {
+  let composingSearch = false;
+  function queueSearch() {
     clearTimeout(searchTimer);
-    if (event.isComposing) return;
     const current = tab;
     const query = search.value.trim();
     searchTimer = setTimeout(() => {
       if (tab === current) submitSearch(query);
     },180);
+  }
+  search.addEventListener('compositionstart',() => {
+    composingSearch = true;
+    clearTimeout(searchTimer);
+  });
+  search.addEventListener('compositionend',() => { composingSearch = false; queueSearch(); });
+  search.addEventListener('input',event => {
+    if (!event.isComposing && !composingSearch) queueSearch();
   });
   search.addEventListener('keydown',event => {
-    if (event.isComposing || event.key !== 'Enter') return;
+    if (event.isComposing || composingSearch || event.keyCode === 229 || event.key !== 'Enter') return;
     event.preventDefault();
     submitSearch(search.value.trim());
     catalogSearch.retry();
@@ -2767,12 +3350,16 @@ export function initLocalExplorer({
     const y = Math.min(area.bottom,Math.max(area.top,gesture.y));
     const rectangle = {left:Math.min(x,anchorX),top:Math.min(y,anchorY),right:Math.max(x,anchorX),bottom:Math.max(y,anchorY)};
     const selected = gesture.mode === 'replace' ? new Map() : new Map(gesture.before);
+    let files = 0;
+    let folders = 0;
     for (const item of entryHost().querySelectorAll('[data-entry-index]:not([hidden])')) {
       const bounds = item.getBoundingClientRect();
       if (!bounds.width || !bounds.height || rectangle.left >= bounds.right || rectangle.right <= bounds.left ||
           rectangle.top >= bounds.bottom || rectangle.bottom <= bounds.top) continue;
       const entry = gesture.snapshot.entries[Number(item.dataset.entryIndex)];
       if (!entry) continue;
+      if (entry.isDirectory) folders++;
+      else files++;
       const key = pathKey(entry.path);
       if (gesture.mode === 'toggle' && gesture.before.has(key)) selected.delete(key);
       else selected.set(key,entry);
@@ -2783,6 +3370,11 @@ export function initLocalExplorer({
     marquee.style.top = top + 'px';
     marquee.style.width = Math.max(0,Math.min(area.right,rectangle.right) - left) + 'px';
     marquee.style.height = Math.max(0,Math.min(area.bottom,rectangle.bottom) - top) + 'px';
+    const summary = displayNumber.format(files) + ' 个文件 · ' + displayNumber.format(folders) + ' 个文件夹';
+    if (marqueeCount.textContent !== summary) marqueeCount.textContent = summary;
+    marqueeCount.hidden = false;
+    marqueeCount.style.left = Math.max(area.left + 4,Math.min(x + 12,area.right - marqueeCount.offsetWidth - 4)) + 'px';
+    marqueeCount.style.top = Math.max(area.top + 4,Math.min(y + 15,area.bottom - marqueeCount.offsetHeight - 4)) + 'px';
     if (selected.size !== tab.selection.size || [...selected.keys()].some(key => !tab.selection.has(key))) {
       tab.selection = selected;
       tab.selected = selected.get(pathKey(gesture.lead?.path)) || selected.values().next().value || null;
@@ -2817,6 +3409,9 @@ export function initLocalExplorer({
     if (!gesture.active) return;
     suppressMarqueeClick = true;
     marquee.hidden = true;
+    marqueeCount.hidden = true;
+    count.setAttribute('aria-live','polite');
+    if (!restore) marqueeAnnouncement.textContent = '已选 ' + displayNumber.format(tab.selection.size) + ' 个项目';
     scroller.removeAttribute('data-explorer-marquee-selecting');
     if (scroller.hasPointerCapture(gesture.pointer)) scroller.releasePointerCapture(gesture.pointer);
     if (restore && tab === gesture.item && tab.snapshot === gesture.snapshot) {
@@ -2851,6 +3446,8 @@ export function initLocalExplorer({
       gesture.active = true;
       tab.selectionRevision++;
       scroller.setAttribute('data-explorer-marquee-selecting','');
+      count.setAttribute('aria-live','off');
+      marqueeAnnouncement.textContent = '';
       marquee.hidden = false;
       scroller.focus({preventScroll:true});
       try { scroller.setPointerCapture(gesture.pointer); } catch {}
@@ -2892,10 +3489,87 @@ export function initLocalExplorer({
     return zone && path && !isDriveView(tab.snapshot) ? {path,label:nameForPath(path),element:zone} : null;
   }
 
+  function useAlternateMenu(event) {
+    return Boolean(prefs.altClickMenu && contextMenu && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
+      scroller.contains(event.target) && !catalogOnly() && !catalogPane?.contains(event.target));
+  }
+
   function getSidebarPinTarget(hit) {
     if (!isActive() || sidebar?.hidden || !hit) return null;
     const target = hit.closest('.local-explorer-sidebar-personal');
     return placesHost.contains(target) ? target : null;
+  }
+
+  function getFolderTabsDropTarget(hit) {
+    if (!isActive() || !hit || !navigation.contains(hit) || hit.closest('[data-explorer-tab-id]')) return null;
+    return hit.closest('[data-window-drag], #workspace-new-tab-controls, [data-explorer-add-tab]') ||
+      (hit === tabsHost ? tabsHost : null);
+  }
+
+  async function classifyDroppedFolders(paths) {
+    if (!entryDetails) return [];
+    const candidates = [...new Set(paths.filter(path => typeof path === 'string' && path))];
+    const folders = [];
+    for (let offset = 0; offset < candidates.length; offset += 50) {
+      if (!isActive()) return [];
+      const batch = candidates.slice(offset,offset + 50);
+      const details = await entryDetails({paths:batch,columns:['isDirectory']});
+      const verified = new Set(details.filter(result => result?.values?.isDirectory === 'yes').map(result => result.path));
+      folders.push(...batch.filter(path => verified.has(path)).map(path => ({path,isDirectory:true})));
+    }
+    return folders;
+  }
+
+  function openDroppedFolderTabs(entries) {
+    if (!isActive()) return {opened:0,remaining:0};
+    const seen = new Set(tabs.map(item => treePathKey(tabPath(item))));
+    const opened = [];
+    let remaining = 0;
+    for (const {path,isDirectory} of entries) {
+      const key = treePathKey(path);
+      if (!isDirectory || !key || seen.has(key)) continue;
+      seen.add(key);
+      if (tabs.length >= tabLimit) { remaining++; continue; }
+      const item = createTab();
+      item.initialPath = path;
+      item.sessionPath = path;
+      tabs.push(item);
+      opened.push(item);
+    }
+    if (opened.length) void activateTab(opened[0],true);
+    return {opened:opened.length,remaining};
+  }
+
+  function openBatchPaths() {
+    if (!checkFolderPaths) return false;
+    return showExplorerBatchTabs({
+      panel,active:isActive,probe:checkFolderPaths,key:treePathKey,
+      tabs:() => ({capacity:tabLimit - tabs.length,paths:new Set(tabs.map(item => treePathKey(tabPath(item))))}),
+      open:paths => openDroppedFolderTabs(paths.map(path => ({path,isDirectory:true}))),
+    });
+  }
+
+  function expandDropFolder(hit) {
+    const row = hit?.closest('.local-explorer-tree-row');
+    if (!row || !sidebarSystem.contains(row)) return false;
+    const toggle = row.querySelector('[data-tree-control="toggle"]');
+    if (!toggle || toggle.disabled || toggle.getAttribute('aria-expanded') === 'true') return false;
+    temporaryTreeBranches.add(toggle.dataset.treeKey);
+    renderSystemTree();
+    return true;
+  }
+
+  function clearDropFolders() {
+    if (!temporaryTreeBranches.size) return;
+    temporaryTreeBranches.clear();
+    if (isActive()) renderSystemTree();
+  }
+
+  function getVolumeLabel(path) {
+    const segments = pathLocations(path);
+    const unc = treePathKey(path).startsWith('\\\\');
+    const rootPath = segments[unc ? 2 : 1]?.path;
+    return rootPath ? nameForPath(rootPath) : '';
   }
 
   function getDragSource(hit) {
@@ -2904,7 +3578,7 @@ export function initLocalExplorer({
     const entry = clickedEntry(hit);
     if (!entry) return null;
     const entries = (tab.selection.has(pathKey(entry.path)) ? [...tab.selection.values()] : [entry])
-      .map(({path,name,isDirectory}) => ({path,name,isDirectory}));
+      .map(({path,name,isDirectory,size}) => ({path,name,isDirectory,size}));
     return {path:entry.path,label:entry.name,element:hit.closest('[data-entry-index]'),isDirectory:entry.isDirectory,
       entries,paths:entries.map(item => item.path)};
   }
@@ -2930,6 +3604,12 @@ export function initLocalExplorer({
       return;
     }
     const entry = clickedEntry(event.target);
+    if (useAlternateMenu(event)) {
+      event.preventDefault();
+      if (entry) itemButton(event.target.closest('[data-entry-index]'))?.focus({preventScroll:true});
+      void showContextMenu(entry,{x:event.clientX,y:event.clientY});
+      return;
+    }
     const toggle = event.ctrlKey || event.metaKey;
     selectEntry(entry,{toggle,range:event.shiftKey});
     if (entry && !toggle && !event.shiftKey &&
@@ -3010,8 +3690,20 @@ export function initLocalExplorer({
       finishMarquee(true);
       return;
     }
-    if (!isActive() || event.defaultPrevented || event.isComposing || menuOpen || owner.querySelector('dialog[open]') ||
-        event.target.closest?.('.nexus-asset-tabs, #workspace-tab-add')) return;
+    if (!isActive() || event.defaultPrevented || event.isComposing || menuOpen || owner.querySelector('dialog[open]')) return;
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === 'p') {
+      if (commandSearch.show()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (!event.altKey && !event.ctrlKey && !event.metaKey && ['F6','F8'].includes(event.key) && cycleFocus(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.target.closest?.('.nexus-asset-tabs, #workspace-tab-add')) return;
     const key = event.key.toLowerCase();
     const modified = event.ctrlKey || event.metaKey;
     const editing = event.target.closest?.('input,textarea,select,[contenteditable="true"]');
@@ -3021,12 +3713,18 @@ export function initLocalExplorer({
     const multiple = tab.selection.size > 1;
     const physical = current && !isDriveView(current) && current.directory;
     const assetSearchResult = catalogOnly() || catalogPane?.contains(event.target);
-    if (!assetSearchResult && !editing && !modified && !event.altKey && !event.shiftKey && (key === ' ' || key === 'spacebar') &&
-        (focused || event.target === scroller) && !event.target.closest?.('[data-explorer-row-asset]')) {
+    const space = key === ' ' || key === 'spacebar';
+    if (!assetSearchResult && !editing && !event.altKey && space && (focused || event.target === scroller) &&
+        !event.target.closest?.('[data-explorer-row-asset]')) {
       event.preventDefault();
       event.stopPropagation();
+      if (event.repeat || tab.request || tab.fileAction) return;
+      if (focused && (modified || event.shiftKey || !prefs.quickPreview || tab.selection.size > 1)) {
+        selectEntry(focused,{toggle:modified || !event.shiftKey,range:event.shiftKey});
+        return;
+      }
       const entry = getSelectedEntry();
-      if (prefs.quickPreview && entry && physical && !event.repeat && !tab.request && !tab.fileAction)
+      if (prefs.quickPreview && entry && physical && !modified && !event.shiftKey)
         onQuickPreview?.(entry);
       return;
     }
@@ -3041,15 +3739,16 @@ export function initLocalExplorer({
       else if (!columnLayout?.openHeaderMenu(event.target)) void showContextMenu(selected);
       return;
     }
-    const nav = event.altKey && ({arrowleft:'back',arrowright:'forward',arrowup:'up'})[key];
-    if (nav && tab.snapshot) {
+    const binding = explorerShortcutAction(event,prefs.shortcutBindings);
+    if (binding) {
       event.preventDefault();
       event.stopPropagation();
-      if (!buttons.get(nav)?.disabled) void actions[nav]();
+      if (binding === 'address') focusAddress();
+      else if (binding === 'search') search.focus();
+      else if (!buttons.get(binding)?.disabled) void actions[binding]();
       return;
     }
-    let shortcut = key === 'f5' ? refresh : event.altKey && key === 'd' ? focusAddress :
-      modified && !(event.shiftKey && key === 't') && ({l:focusAddress,f:() => search.focus(),t:addTab,w:() => closeTab(tab)})[key];
+    let shortcut = modified && !(event.shiftKey && key === 't') && ({t:addTab,w:() => closeTab(tab)})[key];
     if (!shortcut && !assetSearchResult && !editing && !event.repeat && current && !tab.request && !tab.fileAction) {
       if (modified && !event.altKey && !event.shiftKey && key === 'a') {
         shortcut = selectAll;
@@ -3057,8 +3756,8 @@ export function initLocalExplorer({
         shortcut = () => applyAction('properties',selected,current);
       } else if (physical && fileAction && modified && event.shiftKey && key === 'n') {
         shortcut = () => applyAction('new-folder',null,current);
-      } else if (physical && fileAction && selected && !multiple && !modified && !event.altKey && (key === 'f2' || key === 'delete')) {
-        shortcut = () => applyAction(key === 'f2' ? 'rename' : 'trash',selected,current);
+      } else if (physical && fileAction && selected && !modified && !event.altKey && (key === 'f2' || key === 'delete' && !multiple)) {
+        shortcut = () => applyAction(key === 'f2' ? (multiple ? 'batch-rename' : 'rename') : 'trash',selected,current);
       } else if (physical && clipboard && modified && !event.shiftKey && ['c','x','v'].includes(key) &&
           (selected || key === 'v')) {
         shortcut = () => applyAction({c:'copy',x:'cut',v:'paste'}[key],key === 'v' ? null : selected,current);
@@ -3082,8 +3781,10 @@ export function initLocalExplorer({
     renderLinks();
   }
 
-  return {refresh,focusAddress,exit,openPath,revealSource,restoreDetachedTab,show,addTab,getTabCount,getCurrentDirectory,getFileActionDirectory,getSelectedPath,getSelectedEntry,getSelectedEntries,applyPreferences,
+  return {refresh,focusAddress,exit,openPath,openShellPath,revealSource,restoreDetachedTab,show,addTab,getTabCount,getCurrentDirectory,getFileActionDirectory,getSelectedPath,getSelectedEntry,getSelectedEntries,applyPreferences,
     getTabIdentity,showTabIdentity,canDuplicateActive,duplicateActive,refreshAssetDetails,
-    findManagedTab,setTabPinned,canCloseOtherTabs,closeOtherTabs,closeManagedTab,restoreClosedTab,hasClosedTabs,
-    getDropTarget,getSidebarPinTarget,getDragSource,refreshAfterTransfer,pinFolders,pinSidebarFolders,clearRecentFolders};
+    findManagedTab,setTabPinned,canCloseOtherTabs,closeOtherTabs,closeManagedTab,restoreClosedTab,hasClosedTabs,openBatchPaths,
+    getDropTarget,getSidebarPinTarget,getFolderTabsDropTarget,classifyDroppedFolders,openDroppedFolderTabs,
+    expandDropFolder,clearDropFolders,getVolumeLabel,getDragSource,useAlternateMenu,
+    refreshAfterTransfer,pinFolders,pinSidebarFolders,clearRecentFolders};
 }

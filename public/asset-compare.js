@@ -1,9 +1,11 @@
 import {MeshPreview} from './preview.js';
+import {initAssetVideoCompare} from './asset-video-compare.js';
+import {initAssetImageCompare} from './asset-image-compare.js';
 
 const minimum = 2;
 const maximum = 4;
 
-export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAsset}) {
+export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAsset, videoSource, originalImage}) {
   const dialog = document.createElement('dialog');
   dialog.id = 'asset-compare-dialog';
   dialog.className = 'modal asset-compare';
@@ -24,6 +26,9 @@ export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAs
   document.body.append(dialog);
 
   const grid = dialog.querySelector('.asset-compare-grid');
+  const heading = dialog.querySelector('#asset-compare-title');
+  const videoCompare = videoSource ? initAssetVideoCompare(dialog,videoSource) : null;
+  const imageCompare = initAssetImageCompare({dialog,grid,readOriginal:originalImage});
   const controls = dialog.querySelector('.asset-compare-controls');
   const link = dialog.querySelector('[data-link]');
   const wire = dialog.querySelector('[data-wire]');
@@ -32,7 +37,7 @@ export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAs
   let wireframe = false;
   let activeMesh = null;
 
-  const slots = Array.from({length: maximum}, () => {
+  const slots = Array.from({length: maximum}, (_,order) => {
     const panel = document.createElement('article');
     panel.className = 'asset-compare-panel';
     panel.innerHTML = `
@@ -48,6 +53,7 @@ export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAs
       <p class="asset-compare-path" hidden></p>`;
     grid.append(panel);
     return {
+      order,
       panel,
       name: panel.querySelector('h3'),
       caption: panel.querySelector('.asset-compare-heading p'),
@@ -174,6 +180,7 @@ export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAs
         if (!current()) return;
         slot.image.hidden = false;
         slot.fallback.hidden = true;
+        if (asset.kind === 'texture') imageCompare.image(slot,asset);
       };
       slot.image.onerror = () => {
         if (current()) slot.status.textContent = '预览图无法显示';
@@ -191,10 +198,20 @@ export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAs
     activeMesh = null;
     linked = true;
     wireframe = false;
+    imageCompare.reset(items.filter(asset => asset.kind === 'texture').length === items.length ? items.length : 0);
     slots.forEach(clearSlot);
+    videoCompare?.close();
     updateControls();
     dialog.dataset.count = String(items.length);
+    const compareVideos = videoCompare && items.length === 2 && items.every(asset => asset.kind === 'video');
+    grid.hidden = Boolean(compareVideos);
+    heading.textContent = compareVideos ? '双视频同步对照' : '资产对比';
+    dialog.toggleAttribute('data-video-compare',Boolean(compareVideos));
     if (!dialog.open) dialog.showModal();
+    if (compareVideos) {
+      void videoCompare.open(items);
+      return true;
+    }
     items.forEach((asset, index) => {
       const slot = slots[index];
       slot.panel.hidden = false;
@@ -232,6 +249,8 @@ export function initAssetCompare({readPreview, meshCapable, loadMesh, describeAs
     if (dialog.open) return;
     version++;
     activeMesh = null;
+    videoCompare?.close();
+    imageCompare.reset();
     slots.forEach(clearSlot);
   });
   return {show};

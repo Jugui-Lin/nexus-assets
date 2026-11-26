@@ -6,6 +6,33 @@ function volume(path) {
   return /^([a-z]:|\\\\[^\\]+\\[^\\]+)(?:\\|$)/.exec(pathKey(path))?.[1];
 }
 
+const dragNumber = new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1});
+
+function sizeText(bytes) {
+  const units = ['B','KB','MB','GB','TB'];
+  let index = 0;
+  while (bytes >= 1024 && index < units.length - 1) { bytes /= 1024; index++; }
+  return dragNumber.format(bytes) + ' ' + units[index];
+}
+
+function dragSummary(count,entries) {
+  if (count < 2) return '';
+  if (!entries?.length) return count + ' 个项目';
+  let bytes = 0;
+  let files = 0;
+  let folders = 0;
+  let incomplete = false;
+  for (const entry of entries) {
+    if (entry.isDirectory) { folders++; continue; }
+    files++;
+    if (Number.isFinite(entry.size)) bytes += entry.size;
+    else incomplete = true;
+  }
+  const counts = [files && files + ' 个文件',folders && folders + ' 个文件夹'].filter(Boolean).join(' · ');
+  const size = files && !incomplete ? sizeText(bytes) + (folders ? '（文件）' : '') : '';
+  return [counts,size].filter(Boolean).join(' · ');
+}
+
 export function initExplorerFileDrop({root, explorer, transfer, report, assetDragSource, dragOut, waitForExit}) {
   const hint = root.querySelector('[data-explorer-drop-hint]');
   const pinBar = root.querySelector('.local-explorer-pin-bar');
@@ -19,6 +46,9 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
   let gesture;
   let dragged;
   let nativePaths = [];
+  let draggedSummary = '';
+  let lastPointer;
+  let expandFolders = false;
   let highlighted;
   let busy = false;
   let outgoing = false;
@@ -49,12 +79,19 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
     root.removeAttribute('data-file-dragging');
     nativePaths = [];
     dragged = null;
+    draggedSummary = '';
+    lastPointer = null;
+    expandFolders = false;
+    explorer.clearDropFolders?.();
     if (pointer != null && root.hasPointerCapture(pointer)) root.releasePointerCapture(pointer);
   }
 
   function describe(hit, paths, modifiers) {
     if (root.hidden || busy || !hit) return null;
     const entries = dragged?.entries;
+    const tabTarget = explorer.getFolderTabsDropTarget?.(hit);
+    if (tabTarget && paths.length && (!dragged || entries?.some(entry => entry.isDirectory)))
+      return {element:tabTarget,openTabs:true,folders:entries?.filter(entry => entry.isDirectory)};
     if (entries?.length && entries.every(entry => entry.isDirectory)) {
       if (pinBar.contains(hit) && !hit.closest('[data-explorer-drop-path]')) {
         return {element:pinBar,pins:entries};
@@ -102,8 +139,12 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
       highlighted.setAttribute(topPin ? 'data-explorer-pin-append' : 'data-explorer-drop-active','');
     }
     if (topPin) positionPinMarker();
-    const text = target.pins ? (target.sidebar ? '固定到左侧快速访问' : '固定到快速访问') :
+    const summary = dragged ? draggedSummary : dragSummary(nativePaths.length);
+    const volumeLabel = summary && target.path && explorer.getVolumeLabel?.(target.path);
+    const description = target.openTabs ? '在新标签页打开文件夹' : target.pins ? (target.sidebar ? '固定到左侧快速访问' : '固定到快速访问') :
       (target.effect === 'move' ? '移动到 ' : '复制到 ') + target.label;
+    const text = [description,summary,volumeLabel && volumeLabel !== target.label && '目标卷 ' + volumeLabel]
+      .filter(Boolean).join(' · ');
     if (hint.textContent !== text) hint.textContent = text;
     hint.hidden = false;
     hint.toggleAttribute('data-follow-pointer',Boolean(target.pins && point));
@@ -119,6 +160,17 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
   async function drop(paths,target) {
     clear();
     if (!target || busy) return;
+    if (target.openTabs) {
+      busy = true;
+      try {
+        const folders = target.folders || await explorer.classifyDroppedFolders(paths);
+        const {opened,remaining} = explorer.openDroppedFolderTabs(folders);
+        const description = opened ? '已打开 ' + opened + ' 个文件夹标签' : '没有新增文件夹标签';
+        report(description + (remaining ? '，达到标签上限，另有 ' + remaining + ' 个未打开' : ''));
+      } catch (failure) { report(String(failure?.message || failure),true); }
+      finally { busy = false; }
+      return;
+    }
     if (target.pins) {
       const count = target.sidebar ? explorer.pinSidebarFolders(target.pins) : explorer.pinFolders(target.pins);
       if (count) report(target.sidebar ? '已在左侧固定 ' + count + ' 个文件夹' : '已固定 ' + count + ' 个文件夹');
@@ -164,9 +216,22 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
     }
   }
 
+  function updateDragTarget(point) {
+    if (!dragged) return;
+    const atPoint = () => document.elementFromPoint(point.clientX,point.clientY);
+    let hit = atPoint();
+    if (!hit?.closest('.local-explorer-sidebar')) explorer.clearDropFolders?.();
+    let target = describe(hit,dragged.paths,point);
+    if (expandFolders && target?.path && explorer.expandDropFolder?.(hit)) {
+      hit = atPoint();
+      target = describe(hit,dragged.paths,point);
+    }
+    show(target,point);
+  }
+
   root.addEventListener('pointerdown', event => {
     if (event.button !== 0 || event.pointerType === 'touch' || gesture || busy || outgoing ||
-        document.querySelector('dialog[open]')) return;
+        document.querySelector('dialog[open]') || explorer.useAlternateMenu?.(event)) return;
     const source = assetDragSource?.(event.target) || explorer.getDragSource(event.target);
     if (source?.paths.length) gesture = {source,pointer:event.pointerId,x:event.clientX,y:event.clientY};
   });
@@ -180,6 +245,7 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
     if (!dragged) {
       if (Math.hypot(event.clientX - current.x,event.clientY - current.y) < 6) return;
       dragged = current.source;
+      draggedSummary = dragSummary(dragged.paths.length,dragged.entries);
       root.setPointerCapture(current.pointer);
       root.setAttribute('data-file-dragging','');
       startPreview(dragged);
@@ -193,7 +259,8 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
     }
     ghost.style.left = Math.max(1,clientX - 20) + 'px';
     ghost.style.top = Math.max(1,clientY - 24) + 'px';
-    show(describe(document.elementFromPoint(clientX,clientY),dragged.paths,event),event);
+    lastPointer = event;
+    updateDragTarget(event);
   },{passive:false});
   window.addEventListener('pointerup',event => {
     if (gesture?.pointer !== event.pointerId) return;
@@ -207,7 +274,15 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
   });
   window.addEventListener('blur',() => { if (gesture) clear(); });
   window.addEventListener('keydown',event => {
-    if (event.key === 'Escape' && gesture) clear();
+    if (event.key === 'Escape' && gesture) { clear(); return; }
+    if (event.code !== 'Space' || !dragged || !lastPointer) return;
+    event.preventDefault();
+    event.stopPropagation();
+    expandFolders = true;
+    updateDragTarget(lastPointer);
+  },true);
+  window.addEventListener('keyup',event => {
+    if (event.code === 'Space') expandFolders = false;
   });
   root.addEventListener('click',event => {
     if (!event.detail || performance.now() >= suppressClickUntil) return;
