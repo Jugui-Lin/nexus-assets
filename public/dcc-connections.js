@@ -29,8 +29,9 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
     return detection?.find(item => item.dcc === id);
   }
 
-  function needsExecutable(status) {
-    return Boolean(native && viewportPlacement && !syncFailed && status?.supported && !status.targets?.length);
+  function canChooseExecutable(id, status = hostStatus(id)) {
+    return Boolean(native && viewportPlacement && !syncFailed && status?.supported &&
+      (id === 'c4d' || !status.targets?.length));
   }
 
   function render() {
@@ -53,7 +54,8 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
       const status = hostStatus(id);
       const versions = (status?.targets ?? []).map(target => {
         const details = [target.path,target.activation].filter(Boolean).join(' · ');
-        const state = targetLabels[target.status] || '未知状态';
+        const state = id === 'c4d' && target.status === 'initialize' ? '先运行一次以创建首选项' :
+          targetLabels[target.status] || '未知状态';
         const label = target.restartRequired ? state + '，重启后生效' : state;
         return '<span class="dcc-target" data-state="' + escape(target.status) + '" title="' + escape(details) + '">' +
           escape(target.version) + ' · ' + escape(label) + '</span>';
@@ -70,9 +72,10 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
       const placementHelp = placement ? '<p class="dcc-placement-help">拖入 3D 视口并松手，移动鼠标预览，点击放下，Esc 取消。</p>' : '';
       const settings = native && importSections[id] ? '<button type="button" class="button dcc-import-settings" data-import-settings="' + id +
         '" aria-haspopup="dialog" aria-controls="smart-import-dialog" aria-label="' + escape(host.name) + ' 导入设置">' + icon('sliders') + '导入设置</button>' : '';
-      const chooseExecutable = needsExecutable(status) ?
+      const pickerLabel = id === 'c4d' && status?.targets?.length ? '查找其他版本' : '选择程序';
+      const chooseExecutable = canChooseExecutable(id,status) ?
         '<button type="button" class="button dcc-choose-executable" data-choose-executable="' + id + '"' + (busy ? ' disabled' : '') +
-        ' aria-label="' + escape(host.name) + ' 选择程序">' + icon('folder') + '选择程序…</button>' : '';
+        ' aria-label="' + escape(host.name + ' ' + pickerLabel) + '">' + icon('folder') + pickerLabel + '…</button>' : '';
       const actions = settings || chooseExecutable
         ? '<div class="dcc-card-actions"><div class="dcc-secondary-actions">' + chooseExecutable + settings + '</div></div>' : '';
       return '<article class="dcc-card"><span aria-hidden="true" class="dcc-logo">' + escape(host.logo) +
@@ -120,7 +123,7 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
 
   async function chooseBridgeExecutable(dcc) {
     const host = hosts[dcc];
-    if (!host || pending || !needsExecutable(hostStatus(dcc))) return;
+    if (!host || pending || !canChooseExecutable(dcc)) return;
     await run(async () => {
       try {
         const result = await api('choose_bridge_executable',{dcc});

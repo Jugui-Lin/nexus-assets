@@ -475,6 +475,7 @@ impl Catalog {
         &self,
         library_id: &str,
         folder: &str,
+        expected_path: Option<&Path>,
         progress: F,
     ) -> Result<Value, String> {
         use std::path::Component;
@@ -497,30 +498,36 @@ impl Catalog {
         if !root.is_dir() {
             return Err("资产库路径已不可用".into());
         }
-        if folder.is_empty() {
-            return self.scan_library_branch(library_id, &root, &root, None, progress);
-        }
-
-        let relative = Path::new(folder);
-        if !relative.components().all(|part| {
-            matches!(part, Component::Normal(name) if !name.to_string_lossy().starts_with('.'))
-        }) {
-            return Err("文件夹路径无效".into());
-        }
-        let requested = root.join(relative);
-        let target =
-            fs::canonicalize(&requested).map_err(|error| format!("无法访问所选文件夹：{error}"))?;
-        let branch = relative_folder(&root, &target).ok_or("所选文件夹不在此资产库中")?;
-        let expected = relative_folder(&root, &requested).ok_or("文件夹路径无效")?;
-        let same_folder = if cfg!(windows) {
-            branch.to_lowercase() == expected.to_lowercase()
+        let (target, branch) = if folder.is_empty() {
+            (root.clone(), None)
         } else {
-            branch == expected
+            let relative = Path::new(folder);
+            if !relative.components().all(|part| {
+                matches!(part, Component::Normal(name) if !name.to_string_lossy().starts_with('.'))
+            }) {
+                return Err("文件夹路径无效".into());
+            }
+            let requested = root.join(relative);
+            let target = fs::canonicalize(&requested)
+                .map_err(|error| format!("无法访问所选文件夹：{error}"))?;
+            let branch = relative_folder(&root, &target).ok_or("所选文件夹不在此资产库中")?;
+            let expected = relative_folder(&root, &requested).ok_or("文件夹路径无效")?;
+            let same_folder = if cfg!(windows) {
+                branch.to_lowercase() == expected.to_lowercase()
+            } else {
+                branch == expected
+            };
+            if !target.is_dir() || !same_folder {
+                return Err("无法扫描所选文件夹".into());
+            }
+            (target, Some(expected))
         };
-        if !target.is_dir() || !same_folder {
-            return Err("无法扫描所选文件夹".into());
+        if let Some(path) = expected_path {
+            if !path.is_absolute() || fs::canonicalize(path).ok().as_deref() != Some(target.as_path()) {
+                return Err("所选目录与资产库中的位置不一致，请重新定位。".into());
+            }
         }
-        self.scan_library_branch(library_id, &root, &target, Some(&expected), progress)
+        self.scan_library_branch(library_id, &root, &target, branch.as_deref(), progress)
     }
 
     fn scan_library_branch<F: FnMut(usize)>(
@@ -1308,8 +1315,14 @@ mod tests {
         fs::write(root.join("项目_一备份/原文件.obj"), "v 0 0 0\nv 1 1 1").unwrap();
 
         let mut progress = Vec::new();
+        let wrong_source = root.join("项目_一备份");
+        assert!(catalog
+            .scan_registered_folder(id, "项目_一", Some(&wrong_source), |count| progress.push(count))
+            .unwrap_err()
+            .contains("位置不一致"));
+        assert!(progress.is_empty());
         let refreshed = catalog
-            .scan_registered_folder(id, "项目_一", |count| progress.push(count))
+            .scan_registered_folder(id, "项目_一", Some(&root.join("项目_一")), |count| progress.push(count))
             .unwrap();
         assert_eq!(refreshed["found"], 2);
         assert_eq!(refreshed["errors"], json!([]));
@@ -1334,16 +1347,16 @@ mod tests {
         assert_eq!(catalog.asset(&sibling.id).unwrap().size, sibling.size);
         assert_eq!(catalog.libraries().unwrap().len(), 1);
         assert!(catalog
-            .scan_registered_folder(id, "项目_一/../项目_一备份", |_| {})
+            .scan_registered_folder(id, "项目_一/../项目_一备份", None, |_| {})
             .is_err());
         assert!(catalog
-            .scan_registered_folder(id, &clean_path(&root), |_| {})
+            .scan_registered_folder(id, &clean_path(&root), None, |_| {})
             .is_err());
         assert!(catalog
-            .scan_registered_folder("missing", "", |_| {})
+            .scan_registered_folder("missing", "", None, |_| {})
             .is_err());
 
-        let whole_root = catalog.scan_registered_folder(id, "", |_| {}).unwrap();
+        let whole_root = catalog.scan_registered_folder(id, "", None, |_| {}).unwrap();
         assert_eq!(whole_root["found"], 4);
         assert_eq!(whole_root["library"]["id"], id);
         assert!(whole_root["library"]["folders"]

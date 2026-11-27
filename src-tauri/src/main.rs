@@ -42,6 +42,7 @@ mod folder_browser;
 mod format_help;
 mod folder_deletion;
 mod folder_shell;
+mod indexed_file_move;
 mod library_visibility;
 mod local_explorer;
 mod desktop_shortcut;
@@ -203,14 +204,29 @@ async fn scan_workspace_folder(
     state: tauri::State<'_, AppState>,
     library_id: String,
     folder: String,
+    expected_path: Option<String>,
+    expected_workspace_id: Option<String>,
 ) -> Result<Value, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _workspace = workspaces::lock_io(&state)?;
-        let dir = lock_db(&state)?.dir.clone();
-        Catalog::open(&dir)?.scan_registered_folder(&library_id, &folder, |count| {
-            let _ = app.emit("scan-progress", count);
-        })
+        let dir = {
+            let catalog = lock_db(&state)?;
+            if let Some(expected) = expected_workspace_id.as_deref() {
+                if workspaces::read_id(&catalog)?.as_deref() != Some(expected) {
+                    return Err("个人资产库已切换，请重新定位文件夹。".into());
+                }
+            }
+            catalog.dir.clone()
+        };
+        Catalog::open(&dir)?.scan_registered_folder(
+            &library_id,
+            &folder,
+            expected_path.as_deref().map(Path::new),
+            |count| {
+                let _ = app.emit("scan-progress", count);
+            },
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -253,6 +269,7 @@ async fn pick_folder(purpose: Option<String>) -> Result<Option<String>, String> 
             Some("c4d-cache") => "选择 Cinema 4D 导入缓存位置",
             Some("inventory-root") => "选择清单使用的项目根目录",
             Some("delivery-template") => "选择交付目录的上级文件夹",
+            Some("asset-original-move") => "选择原件的新位置",
             _ => "选择资产文件夹（只建立索引，不移动原文件）",
         };
         rfd::FileDialog::new()
@@ -1132,6 +1149,8 @@ fn main() {
             app.manage(cloud_mounts::Mounts::new(&root));
             app.manage(baidu_cloud_desktop::PersonalLogins::default());
             let catalog = workspaces::open_startup_catalog(&root).map_err(std::io::Error::other)?;
+            #[cfg(windows)]
+            indexed_file_move::recover_on_startup(&catalog, &root);
             let state = AppState {
                 db: Arc::new(Mutex::new(catalog)),
                 root,
@@ -1283,6 +1302,9 @@ fn main() {
             local_explorer::local_explorer_drive_details,
             local_explorer_drop::local_explorer_drop_files,
             local_explorer_drop::local_explorer_file_action,
+            indexed_file_move::move_indexed_local_files,
+            indexed_file_move::indexed_file_move_recovery_status,
+            indexed_file_move::recover_indexed_local_file_moves,
             local_explorer_clipboard::local_explorer_clipboard,
             local_explorer_paste::local_explorer_preview_paste,
             local_explorer_paste::local_explorer_resolve_paste,

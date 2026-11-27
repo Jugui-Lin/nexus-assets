@@ -116,14 +116,14 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
     } else renderer.removeAttribute('aria-describedby');
   }
 
-  function show(ids, sessionId) {
+  function show(ids, sessionId, {validate,exactSources = false} = {}) {
     if (dialog.open || busy) return;
     const target = session(sessionId);
     if (!target || target.dcc !== 'c4d') throw Error('目标 Cinema 4D 已离线');
     const list = ids.map(asset).filter(Boolean);
     const supported = list.filter(item => supports(item, target));
     if (!supported.length) throw Error('所选资产没有可导入 Cinema 4D 的格式');
-    draft = {scope:scope(), sessionId, custom:target.smartImport === true && target.sceneImportOptions === true,
+    draft = {scope:scope(), sessionId, validate, custom:target.smartImport === true && target.sceneImportOptions === true,
       archiveTextures:target.archiveTextures === true, entries:[]};
     for (const row of sources.querySelectorAll('label')) row.remove();
     for (const item of supported) {
@@ -133,7 +133,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
       const select = document.createElement('select');
       select.className = 'text-field';
       select.dataset.sourceAsset = item.id;
-      const alternatives = compatibleMaxSources(item, assets(item.libraryId), isUsable);
+      const alternatives = exactSources ? [] : compatibleMaxSources(item, assets(item.libraryId), isUsable);
       for (const [index, source] of [item, ...alternatives].entries()) {
         const filename = assetLocation(source).filename || source.name;
         select.add(new Option(filename + (index ? ' · 可直接导入' : ' · 原文件'), source.id));
@@ -237,9 +237,10 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
     let submitted = 0;
     try {
       for (const id of selected) {
-        const source = asset(id);
+        let source = asset(id);
         try {
           if (current.scope !== scope()) throw Error('工作空间已切换，请重新拖动资产');
+          if (current.validate) source = current.validate(id,current.sessionId).asset;
           if (!source || !isUsable(source)) throw Error('资产文件不可用，请检查挂载');
           const already = [...tracked.values()].find(job =>
             job.sessionId === current.sessionId && job.assetId === id && pendingStatuses.has(job.status));

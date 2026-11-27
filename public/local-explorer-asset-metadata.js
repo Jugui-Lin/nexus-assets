@@ -25,7 +25,7 @@ function errorMessage(error) {
   return String(error?.message || error).slice(0,240);
 }
 
-export function initExplorerAssetMetadata({host,lookup,save,versions,openVersion,references,openReference}) {
+export function initExplorerAssetMetadata({host,lookup,save,versions,openVersion,saveVersion,references,openReference}) {
   const owner = host.ownerDocument;
   const section = owner.createElement('section');
   section.className = 'file-explorer-asset-metadata';
@@ -61,7 +61,7 @@ export function initExplorerAssetMetadata({host,lookup,save,versions,openVersion
   const query = selector => section.querySelector(selector);
   const form = query('form');
   const disclosures = [
-    versions && initExplorerVersionHistory({before:form,versions,openVersion}),
+    versions && initExplorerVersionHistory({before:form,versions,openVersion,saveVersion}),
     references && initExplorerAssetReferences({before:form,references,openReference}),
   ].filter(Boolean);
   const fieldset = query('fieldset');

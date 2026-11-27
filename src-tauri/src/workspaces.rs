@@ -149,7 +149,7 @@ fn existing_catalog(path: &Path) -> Result<Catalog, String> {
     Ok(catalog)
 }
 
-fn read_id(catalog: &Catalog) -> Result<Option<String>, String> {
+pub(crate) fn read_id(catalog: &Catalog) -> Result<Option<String>, String> {
     let id: Option<String> = catalog
         .conn
         .query_row(

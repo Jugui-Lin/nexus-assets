@@ -2,6 +2,7 @@ import {initWhiteboard, personalBoardReferencesAsset, personalBoardRegions} from
 import {listWhiteboardImageCache, readWhiteboardImageCache, clearSyncedWhiteboardImageCache} from './whiteboard-images.js';
 import {readWhiteboardRegion} from './whiteboard-regions.js';
 import {reviewShotCode} from './whiteboard-review-notes.js';
+import {initTeamWhiteboardAssetReferences} from './team-whiteboard-asset-references.js';
 
 const directoryKey = 'nexus-whiteboard-projects-v1:';
 const fileFolderKey = 'nexus-whiteboard-file-folder-v1:';
@@ -70,6 +71,7 @@ function hasFileFolder(libraries, {libraryId, folder}) {
 export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAssetImage, openLink, locateAsset, openVideoSource,reviewAssignees,copyReviewText,
   searchReplacementImages,loadPresenceAvatar, getFileFolders, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles, copyCachedImages}) {
   const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
+  const assetReferences = initTeamWhiteboardAssetReferences(api);
   panel.innerHTML = `<section class="whiteboard-project-home" aria-labelledby="whiteboard-project-heading">
     <header class="whiteboard-project-bar">
       <div class="whiteboard-project-heading"><h2 id="whiteboard-project-heading">白板项目</h2><p>双击项目打开画布</p></div>
@@ -802,11 +804,16 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
     showProjects,
     openProject,
     async restoreProject(id) {
-      if (!scope?.projects.some(project => project.id === id)) await refreshProjects();
+      const target = scope;
+      if (!target) return false;
+      if (!target.projects.some(project => project.id === id)) await refreshProjects();
+      if (scope !== target) return false;
       if (activeProject !== id) openProject(id,false);
       return activeProject === id;
     },
     captureProject() { return activeProject; },
+    findTeamAssetReferences:assetReferences.find,
+    teamProjectReferencesAsset:assetReferences.projectReferencesAsset,
     findShotRegions,
     async focusShotRegion(match,workspaceKey,stillRequested) {
       const target = scope;
@@ -816,13 +823,21 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
       if (activeProject !== match.projectId) return false;
       return board.focusShotRegion(match.id,match.shot,() => current() && activeProject === match.projectId);
     },
-    async listClipProjects(workspaceKey) {
+    async listClipProjects(workspaceKey,{refresh = false} = {}) {
       const target = scope;
       if (target?.key !== workspaceKey) return [];
-      if (!target.ready) await refreshProjects({includeHidden:true});
+      if (refresh || !target.ready) await refreshProjects({includeHidden:true});
       if (scope !== target) return [];
-      if (!target.ready && target.error) throw Error(target.error);
+      if ((refresh || !target.ready) && target.error) throw Error(target.error);
       return target.projects.map(({id,name}) => ({id,name}));
+    },
+    addIndexedReferences(projectId,workspaceKey,assets,stillRequested) {
+      const target = scope;
+      const current = () => scope === target && target?.key === workspaceKey && stillRequested();
+      if (!current()) return 0;
+      if (!target.projects.some(project => project.id === projectId)) throw Error('选择的白板已不可用');
+      const key = projectId === defaultProject.id ? target.key : JSON.stringify([target.key,projectId]);
+      return board.addIndexedReferences({key,teamId:target.teamId,projectId},assets,current);
     },
     addVideoClip(projectId,clip,stillRequested) {
       if (!visible || activeProject !== projectId || scope?.key !== clip.workspaceKey) return false;

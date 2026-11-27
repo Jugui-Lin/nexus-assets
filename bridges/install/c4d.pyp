@@ -11,6 +11,7 @@ import c4d
 _RUNTIME_PATH = __NEXUS_RUNTIME_PATH__
 _BRIDGE_KEY = "_nexus_bridge_c4d"
 _CONFIG_REFRESH_SECONDS = 2
+_ADVANCED_MIN_C4D_VERSION = 2025000
 
 
 def _load_runtime():
@@ -44,9 +45,10 @@ def _load_smart_import():
 
 
 class _BridgeMessages(c4d.plugins.MessageData):
-    def __init__(self, placement):
+    def __init__(self, placement, advanced):
         super().__init__()
         self.placement = placement
+        self.advanced = advanced
         self.bridge = None
         self.runtime = None
         self.check_at = 0.0
@@ -90,7 +92,7 @@ class _BridgeMessages(c4d.plugins.MessageData):
             config = self.runtime.read_config("c4d")
             if self.placement is not None:
                 config["placement"] = True
-            if not self.smart_load_attempted:
+            if self.advanced and not self.smart_load_attempted:
                 self.smart_load_attempted = True
                 try:
                     self.smart_import = _load_smart_import()
@@ -132,16 +134,19 @@ def _register():
     if (c4d.GeGetVersionType() != c4d.VERSIONTYPE_CINEMA4D
             or c4d.GeGetCinemaInfo(c4d.CINEMAINFO_FORBID_GUI)):
         return None
-    try:
-        placement = _load_placement()
-    except Exception as error:
-        print("Nexus Assets viewport placement:", error)
-        placement = None
+    # Cinema 4D 2023 and 2024 use the basic bridge without the optional import and placement plug-ins.
+    advanced = c4d.GetC4DVersion() >= _ADVANCED_MIN_C4D_VERSION
+    placement = None
+    if advanced:
+        try:
+            placement = _load_placement()
+        except Exception as error:
+            print("Nexus Assets viewport placement:", error)
     # Maxon's test-only ID range for local, non-distributed plug-ins.
     for plugin_id in range(1000010, 1000000, -1):
         if c4d.plugins.FindPlugin(plugin_id, c4d.PLUGINTYPE_ANY) is not None:
             continue
-        messages = _BridgeMessages(placement)
+        messages = _BridgeMessages(placement, advanced)
         if c4d.plugins.RegisterMessagePlugin(
                 id=plugin_id, str="Nexus Assets Bridge", info=0, dat=messages):
             return messages

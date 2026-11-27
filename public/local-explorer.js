@@ -19,6 +19,7 @@ const dateGroupNames = ['今天', '昨天', '本周早些时候', '本月早些�
 const defaultDownloadsOrder = {sortBy:'date',descending:true,groupBy:'date'};
 const historyLimit = 60;
 const tabLimit = 24;
+const sourceSelectionLimit = 250;
 const closedTabLimit = 12;
 const pinLimit = 32;
 const pinKey = 'nexus-file-workspace-pins-v1';
@@ -416,7 +417,8 @@ export function initLocalExplorer({
   root,tabBar,browse,open,reveal,contextMenu,computer,driveDetails,thumbnail,columns,
   folderThumbnail,fileIcon,entryDetails,selectAllEntries,clipboard,pasteConflicts,fileAction,onOpenAssetLibrary,onOpenFiles,treeChildren,
   onBrowseAssets,onAddToAssets,onOpenAssetPane,onOpenAssetDetails,onSelectionChange,onQuickPreview,onDetachTab,onInspectRenderSequence,onCompareExrChannels,
-  lookupAssets,onLoadAssets,onToggleFavorite,onAddToCollection,onAddToBasket,onProjectDependencies,onCreateFolderShortcut,onInspectCleanup,onOpenShotBoard,searchAssets,assetSearchKey,
+  lookupAssets,onLoadAssets,onToggleFavorite,onAddToCollection,onAddToBasket,onSendToC4d,onAddToWhiteboard,
+  canMoveIndexedFiles,onMoveIndexedFiles,onProjectDependencies,onCreateFolderShortcut,onInspectCleanup,onOpenShotBoard,searchAssets,assetSearchKey,
   projectFiltersEnabled = false,
   checkFolderPaths,detachedWindow = false,deferInitialTab = false,preferences,
   copy = text => navigator.clipboard.writeText(text),
@@ -424,10 +426,10 @@ export function initLocalExplorer({
   const panel = root?.querySelector('#local-explorer');
   if (!panel || !browse) {
     return {refresh:() => false,focusAddress:() => false,exit:() => false,openPath:() => false,openShellPath:() => false,
-      revealSource:() => false,show:() => false,
+      revealSource:() => false,revealSources:() => false,show:() => false,
       restoreDetachedTab:() => false,
-      getCurrentDirectory:() => null,getFileActionDirectory:() => null,getSelectedPath:() => null,getSelectedEntry:() => null,
-      getSelectedEntries:() => [],getTabCount:() => 0,applyPreferences:() => {},clearRecentFolders:() => {},refreshAssetDetails:() => {},
+      getCurrentDirectory:() => null,getDirectorySearch:() => '',getFileActionDirectory:() => null,getSelectedPath:() => null,getSelectedEntry:() => null,
+      getSelectedEntries:() => [],getTabCount:() => 0,getTabLocations:() => [],applyPreferences:() => {},clearRecentFolders:() => {},refreshAssetDetails:() => {},
       getTabIdentity:() => null,showTabIdentity:() => false,canDuplicateActive:() => false,duplicateActive:() => false,
       findManagedTab:() => null,setTabPinned:() => false,closeOtherTabs:() => false,canCloseOtherTabs:() => false,
       closeManagedTab:() => false,restoreClosedTab:() => false,hasClosedTabs:() => false,
@@ -554,13 +556,17 @@ export function initLocalExplorer({
   });
   const showThumbnails = gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isActive);
   const tabPath = item => item.history[item.index] ?? item.initialPath ?? '';
+  const tabLocation = item => item.request?.destination ?? item.snapshot?.directory ?? tabPath(item);
   const getTabCount = () => tabs.length;
+  const getTabLocations = () => startupPending && !tab.snapshot && !tab.request && !tabs.length
+    ? startupTabs().paths : tabs.map(tabLocation).filter(Boolean);
   const getTabIdentity = () => tabs.includes(tab) ? tab.identity : null;
   const canDuplicateActive = () => isActive() && Boolean(tab.snapshot) && tabs.includes(tab) && tabs.length < tabLimit;
   const catalogOnly = () => tab.searchScope === 'library' && Boolean(tab.catalogQuery);
   const searchText = () => tab.searchScope === 'folder' ? tab.query : tab.catalogQuery;
   const isDriveView = snapshot => snapshot && (!snapshot.directory || snapshot.directory === networkLocation);
   const getCurrentDirectory = () => !isDriveView(tab.snapshot) && tab.snapshot?.directory || null;
+  const getDirectorySearch = () => getCurrentDirectory() && tab.searchScope !== 'library' ? search.value.trim() : '';
   const getFileActionDirectory = () => isActive() && !catalogOnly() && !tab.request && !tab.fileAction ? getCurrentDirectory() : null;
   const directorySelections = createExplorerDirectorySelections(storage,treePathKey);
   const projectFilters = projectFiltersEnabled && initExplorerProjectFilters({
@@ -1883,7 +1889,7 @@ export function initLocalExplorer({
     }
   }
 
-  async function navigate(destination, {index,offset,force = false,focusList = false,query,restored,clearCatalog = false,
+  async function navigate(destination, {index,offset,force = false,focusList = false,query,restored,locate,clearCatalog = false,
     projectFilterBypass = tab.projectFilterBypass} = {}) {
     finishMarquee(true);
     clearTimeout(searchTimer);
@@ -1901,12 +1907,12 @@ export function initLocalExplorer({
     const previousPath = tabPath(item);
     query ??= destinationKey === pathKey(previousPath) ? item.query : '';
     let projectFilter = activeProjectFilter(destination,projectFilterBypass);
-    const canRemember = path => !restored && !query && offset == null &&
+    const canRemember = path => !restored && !locate && !query && offset == null &&
       treePathKey(path) !== treePathKey(item.snapshot?.directory);
-    let rememberedPath = canRemember(destination) ? directorySelections.get(destination) : undefined;
+    let rememberedPath = locate?.lead || (canRemember(destination) ? directorySelections.get(destination) : undefined);
     force ||= Boolean(staleRevision);
     const {sortBy,descending,groupBy} = orderFor(item,destination);
-    const request = {destination,offset,force,query,staleRevision,sortBy,descending,groupBy,restored,clearCatalog,
+    const request = {destination,offset,force,query,staleRevision,sortBy,descending,groupBy,restored,locate,clearCatalog,
       projectFilter,projectFilterBypass,rememberedPath};
     if (item.request && Object.keys(request).every(key => item.request[key] === request[key])) return;
     if (destinationKey !== pathKey(item.snapshot?.directory)) cancelFrequentVisit();
@@ -1918,11 +1924,13 @@ export function initLocalExplorer({
       if (item.request === request) report(item,'正在读取文件列表…');
     },120);
     updateControls();
+    const selectionRevision = item.selectionRevision;
+    const isCurrent = () => item.request === request && tabs.includes(item) &&
+      (!locate || item === tab && isActive() && item.selectionRevision === selectionRevision);
     try {
       let dateGroups;
       let result;
       let appliedOrder;
-      const isCurrent = () => item.request === request && tabs.includes(item);
       if (!destination || destination === networkLocation) result = await browseDrives(destination,query,force,isCurrent);
       else {
         const listDirectory = ({sortBy,descending,groupBy}) => {
@@ -1931,7 +1939,8 @@ export function initLocalExplorer({
           const order = sortBy !== 'name' || descending || dateGroups ? {sortBy,descending,dateGroups} : undefined;
           return browse({address:destination,...(offset != null && {offset}),...(force && {refresh:true}),
             ...(order && {order}),...(query && {query}),...(prefs.showHidden && {showHidden:true}),
-            ...(projectFilter && {projectFilter}),...(rememberedPath && {rememberedPath})});
+            ...(projectFilter && {projectFilter}),...(rememberedPath && {rememberedPath}),
+            ...(locate && {locatePaths:locate.paths})});
         };
         const requestedOrder = orderFor(item,destination);
         result = await listDirectory(requestedOrder);
@@ -1949,6 +1958,9 @@ export function initLocalExplorer({
       }
       if (!isCurrent()) return false;
       if (!Array.isArray(result?.entries)) throw Error('无法读取这个位置。');
+      const {matchedEntries,...page} = result;
+      if (locate && !Array.isArray(matchedEntries)) throw Error('无法确认所选原件。');
+      if (locate?.directoryMatches && !locate.directoryMatches(result.directory)) throw Error('无法确认原件所在文件夹。');
       if (pathKey(result.directory) !== destinationKey) checkedRevision = 0;
       else if (item.stalePaths.get(destinationKey) === staleRevision) item.stalePaths.delete(destinationKey);
       const previous = item.snapshot;
@@ -1959,13 +1971,27 @@ export function initLocalExplorer({
       if (newDirectory) item.collapsedDateGroups.clear();
       if (newDirectory || clearCatalog) item.catalogQuery = '';
       const newScope = newDirectory || item.query !== query;
-      if (newScope || result.selectedPath) {
+      const preserveSelection = locate?.preserveSelection && !newScope && !filterChanged;
+      if (newScope || result.selectedPath && !preserveSelection) {
         item.selectionRevision++;
         item.selection.clear();
         item.selected = item.selectionAnchor = null;
       }
       const entriesOnPage = new Map(result.entries.map(entry => [pathKey(entry.path),entry]));
-      if (restored) {
+      if (locate && !preserveSelection) {
+        const requested = new Set(locate.paths.map(treePathKey));
+        item.selectionRevision++;
+        item.selection = new Map(matchedEntries.flatMap(entry => {
+          const key = pathKey(entry.path);
+          return !entry.isDirectory && requested.has(treePathKey(entry.path)) ? [[key,entriesOnPage.get(key) || entry]] : [];
+        }));
+        item.selected = item.selection.get(pathKey(result.selectedPath)) || item.selection.values().next().value || null;
+        item.selectionAnchor = item.selected ? pathKey(item.selected.path) : null;
+        if (item.selected) {
+          directorySelections.remember(result.directory,item.selected.path);
+          if (dateGroups) item.collapsedDateGroups.delete(dateGroup(item.selected,dateGroups));
+        }
+      } else if (restored) {
         item.selectionRevision++;
         item.selection = new Map(restored.selectionPaths.flatMap(path => {
           const key = pathKey(path);
@@ -1974,7 +2000,7 @@ export function initLocalExplorer({
         }));
         item.selected = item.selection.get(pathKey(restored.selectedPath)) || item.selection.values().next().value || null;
         item.selectionAnchor = item.selected ? pathKey(item.selected.path) : null;
-      } else if (result.selectedPath) {
+      } else if (result.selectedPath && !preserveSelection) {
         const key = pathKey(result.selectedPath);
         const selected = entriesOnPage.get(key);
         if (selected) {
@@ -1992,7 +2018,7 @@ export function initLocalExplorer({
       }
       const resultRule = projectFilters && projectFilters.resolve(result.directory);
       item.projectFilterBypass = resultRule?.id === projectFilterBypass ? projectFilterBypass : null;
-      item.snapshot = {...result,projectFilter,dateGroups,listingOrderKey:appliedOrder,provisionalOrder:Boolean(appliedOrder && !places)};
+      item.snapshot = {...page,projectFilter,dateGroups,listingOrderKey:appliedOrder,provisionalOrder:Boolean(appliedOrder && !places)};
       committed = true;
       item.query = query;
       if (!result.directory && !query && !places) listedDrives = result.entries;
@@ -2006,12 +2032,16 @@ export function initLocalExplorer({
       if (item === tab) {
         render(previous);
         if (restored) scroller.scrollTop = item.scrollTop;
-        if (focusList && isActive()) (itemButton(entryItem(result.entries.indexOf(item.selected))) ||
-          entryHost().querySelector('button[tabindex="0"]') || scroller).focus({preventScroll:true});
+        if (focusList && isActive()) {
+          const primary = itemButton(entryItem(result.entries.indexOf(item.selected)));
+          if (locate && primary) primary.scrollIntoView({block:'nearest',inline:'nearest'});
+          (primary || entryHost().querySelector('button[tabindex="0"]') || scroller).focus({preventScroll:true});
+        }
       }
       return true;
     } catch (failure) {
-      if (item.request === request) {
+      if (isCurrent()) {
+        locate?.onFailure?.();
         const message = String(failure?.message || failure || '无法读取这个位置。');
         report(item,message,true);
         if (entryDetails && recoveryButton && destinationKey && destinationKey === pathKey(item.snapshot?.directory) &&
@@ -2039,8 +2069,9 @@ export function initLocalExplorer({
     }
   }
 
-  function activateTab(item,focusTab = false,address = tabPath(item)) {
+  function activateTab(item,focusTab = false,address = tabPath(item),navigation) {
     if (item === tab && (item.snapshot || item.request)) {
+      if (navigation && isActive()) return navigate(address,navigation);
       if (isActive() && item.snapshot) {
         updateView();
         loadDriveDetails();
@@ -2057,18 +2088,19 @@ export function initLocalExplorer({
     render();
     beginFrequentVisit();
     if (focusTab) tabsHost.querySelector('[aria-current="page"]')?.focus({preventScroll:true});
+    if (navigation && isActive()) return navigate(address,navigation);
     if (!item.snapshot && !item.request && isActive()) return navigate(address,{focusList:!focusTab});
     refreshStaleTab(item);
   }
 
-  function addTab(path = '',{afterCurrent = false,emptyFallback = false,focusTab = true} = {}) {
+  function addTab(path = '',{afterCurrent = false,emptyFallback = false,focusTab = true,navigation} = {}) {
     if (tabs.length >= tabLimit) return;
     const item = createTab();
     item.initialPath = path;
     item.emptyFallback = emptyFallback;
     if (!path) item.sessionPath = '';
     tabs.splice(afterCurrent ? tabs.indexOf(tab) + 1 : tabs.length,0,item);
-    return activateTab(item,focusTab);
+    return activateTab(item,focusTab,path,navigation);
   }
 
   function copyTabPresentation(source,keepSelection = false) {
@@ -2299,7 +2331,13 @@ export function initLocalExplorer({
   });
   renderShellPending();
 
-  function revealSource(path,{directory,preferredTab} = {}) {
+  function sourceTabFor(location,preferredTab,key) {
+    const matches = tabs.filter(item => key(tabLocation(item)) === location);
+    return matches.find(candidate => candidate.identity === preferredTab) ??
+      (matches.includes(tab) ? tab : matches[0]);
+  }
+
+  function revealSource(path,{directory,preferredTab,keepDirectorySearch = false} = {}) {
     if (!isActive()) return false;
     const key = assetSearchKey || treePathKey;
     const target = key(path);
@@ -2307,9 +2345,7 @@ export function initLocalExplorer({
     if (!target || !location) return false;
     void loadPlaces();
     seedStartupTabs();
-    const matches = tabs.filter(item => key(item.request?.destination ?? item.snapshot?.directory ?? tabPath(item)) === location);
-    const item = matches.find(candidate => candidate.identity === preferredTab) ??
-      (matches.includes(tab) ? tab : matches[0]);
+    const item = sourceTabFor(location,preferredTab,key);
     if (!item) {
       if (!tabs.length || unusedFallback(tab) || tabs.length >= tabLimit) return openPath(path);
       return addTab(path,{afterCurrent:true,focusTab:false});
@@ -2330,7 +2366,57 @@ export function initLocalExplorer({
         return true;
       }
     }
+    if (keepDirectorySearch && item.query && target !== location) {
+      return revealSources([path],{directory,preferredTab:item.identity,lead:path});
+    }
     return openPath(path,{force:stale});
+  }
+
+  async function revealSources(paths,{directory,lead,preferredTab,keepTabs = false,pathIdentity,keepSelection = false} = {}) {
+    const key = pathIdentity || assetSearchKey || treePathKey;
+    const location = key(directory);
+    if (!isActive() || !location) return false;
+    void loadPlaces();
+    seedStartupTabs();
+    const item = sourceTabFor(location,preferredTab,key);
+    if (!item && keepTabs && tabs.length >= tabLimit && !unusedFallback(tab)) return {unavailable:'tab-limit'};
+    const currentDirectory = item?.snapshot?.directory || (pathIdentity && item && tabLocation(item));
+    const destination = key(currentDirectory) === location ? currentDirectory : directory;
+    const windows = /^(?:[a-z]:|[\\/]{2})/i.test(destination);
+    const prefix = windows ? destination.replace(/[\\/]+$/,'') + '\\' : destination.replace(/\/+$/,'') + '/';
+    const originals = new Map();
+    for (const path of paths) {
+      const separator = Math.max(path.lastIndexOf('/'),windows ? path.lastIndexOf('\\') : -1) + 1;
+      if (!separator || key(path.slice(0,separator)) !== location || separator === path.length) continue;
+      originals.set(key(path),prefix + path.slice(separator));
+    }
+    const primary = originals.get(key(lead));
+    if (primary) originals.delete(key(lead));
+    const ordered = [...(primary ? [primary] : []),...originals.values()];
+    const selected = ordered.slice(0,sourceSelectionLimit);
+    let failed = false;
+    const preserveSelection = keepSelection && !paths.length;
+    const offset = preserveSelection && key(item?.snapshot?.directory) === location ? item.snapshot.offset : undefined;
+    const navigation = {offset,locate:{paths:selected,lead:selected[0],preserveSelection,
+      ...(pathIdentity && {directoryMatches:path => key(path) === location}),onFailure:() => { failed = true; }},
+      focusList:!preserveSelection,clearCatalog:item?.searchScope === 'library'};
+    let opening;
+    let created = !tabs.length;
+    if (item) opening = activateTab(item,false,destination,navigation);
+    else if (!tabs.length || unusedFallback(tab) || tabs.length >= tabLimit) opening = navigate(destination,navigation);
+    else {
+      created = true;
+      opening = addTab(destination,{afterCurrent:true,focusTab:false,navigation});
+    }
+    const target = tab;
+    const opened = await opening;
+    if (target !== tab || !isActive()) return false;
+    if (!opened && keepTabs && failed) {
+      if (created && !target.snapshot && !target.request) closeTab(target,{record:false});
+      return {unavailable:'directory'};
+    }
+    if (!opened || key(getCurrentDirectory()) !== location) return false;
+    return {count:selected.length ? target.selection.size : 0,requested:selected.length,limited:ordered.length-selected.length};
   }
 
   function restoreDetachedTab(payload) {
@@ -2768,6 +2854,57 @@ export function initLocalExplorer({
         if (onAddToBasket && directory && items.length) onAddToBasket(items);
         break;
       }
+      case 'send-to-c4d':
+      case 'add-to-whiteboard':
+      case 'move-indexed-files': {
+        if (!directory) break;
+        const entries = getSelectedEntries();
+        const files = entries.filter(item => !item.isDirectory);
+        if (!files.length) break;
+        const item = tab;
+        const revision = item.selectionRevision;
+        const sameTab = () => item === tab && isActive() && getCurrentDirectory() === directory;
+        const stillSelected = () => sameTab() && item.selectionRevision === revision;
+        if (action === 'add-to-whiteboard')
+          return onAddToWhiteboard && performFileAction(() => onAddToWhiteboard(files,stillSelected),directory);
+        if (action === 'move-indexed-files') {
+          if (!onMoveIndexedFiles || !canMoveIndexedFiles?.(entries)) break;
+          const {scrollTop,scrollLeft} = scroller;
+          let result;
+          return performFileAction(async () => {
+            try { result = await onMoveIndexedFiles({files,stillSelected}); }
+            finally {
+              if (sameTab()) {
+                scroller.scrollTop = scrollTop;
+                scroller.scrollLeft = scrollLeft;
+              }
+            }
+            if (!result) return;
+            const before = item.selection.size;
+            for (const file of files) item.selection.delete(pathKey(file.path));
+            if (item.selection.size === before) return;
+            item.selectionRevision++;
+            item.selected = item.selection.get(pathKey(item.selected?.path)) ?? item.selection.values().next().value;
+            item.selectionAnchor = item.selected ? pathKey(item.selected.path) : null;
+            if (item === tab) drawSelection();
+          },directory)
+            .then(async done => {
+              const target = result?.target;
+              if (!done || !target || !sameTab()) return;
+              try {
+                const {paths,directory:location} = target;
+                const opened = paths.length === 1 ? await revealSource(paths[0],{directory:location}) :
+                  await revealSources(paths,{directory:location,lead:paths[0]});
+                if (!opened) report(item,'找不到移动后的文件。',true);
+                else if (typeof opened === 'object' && opened.count !== paths.length)
+                  report(tab,`已定位 ${opened.count} / ${paths.length} 个移动后的文件。`,true);
+              }
+              catch (failure) { report(item,String(failure?.message || failure),true); }
+            });
+        }
+        if (!onSendToC4d) break;
+        return performFileAction(() => onSendToC4d({files,stillSelected}),directory);
+      }
       case 'pin': return togglePin(path,entry?.name);
       case 'create-folder-shortcut':
         if (onCreateFolderShortcut && path && (entry?.isDirectory || !entry && directory))
@@ -2824,12 +2961,18 @@ export function initLocalExplorer({
     const separator = {separator:true};
     const tools = [];
     if (entry && tab.selection.size > 1) {
+      const move = onMoveIndexedFiles && canMoveIndexedFiles?.(getSelectedEntries());
       if (directory && clipboard) tools.push(row('cut','剪切','Ctrl+X'),row('copy','复制','Ctrl+C'));
       tools.push(row('copy-path','复制路径'),copyPathFormats(row));
       if (directory && fileAction) tools.push(row('batch-rename','批量重命名…','F2'));
       if (directory && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
-      if (directory && onAddToCollection && [...tab.selection.values()].some(item => !item.isDirectory))
-        tools.push(separator,row('add-to-collection','将所选文件加入合集…'));
+      if (directory && hasSelectedFiles() && (onAddToCollection || onSendToC4d || onAddToWhiteboard || move)) {
+        tools.push(separator);
+        if (onAddToCollection) tools.push(row('add-to-collection','将所选文件加入合集…'));
+        if (onAddToWhiteboard) tools.push(row('add-to-whiteboard','添加到白板…'));
+        if (onSendToC4d) tools.push(row('send-to-c4d','发送到 Cinema 4D…'));
+        if (move) tools.push(row('move-indexed-files','移动原件并保留资产记录…'));
+      }
       return tools;
     }
     if (entry) {
@@ -2885,6 +3028,10 @@ export function initLocalExplorer({
         const asset = file ? assetDetails.get(path) : null;
         if (asset && onToggleFavorite) tools.push(row('favorite-asset',asset.favorite ? '移出资产收藏' : '添加到资产收藏',undefined,favoriteRequests.has(asset.id)));
         if (file && onAddToCollection) tools.push(row('add-to-collection','加入合集…'));
+        if (file && onAddToWhiteboard) tools.push(row('add-to-whiteboard','添加到白板…'));
+        if (file && onSendToC4d) tools.push(row('send-to-c4d','发送到 Cinema 4D…'));
+        if (file && onMoveIndexedFiles && canMoveIndexedFiles?.([entry]))
+          tools.push(row('move-indexed-files','移动原件并保留资产记录…'));
         if (entry && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
         if (file && onProjectDependencies && /\.gltf$/i.test(path)) tools.push(row('project-dependencies','检查与替换 glTF 依赖…'));
         if (onInspectRenderSequence && (!file || /\d+\.(?:exr|png|jpe?g|tiff?|webp|bmp|hdr)$/i.test(entry.name)))
@@ -3781,7 +3928,7 @@ export function initLocalExplorer({
     renderLinks();
   }
 
-  return {refresh,focusAddress,exit,openPath,openShellPath,revealSource,restoreDetachedTab,show,addTab,getTabCount,getCurrentDirectory,getFileActionDirectory,getSelectedPath,getSelectedEntry,getSelectedEntries,applyPreferences,
+  return {refresh,focusAddress,exit,openPath,openShellPath,revealSource,revealSources,restoreDetachedTab,show,addTab,getTabCount,getTabLocations,getCurrentDirectory,getDirectorySearch,getFileActionDirectory,getSelectedPath,getSelectedEntry,getSelectedEntries,applyPreferences,
     getTabIdentity,showTabIdentity,canDuplicateActive,duplicateActive,refreshAssetDetails,
     findManagedTab,setTabPinned,canCloseOtherTabs,closeOtherTabs,closeManagedTab,restoreClosedTab,hasClosedTabs,openBatchPaths,
     getDropTarget,getSidebarPinTarget,getFolderTabsDropTarget,classifyDroppedFolders,openDroppedFolderTabs,

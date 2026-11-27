@@ -9,7 +9,7 @@ export function initExplorerAssetReferences({before,references,openReference}) {
     available:record => record.canReadReferences !== false,
     load:references,
     describe(reference) {
-      const type = referenceTypes.get(reference.kind);
+      const type = reference.kind === 'whiteboard' && reference.team ? '团队白板' : referenceTypes.get(reference.kind);
       if (!type || !reference.id || !reference.name) return null;
       return {
         title:reference.name,caption:type,

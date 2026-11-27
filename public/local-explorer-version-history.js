@@ -18,7 +18,7 @@ function versionTime(created) {
   return Number.isFinite(date.getTime()) ? versionDate.format(date) : '';
 }
 
-export function initExplorerVersionHistory({before,versions,openVersion}) {
+export function initExplorerVersionHistory({before,versions,openVersion,saveVersion}) {
   return initExplorerAssetDisclosure({
     before,className:'file-explorer-version-history',title:'文件版本',listLabel:'已保存的文件版本',
     loading:'正在加载文件版本…',empty:'暂无已保存的文件版本。',
@@ -32,5 +32,10 @@ export function initExplorerVersionHistory({before,versions,openVersion}) {
     }),
     run:openVersion && ((record,version,scope) => openVersion(record,version.id,scope)),
     success:'已另存版本副本。',
+    primaryAction:saveVersion && {
+      attribute:'data-explorer-save-version',label:'保存当前版本…',
+      available:record => record.canCreateVersion === true,
+      run:saveVersion,success:'已保存当前文件版本。',
+    },
   });
 }

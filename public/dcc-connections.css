@@ -56,6 +56,9 @@
 #connection-summary svg { width: 14px; height: 14px; }
 #connection-summary[data-online="true"] { color: var(--accent); }
 #connection-summary:hover { background: #263334; }
+#explorer-c4d-send select { width: 100%; }
+#explorer-c4d-send [data-c4d-send-skipped] { padding-inline-start: 20px; overflow-wrap: anywhere; }
+#explorer-c4d-send [data-c4d-send-status]:empty { margin: 0; }
 .c4d-drop-dialog { width: min(550px, calc(100vw - 32px)); }
 .c4d-drop-dialog .field-label[hidden],
 .c4d-drop-dialog [hidden] { display: none; }

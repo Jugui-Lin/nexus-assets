@@ -495,6 +495,12 @@
 @media (max-width: 580px) { .exr-channel-stage { height: min(38vh,260px); } }
 .text-button { color: #b9dbd5; }
 .bulk-bar { background: #253634; border-color: #45645f; color: #d9ebe6; flex-wrap: wrap; }
+#locate-marked-originals[hidden] { display: none; }
+.asset-original-locations { width: min(660px,calc(100vw - 32px)); }
+.asset-original-locations [data-original-groups] { list-style: none; padding: 0; margin: 8px 0; max-height: 42vh; overflow: auto; }
+.asset-original-locations li { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 7px 0; border-block-start: 1px solid var(--line); }
+.asset-original-locations li span { overflow-wrap: anywhere; }
+.asset-original-locations [data-original-status]:empty { display: none; }
 .subfolder-section { margin-bottom: 15px; }
 .browser-section-heading { margin: 3px 0 7px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .subfolder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 132px), 1fr)); gap: 7px; }
@@ -721,10 +727,12 @@
 .asset-menu button:hover, .asset-menu button:focus-visible { background: #344b48; }
 .version-form .button { margin-top: 10px; }
 .versions-list { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; max-height: 38vh; overflow: auto; }
+.versions-list[hidden] { display: none; }
 .versions-list li { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 5px; padding: 9px; }
 .version-description { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .version-description span { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); }
 .project-dependencies-dialog .modal-description { overflow-wrap: anywhere; }
+.explorer-index-folder-path { overflow-wrap: anywhere; }
 .project-dependency-list { display: grid; max-block-size: 38vh; gap: 5px; overflow: auto; }
 .project-dependency-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px; border-block-end: 1px solid var(--line); }
 .project-dependency-row > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }

@@ -12,8 +12,8 @@ use std::{
 };
 use url::Url;
 
-mod places;
 pub(crate) mod paths;
+mod places;
 
 #[tauri::command]
 pub(crate) async fn local_explorer_places(app: tauri::AppHandle) -> Result<places::Places, String> {
@@ -62,6 +62,8 @@ pub(crate) struct LocalFileListing {
     parent: Option<String>,
     selected_path: Option<String>,
     entries: Vec<LocalFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_entries: Option<Vec<LocalFile>>,
     total: usize,
     offset: usize,
     previous_offset: Option<usize>,
@@ -125,6 +127,7 @@ struct ListingPage<'a> {
     query: Option<&'a str>,
     project_filter: Option<&'a ProjectFileFilter>,
     remembered_path: Option<&'a str>,
+    locate_paths: Option<&'a [String]>,
     show_hidden: bool,
 }
 
@@ -327,6 +330,7 @@ pub(crate) async fn list_local_files(
     project_filter: Option<ProjectFileFilter>,
     remembered_path: Option<String>,
     show_hidden: Option<bool>,
+    locate_paths: Option<Vec<String>>,
 ) -> Result<LocalFileListing, String> {
     let order = order.unwrap_or_default();
     let query = normalized_query(query);
@@ -335,6 +339,7 @@ pub(crate) async fn list_local_files(
         .transpose()?
         .flatten();
     let remembered_path = remembered_path.filter(|path| path.len() <= 32_768);
+    let locate_paths = locate_paths.map(validated_locate_paths).transpose()?;
     let show_hidden = cfg!(windows) && show_hidden.unwrap_or_default();
     let Some(address) = address.filter(|value| !value.trim().is_empty()) else {
         let drives = folder_browser::root_listing(&app)?;
@@ -353,6 +358,7 @@ pub(crate) async fn list_local_files(
                 offset,
                 order,
                 query: query.as_deref(),
+                locate_paths: locate_paths.as_deref(),
                 show_hidden,
                 ..ListingPage::default()
             },
@@ -381,6 +387,7 @@ pub(crate) async fn list_local_files(
                             query: query.as_deref(),
                             project_filter: project_filter.as_ref(),
                             remembered_path: remembered_path.as_deref(),
+                            locate_paths: locate_paths.as_deref(),
                             show_hidden,
                         },
                     );
@@ -397,6 +404,7 @@ pub(crate) async fn list_local_files(
             query: query.as_deref(),
             project_filter: project_filter.as_ref(),
             remembered_path: remembered_path.as_deref(),
+            locate_paths: locate_paths.as_deref(),
             show_hidden,
         };
         match address {
@@ -890,6 +898,41 @@ fn same_entry(path: &str, selected: &str) -> bool {
     path == selected || (cfg!(windows) && path.to_lowercase() == selected.to_lowercase())
 }
 
+fn locate_path_key(path: &Path) -> String {
+    #[cfg(windows)]
+    return nexus_core::clean_path(path)
+        .replace('/', "\\")
+        .to_lowercase();
+    #[cfg(not(windows))]
+    path.to_string_lossy().into_owned()
+}
+
+fn locate_path_input(value: &str) -> Option<String> {
+    let path = match parse_address(value).ok()? {
+        Address::Path(path) => path,
+        #[cfg(windows)]
+        Address::Host(_) => return None,
+    };
+    if path.file_name().is_none()
+        || path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    Some(locate_path_key(&path))
+}
+
+fn validated_locate_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+    if paths.len() > PAGE_SIZE {
+        return Err(format!("一次最多定位 {PAGE_SIZE} 个原件"));
+    }
+    Ok(paths
+        .iter()
+        .filter_map(|path| locate_path_input(path))
+        .collect())
+}
+
 fn list_path(
     path: &Path,
     refresh: bool,
@@ -901,6 +944,9 @@ fn list_path(
     let (directory, modified, selected) = if metadata.is_dir() {
         (path, metadata.modified().ok(), None)
     } else if metadata.is_file() {
+        if page.locate_paths.is_some() {
+            return Err("定位多个原件时需要提供所在文件夹".into());
+        }
         let parent = path.parent().ok_or("找不到文件所在的文件夹")?;
         let modified = fs::metadata(parent)
             .map_err(location_error)?
@@ -1102,6 +1148,37 @@ fn finish_listing(
     )
 }
 
+fn locate_rows<'a>(
+    paths: &[String],
+    rows: impl Iterator<Item = (usize, &'a LocalFile)>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<usize>, String> {
+    let mut matches: HashMap<&str, (usize, usize)> =
+        paths.iter().map(|path| (path.as_str(), (0, 0))).collect();
+    if matches.is_empty() {
+        return Ok(Vec::new());
+    }
+    for (index, row) in rows {
+        check_cancelled(cancelled)?;
+        if row.is_directory {
+            continue;
+        }
+        let key = locate_path_key(Path::new(&row.path));
+        if let Some((count, match_index)) = matches.get_mut(key.as_str()) {
+            *count += 1;
+            *match_index = index;
+        }
+    }
+    // Remove duplicates from the request and ignore ambiguous matches.
+    Ok(paths
+        .iter()
+        .filter_map(|path| match matches.remove(path.as_str()) {
+            Some((1, index)) => Some(index),
+            _ => None,
+        })
+        .collect())
+}
+
 fn page_listing(
     directory: Option<String>,
     parent: Option<String>,
@@ -1117,6 +1194,7 @@ fn page_listing(
         query,
         project_filter,
         remembered_path,
+        locate_paths,
         ..
     } = page;
     let sort = order != ListingOrder::default();
@@ -1174,9 +1252,30 @@ fn page_listing(
     let entry_at =
         |index: usize| &entries[indices.as_ref().map_or(index, |indices| indices[index])];
     let total = indices.as_ref().map_or(entries.len(), Vec::len);
-    let selected = selected_path.or(remembered_path).and_then(|selected| {
-        (0..total).position(|index| same_entry(&entry_at(index).path, selected))
-    });
+    let located = locate_paths
+        .map(|paths| {
+            locate_rows(
+                paths,
+                (0..total).map(|index| (index, entry_at(index))),
+                cancelled,
+            )
+        })
+        .transpose()?;
+    let selected = if let Some(located) = &located {
+        remembered_path
+            .and_then(locate_path_input)
+            .and_then(|key| {
+                located
+                    .iter()
+                    .copied()
+                    .find(|&index| locate_path_key(Path::new(&entry_at(index).path)) == key)
+            })
+            .or_else(|| located.first().copied())
+    } else {
+        selected_path.or(remembered_path).and_then(|selected| {
+            (0..total).position(|index| same_entry(&entry_at(index).path, selected))
+        })
+    };
     let selected_path = selected.map(|index| entry_at(index).path.clone());
     let offset = offset
         .unwrap_or_else(|| selected.unwrap_or(0))
@@ -1199,6 +1298,12 @@ fn page_listing(
         parent,
         selected_path,
         entries: listed,
+        matched_entries: located.map(|indices| {
+            indices
+                .into_iter()
+                .map(|index| entry_at(index).clone())
+                .collect()
+        }),
         total,
         offset,
         previous_offset: offset.checked_sub(PAGE_SIZE),
@@ -1504,6 +1609,141 @@ mod tests {
     }
 
     #[test]
+    fn multi_locate_verifies_filtered_siblings_across_pages() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let early = root.join("Shot_000.EXR");
+        let recent = root.join(format!("Shot_{:03}.EXR", PAGE_SIZE + 2));
+        let wrong_type = root.join("Shot_notes.txt");
+        let wrong_query = root.join("Shot-other.exr");
+        let directory = root.join("Shot_folder.EXR");
+        let outside = directory.join("Shot_000.EXR");
+        let missing = root.join("Shot_missing.EXR");
+        for index in 0..PAGE_SIZE + 3 {
+            fs::write(root.join(format!("Shot_{index:03}.EXR")), b"asset").unwrap();
+        }
+        fs::create_dir(&directory).unwrap();
+        for path in [&wrong_type, &wrong_query, &outside] {
+            fs::write(path, b"asset").unwrap();
+        }
+        let paths = validated_locate_paths(
+            [
+                &wrong_type,
+                &recent,
+                &early,
+                &early,
+                &wrong_query,
+                &outside,
+                &missing,
+                &directory,
+            ]
+            .map(|path| path.to_str().unwrap().to_owned())
+            .to_vec(),
+        )
+        .unwrap();
+        let filter = ProjectFileFilter {
+            name: "shot".into(),
+            extensions: vec!["exr".into()],
+        };
+        let page = ListingPage {
+            order: ListingOrder {
+                descending: true,
+                ..ListingOrder::default()
+            },
+            query: Some("shot_"),
+            project_filter: Some(&filter),
+            remembered_path: early.to_str(),
+            locate_paths: Some(&paths),
+            ..ListingPage::default()
+        };
+        let cache = DirectoryCache::default();
+        let cancelled = AtomicBool::new(false);
+        let result = list_path(root, false, &cache, &cancelled, page).unwrap();
+        let matches = result
+            .matched_entries
+            .as_deref()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(matches, [recent.to_str().unwrap(), early.to_str().unwrap()]);
+        assert_eq!(result.total, PAGE_SIZE + 4);
+        assert_eq!(result.offset, PAGE_SIZE);
+        assert_eq!(result.selected_path.as_deref(), early.to_str());
+        assert!(result
+            .entries
+            .iter()
+            .all(|entry| Some(entry.path.as_str()) != recent.to_str()));
+
+        let snapshot = cache.get(root, false).unwrap();
+        let fallback = list_path(
+            root,
+            false,
+            &cache,
+            &cancelled,
+            ListingPage {
+                remembered_path: wrong_type.to_str(),
+                ..page
+            },
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&snapshot, &cache.get(root, false).unwrap()));
+        assert_eq!(fallback.offset, 0);
+        assert_eq!(fallback.selected_path.as_deref(), recent.to_str());
+
+        let direct = list_path(
+            &wrong_type,
+            false,
+            &cache,
+            &cancelled,
+            ListingPage {
+                locate_paths: None,
+                ..page
+            },
+        )
+        .unwrap();
+        assert_eq!(direct.selected_path.as_deref(), wrong_type.to_str());
+        assert!(direct.matched_entries.is_none());
+        assert!(serde_json::to_value(direct)
+            .unwrap()
+            .get("matchedEntries")
+            .is_none());
+        assert!(list_path(&wrong_type, false, &cache, &cancelled, page).is_err());
+    }
+
+    #[test]
+    fn multi_locate_bounds_requests_and_distinguishes_no_match() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let real = root.join("Shot_001.EXR");
+        fs::write(&real, b"asset").unwrap();
+        let absolute = real.to_str().unwrap();
+        assert!(validated_locate_paths(vec![absolute.into(); PAGE_SIZE + 1]).is_err());
+        let paths = validated_locate_paths(vec!["Shot_001.EXR".into(), "\0".into()]).unwrap();
+        assert!(paths.is_empty());
+
+        let result = list_path(
+            root,
+            false,
+            &DirectoryCache::default(),
+            &AtomicBool::new(false),
+            ListingPage {
+                locate_paths: Some(&paths),
+                remembered_path: Some(absolute),
+                ..ListingPage::default()
+            },
+        )
+        .unwrap();
+        assert!(result.matched_entries.as_deref().unwrap().is_empty());
+        assert!(result.selected_path.is_none());
+        assert_eq!(result.total, 1);
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["matchedEntries"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
     fn selection_collects_matches_beyond_the_first_page() {
         let rows = (0..PAGE_SIZE + 3)
             .map(|index| LocalFile {
@@ -1646,6 +1886,23 @@ mod tests {
         let with_hidden = list_path(root, false, &cache, &cancelled, enabled).unwrap();
         assert_eq!(with_hidden.total, 2);
         assert_eq!(with_hidden.entries[1].name, "隐藏文件夹");
+
+        let locate_paths =
+            validated_locate_paths(vec![protected.to_str().unwrap().into()]).unwrap();
+        let located = list_path(
+            root,
+            false,
+            &cache,
+            &cancelled,
+            ListingPage {
+                locate_paths: Some(&locate_paths),
+                remembered_path: protected.to_str(),
+                ..enabled
+            },
+        )
+        .unwrap();
+        assert!(located.matched_entries.as_deref().unwrap().is_empty());
+        assert!(located.selected_path.is_none());
         for (show_hidden, total) in [(false, 1), (true, 2)] {
             let snapshot = cache.get(root, show_hidden).unwrap();
             let select =

@@ -246,12 +246,20 @@ function segmentsNear(a, b, c, d, radiusSquared) {
     pointSegmentDistanceSquared(c,a,b), pointSegmentDistanceSquared(d,a,b)) <= radiusSquared;
 }
 
-function loadPersonal(key) {
+function loadPersonal(key,strict = false) {
   try {
-    const saved = JSON.parse(localStorage.getItem(storageKey + key));
+    const raw = localStorage.getItem(storageKey + key);
+    const saved = JSON.parse(raw);
     if (Array.isArray(saved?.items)) return fromItems(saved.items);
-  } catch {}
+    if (strict && raw !== null) throw Error('白板数据无效');
+  } catch (error) {
+    if (strict) throw error;
+  }
   return new Map();
+}
+
+function writePersonalItems(key,items) {
+  localStorage.setItem(storageKey + key, JSON.stringify({items:[...items.values()]}));
 }
 
 export function personalBoardReferencesAsset(key, assetId) {
@@ -666,7 +674,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
 
   function savePersonal(state) {
     try {
-      localStorage.setItem(storageKey + state.key, JSON.stringify({items:[...state.base.values()]}));
+      writePersonalItems(state.key,state.base);
       state.storageError = false;
     } catch {
       state.storageError = true;
@@ -2051,6 +2059,55 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     return insertItems(entries,assets);
   }
 
+  async function addIndexedReferences({key,teamId,projectId},assets,stillRequested) {
+    if (!stillRequested()) return 0;
+    const state = states.get(key);
+    const target = teamId && {teamId,...(projectId !== 'default' && {projectId})};
+    let before;
+    if (target) {
+      const snapshot = await api('team_whiteboard_get',target);
+      if (!stillRequested()) return 0;
+      if (!snapshot?.assetReferences) throw Error('当前团队白板尚未支持资产引用');
+      if (!Array.isArray(snapshot.items) || !Number.isSafeInteger(snapshot.revision)) throw Error('团队白板返回了无效数据');
+      if (state?.queue.length) throw Error('此白板还有尚未同步的更改，请同步后再试');
+      before = fromItems(snapshot.items);
+    } else {
+      if (state?.storageError) throw Error('此白板还有未保存的更改，请保存后再试');
+      before = loadPersonal(key,true);
+    }
+    if (before.size + assets.length > limits.items) throw Error('白板已接近容量上限，请减少选择后再试');
+    const bounds = [...before.values()].filter(item => !isWhiteboardRegion(item)).map(itemBounds);
+    const top = bounds.length ? Math.max(...bounds.map(bound => bound.bottom)) + 48 : 0;
+    const left = bounds.length ? Math.min(...bounds.map(bound => bound.left)) : 0;
+    const operations = assets.map(({id:assetId,name,kind},index) => ({id:crypto.randomUUID(),patch:{
+      kind:'image',assetId,text:name.slice(0,limits.text),x:coordinate(left + (index % 4) * 344),
+      y:coordinate(top + Math.floor(index / 4) * 264),width:320,height:kind === 'video' ? 180 : 240,
+    }}));
+    if (!stillRequested()) return 0;
+    let next;
+    if (target) {
+      const snapshot = await api('team_whiteboard_apply',{...target,operations,batchId:crypto.randomUUID()});
+      if (!Array.isArray(snapshot?.items) || !Number.isSafeInteger(snapshot.revision)) throw Error('无法确认团队白板的保存结果');
+      next = fromItems(snapshot.items);
+      if (!operations.every(({id,patch}) => next.get(id)?.assetId === patch.assetId))
+        throw Error('团队白板未返回新增引用，请查看目标白板');
+      if (state?.busy || state?.revision > snapshot.revision) return operations.length;
+      if (state) state.revision = snapshot.revision;
+    } else {
+      next = applyOperations(before,operations);
+      writePersonalItems(key,next);
+    }
+    if (state) {
+      state.base = next;
+      state.board = undefined;
+      state.undo.push(boardHistoryEntry(before,next,operations));
+      if (state.undo.length > limits.history) state.undo.shift();
+      state.redo.length = 0;
+      if (scope === state && visible) render();
+    }
+    return operations.length;
+  }
+
   function duplicateEntries(source, point, sharedImages) {
     let entries = [...fromItems(source).values()].filter(item => {
       const file = item.kind === 'text' && readWhiteboardFile(item.text);
@@ -3242,6 +3299,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       render();
       sync();
     },
+    addIndexedReferences:(target,assets,stillRequested) => insertMedia(addIndexedReferences,target,assets,stillRequested),
     exportRepairList:videoReviews.exportReport,
     dispatchReviewNotes:videoReviews.openDispatch,
     showRegions:regions.open,

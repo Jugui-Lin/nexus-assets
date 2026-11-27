@@ -355,7 +355,8 @@
     </section>
     <div class="results-line">
       <div><span id="result-count">0</span> 项资产 <span id="active-filter"></span>
-        <button id="exit-asset-focus" type="button" class="text-button asset-browse-exit" title="退出聚焦 (Esc)" aria-keyshortcuts="Escape" hidden>退出聚焦<svg aria-hidden="true"><use href="#i-close"/></svg></button>
+        <button id="show-linked-asset-selection" type="button" class="text-button asset-browse-exit" hidden>查看文件夹选区</button>
+        <button id="exit-asset-focus" type="button" class="text-button asset-browse-exit" title="退出聚焦 (Esc)" aria-keyshortcuts="Escape" hidden><span>退出聚焦</span><svg aria-hidden="true"><use href="#i-close"/></svg></button>
       </div>
       <div class="results-actions">
         <div id="asset-folder-actions" class="workspace-folder-actions hidden" role="group" aria-label="当前文件夹操作">
@@ -376,6 +377,7 @@
       <strong id="selection-count"></strong>
       <button id="add-to-collection" class="button subtle"><svg><use href="#i-stack"/></svg>加入合集</button>
       <button id="preview-marked-assets" type="button" class="button subtle">预览所选</button>
+      <button id="locate-marked-originals" type="button" class="button subtle" hidden><svg aria-hidden="true"><use href="#i-folder"/></svg>定位原件</button>
       <button id="contact-sheet-assets" type="button" class="button subtle" title="将所选素材制作成校样图，最多 16 项">校样图</button>
       <button id="focus-marked-assets" type="button" class="button subtle"><svg aria-hidden="true"><use href="#i-locate"/></svg>聚焦所选</button>
       <button id="compare-assets" type="button" class="button subtle" disabled>并排对比</button>
@@ -607,6 +609,10 @@
           <span role="status"></span><button type="button" class="button subtle" data-explorer-shell-retry>重试</button>
           <button type="button" class="button subtle" data-explorer-shell-clear>清除请求</button>
         </div>
+        <div class="local-explorer-pending-shell" data-indexed-move-recovery-notice hidden>
+          <span role="status"></span><button type="button" class="button subtle" aria-haspopup="dialog"
+            aria-controls="explorer-indexed-move-recovery">查看中断的移动</button>
+        </div>
         <div class="local-explorer-listing" hidden>
           <div id="explorer-file-content" class="local-explorer-table-scroll" tabindex="-1" aria-label="文件内容" aria-keyshortcuts="F6 Shift+F6 F8 Shift+F8">
             <section class="local-explorer-catalog-search" data-explorer-catalog-search aria-labelledby="file-explorer-catalog-heading" hidden>
@@ -697,6 +703,46 @@
     <button type="button" class="button subtle" data-basket-action="clear">清空此处的引用</button>
     <button type="button" class="button subtle" data-basket-action="board">添加到白板</button>
     <button type="button" class="button primary" data-basket-action="c4d">发送到 Cinema 4D</button>
+  </div>
+</dialog>
+<dialog id="explorer-c4d-send" class="modal compact-dialog" aria-labelledby="explorer-c4d-send-title">
+  <div class="modal-header"><h2 id="explorer-c4d-send-title">发送到 Cinema 4D</h2></div>
+  <form id="explorer-c4d-send-form">
+    <label class="field-label" for="explorer-c4d-send-target">在线实例</label>
+    <select id="explorer-c4d-send-target" class="text-field"></select>
+    <p class="modal-description" data-c4d-send-summary></p>
+    <ul class="modal-description" data-c4d-send-skipped aria-label="将跳过的文件" hidden></ul>
+    <p class="modal-description" data-c4d-send-status role="status"></p>
+    <div class="modal-footer">
+      <button type="button" class="button subtle" data-c4d-send-cancel>取消</button>
+      <button type="submit" class="button primary" data-c4d-send-confirm>发送</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="explorer-indexed-move" class="modal compact-dialog" aria-labelledby="explorer-indexed-move-title">
+  <div class="modal-header"><h2 id="explorer-indexed-move-title">移动原件并保留资产记录</h2></div>
+  <form id="explorer-indexed-move-form">
+    <p class="modal-description" data-indexed-move-summary></p>
+    <label class="field-label">目标文件夹
+      <input class="text-field" data-indexed-move-directory readonly dir="ltr">
+    </label>
+    <ul class="modal-description indexed-move-paths" data-indexed-move-sources aria-label="原文件"></ul>
+    <p class="modal-description" data-indexed-move-status role="status"></p>
+    <div class="modal-footer">
+      <button type="button" class="button subtle" data-indexed-move-pick>重选文件夹…</button>
+      <button type="button" class="button subtle" data-indexed-move-close>取消</button>
+      <button type="submit" class="button primary" data-indexed-move-confirm>确认移动</button>
+      <button type="button" class="button primary" data-indexed-move-reveal hidden>定位移动结果</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="explorer-indexed-move-recovery" class="modal compact-dialog" aria-labelledby="explorer-indexed-move-recovery-title">
+  <div class="modal-header"><h2 id="explorer-indexed-move-recovery-title">恢复原件移动</h2></div>
+  <p class="modal-description" data-indexed-recovery-status role="status"></p>
+  <ul class="indexed-move-paths" data-indexed-recovery-entries aria-label="未恢复的原件" hidden></ul>
+  <div class="modal-footer">
+    <button type="button" class="button subtle" data-indexed-recovery-close>关闭</button>
+    <button type="button" class="button primary" data-indexed-recovery-retry>重试恢复</button>
   </div>
 </dialog>
 <dialog id="explorer-command-search" class="modal compact-dialog workspace-tab-overview" aria-labelledby="explorer-command-search-title">
@@ -1400,7 +1446,7 @@
       <p id="c4d-drop-octane-preview-note" class="modal-description" hidden></p>
     </fieldset>
     <div id="c4d-drop-bridge-note" class="c4d-drop-bridge-note" hidden>
-      <p>更新 Cinema 4D 桥接并重启后，可选择导入内容、材质处理方式及 MAX 读取方式。</p>
+      <p>当前 Cinema 4D 实例会按默认设置导入对象和材质。</p>
       <button id="c4d-drop-bridge-update" type="button" class="button subtle">打开 DCC 连接中心</button>
     </div>
     <p id="c4d-drop-status" class="workspace-search-error" role="status"></p>
@@ -1556,6 +1602,14 @@
     <button id="workspace-team" type="button" class="button subtle">团队连接设置</button>
   </section>
   <p id="workspace-status" role="status"></p>
+</dialog>
+<dialog id="explorer-index-folder-dialog" class="modal compact-dialog" aria-labelledby="explorer-index-folder-title" aria-describedby="explorer-index-folder-description">
+  <form method="dialog">
+    <div class="modal-header"><h2 id="explorer-index-folder-title">索引此文件夹？</h2></div>
+    <p id="explorer-index-folder-path" class="explorer-index-folder-path"></p>
+    <p id="explorer-index-folder-description" class="modal-description"></p>
+    <div class="modal-footer"><button class="button subtle" value="cancel" autofocus>取消</button><button class="button primary" value="index">索引并打开</button></div>
+  </form>
 </dialog>
 <dialog id="discard-workspace-dialog" class="modal compact-dialog" aria-labelledby="discard-workspace-title">
   <form method="dialog">
