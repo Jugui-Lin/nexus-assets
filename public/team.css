@@ -31,7 +31,13 @@
 .team-storage-help { margin: 4px 0 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .team-thumbnail-storage h3 { margin: 0; }
 .team-thumbnail-storage-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-#team-thumbnail-cache-path { flex: 1 1 190px; margin: 0; overflow-wrap: anywhere; user-select: text; }
+.team-thumbnail-cache-locations { flex: 1 1 220px; min-width: 0; }
+.team-thumbnail-cache-caption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+#team-thumbnail-cache-local-usage { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#team-thumbnail-cache-path, #team-thumbnail-cache-local-path { overflow-wrap: anywhere; user-select: text; }
+#team-thumbnail-cache-path { margin: 0 0 8px; }
+#team-thumbnail-cache-local-path { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+#team-thumbnail-cache-local-path:empty { display: none; }
 #team-thumbnail-cache-status { margin: 6px 0 0; }
 #team-thumbnail-cache-status:empty { display: none; }
 .team-path-field { display: flex; gap: 8px; }

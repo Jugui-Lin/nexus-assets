@@ -55,7 +55,12 @@ export function readWhiteboardFile(text) {
   }
 }
 
-export function whiteboardFileCard(file, icon, reveal) {
+export function whiteboardFileLocationLabel(file, inNexus) {
+  if (inNexus) return file.isFolder ? '在 Nexus 打开文件夹' : '在 Nexus 文件夹中定位';
+  return file.isFolder ? '打开共享文件夹' : '在共享文件夹中定位';
+}
+
+export function whiteboardFileCard(file, icon, reveal, inNexus = false) {
   const card = document.createElement('div');
   card.className = 'whiteboard-link-card whiteboard-file-card';
   const mark = document.createElement('span');
@@ -99,7 +104,7 @@ export function whiteboardFileCard(file, icon, reveal) {
     action.type = 'button';
     action.className = 'icon-button whiteboard-link-open';
     action.dataset.boardRevealFile = '';
-    action.title = file.isFolder ? '打开共享文件夹' : '在共享文件夹中定位';
+    action.title = whiteboardFileLocationLabel(file,inNexus);
     action.setAttribute('aria-label',action.title + ' ' + file.name);
     action.innerHTML = icon('folder');
     action.addEventListener('click',event => { if (event.detail < 2) void reveal(); });

@@ -17,10 +17,6 @@ const maxAliasBytes = 120;
 const encoder = new TextEncoder();
 const sources = Object.entries(channels);
 
-export function materialMapChannels(options) {
-  return sources.map(([key, [label, defaults]]) => ({key, label, aliases:options?.[key] ?? defaults}));
-}
-
 function splitAliases(text) {
   const entries = [];
   let start = 0;

@@ -1,4 +1,4 @@
-import {initWhiteboard, personalBoardReferencesAsset, personalBoardRegions} from './whiteboard.js';
+import {initWhiteboard, personalBoardAssetReferences, personalBoardRegions} from './whiteboard.js';
 import {listWhiteboardImageCache, readWhiteboardImageCache, clearSyncedWhiteboardImageCache} from './whiteboard-images.js';
 import {readWhiteboardRegion} from './whiteboard-regions.js';
 import {reviewShotCode} from './whiteboard-review-notes.js';
@@ -69,7 +69,8 @@ function hasFileFolder(libraries, {libraryId, folder}) {
 }
 
 export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAssetImage, openLink, locateAsset, openVideoSource,reviewAssignees,
-  searchReplacementImages,loadPresenceAvatar, getFileFolders, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles, copyCachedImages}) {
+  searchReplacementImages,loadPresenceAvatar, getFileFolders, importPastedFiles, revealPastedFile, locatePastedFileAsset,
+  revealPastedFileInNexus, retryPastedFile, relinkPastedFile, loadFilePreview, handleDroppedFiles, copyCachedImages}) {
   const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const assetReferences = initTeamWhiteboardAssetReferences(api);
   panel.innerHTML = `<section class="whiteboard-project-home" aria-labelledby="whiteboard-project-heading">
@@ -110,7 +111,8 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
   const status = $('.whiteboard-project-status');
   const statusText = status.querySelector('span');
   const board = initWhiteboard({panel:canvas, api, notify, resolveAssetImage, openLink, locateAsset, openVideoSource,
-    reviewAssignees,searchReplacementImages,loadPresenceAvatar, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles,
+    reviewAssignees,searchReplacementImages,loadPresenceAvatar, importPastedFiles, revealPastedFile, locatePastedFileAsset,
+    revealPastedFileInNexus, retryPastedFile, relinkPastedFile, loadFilePreview, handleDroppedFiles,
     colorFilter:$('[data-project-color-filter]')});
   $('[data-project-regions]').addEventListener('click',() => board.showRegions());
 
@@ -819,6 +821,16 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
       if (activeProject !== match.projectId) return false;
       return board.focusShotRegion(match.id,match.shot,() => current() && activeProject === match.projectId);
     },
+    async focusAssetReference({id,itemId},assetId,workspaceKey,stillRequested) {
+      const target = scope;
+      const current = () => visible && scope === target && scope?.key === workspaceKey && stillRequested();
+      if (!current()) return false;
+      if (!target.projects.some(project => project.id === id)) await refreshProjects({includeHidden:true});
+      if (!current()) return false;
+      if (activeProject !== id) openProject(id,false);
+      if (activeProject !== id) return false;
+      return board.focusAssetReference(itemId,assetId,() => current() && activeProject === id);
+    },
     async listClipProjects(workspaceKey,{refresh = false} = {}) {
       const target = scope;
       if (target?.key !== workspaceKey) return [];
@@ -827,13 +839,13 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
       if ((refresh || !target.ready) && target.error) throw Error(target.error);
       return target.projects.map(({id,name}) => ({id,name}));
     },
-    addIndexedReferences(projectId,workspaceKey,assets,stillRequested) {
+    addProjectReferences(projectId,workspaceKey,sources,stillRequested) {
       const target = scope;
       const current = () => scope === target && target?.key === workspaceKey && stillRequested();
       if (!current()) return 0;
       if (!target.projects.some(project => project.id === projectId)) throw Error('选择的白板已不可用');
       const key = projectId === defaultProject.id ? target.key : JSON.stringify([target.key,projectId]);
-      return board.addIndexedReferences({key,teamId:target.teamId,projectId},assets,current);
+      return board.addProjectReferences({key,teamId:target.teamId,projectId},sources,current);
     },
     addVideoClip(projectId,clip,stillRequested) {
       if (!visible || activeProject !== projectId || scope?.key !== clip.workspaceKey) return false;
@@ -841,8 +853,11 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
     },
     findPersonalAssetReferences(key, assetId) {
       if (scope?.key !== key || scope?.teamId) return [];
-      return scope.projects.filter(project => personalBoardReferencesAsset(
-        project.id === defaultProject.id ? key : JSON.stringify([key, project.id]), assetId));
+      return scope.projects.flatMap(project => {
+        const cards = personalBoardAssetReferences(
+          project.id === defaultProject.id ? key : JSON.stringify([key, project.id]),assetId);
+        return cards.length ? [{...project,cards}] : [];
+      });
     },
     fileFolder() { return readFileFolder(scope?.teamId); },
     busyForUpdate() { return board.busyForUpdate(); },

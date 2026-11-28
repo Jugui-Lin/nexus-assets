@@ -4,6 +4,7 @@ use crate::{
 };
 use base64::Engine;
 use nexus_core::{thumbnail_cache, thumbnail_cache::ThumbnailState, Asset};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -22,6 +23,7 @@ const MAX_RENDERED_IMAGE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_ORIGINAL_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_ORIGINAL_IMAGE_PIXELS: u64 = 40 * 1024 * 1024;
 const MAX_ORIGINAL_IMAGE_EDGE: u32 = 16_384;
+const TEAM_LOCAL_CACHE_DIRECTORY: &str = "team-thumbnail-cache";
 static IMAGE_PREVIEWS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) async fn image_slot() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
@@ -173,6 +175,50 @@ fn team_shared_cache_directory(
     workspace_data_directory(root, &[".nexus", "thumbnail-cache", namespace], create)
 }
 
+fn local_team_cache_directory(root: &Path, namespace: &str, create: bool) -> Result<Option<PathBuf>, String> {
+    workspace_data_directory(root, &[TEAM_LOCAL_CACHE_DIRECTORY, namespace], create)
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TeamThumbnailCacheUsage {
+    pub(super) path: String,
+    pub(super) bytes: u64,
+    pub(super) complete: bool,
+}
+
+pub(super) fn local_team_cache_usage(root: &Path, namespaces: &HashSet<String>) -> TeamThumbnailCacheUsage {
+    let mut usage = TeamThumbnailCacheUsage {
+        path: nexus_core::clean_path(&root.join(TEAM_LOCAL_CACHE_DIRECTORY)),
+        bytes: 0,
+        complete: true,
+    };
+    for namespace in namespaces {
+        let entries = match local_team_cache_directory(root, namespace, false) {
+            Ok(Some(directory)) => fs::read_dir(directory),
+            Ok(None) => continue,
+            Err(_) => {
+                usage.complete = false;
+                continue;
+            }
+        };
+        match entries {
+            Ok(entries) => for entry in entries {
+                match entry.and_then(|entry| fs::symlink_metadata(entry.path())) {
+                    Ok(metadata) if metadata.is_file() && !crate::folder_deletion::is_link(&metadata) => {
+                        usage.bytes = usage.bytes.saturating_add(metadata.len());
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => usage.complete = false,
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => usage.complete = false,
+        }
+    }
+    usage
+}
+
 fn read_team_indexed_thumbnail(
     preview: &IndexedTeamPreview,
     local_root: &Path,
@@ -182,9 +228,7 @@ fn read_team_indexed_thumbnail(
     if let Ok(Some(image)) = read_thumbnail_index(asset, local_root, size) {
         return Some(image);
     }
-    if let Ok(Some(directory)) =
-        workspace_data_directory(local_root, &["team-thumbnail-cache", &preview.namespace], false)
-    {
+    if let Ok(Some(directory)) = local_team_cache_directory(local_root, &preview.namespace, false) {
         if let Ok(Some(image)) = thumbnail_cache::read_team_original_from_index(asset, &directory, size) {
             return Some(image);
         }
@@ -352,11 +396,7 @@ impl PreviewSource {
 
     fn local_directory(&self, create: bool) -> Result<Option<PathBuf>, String> {
         match &self.team {
-            Some(team) => workspace_data_directory(
-                &self.data_dir,
-                &["team-thumbnail-cache", &team.namespace],
-                create,
-            ),
+            Some(team) => local_team_cache_directory(&self.data_dir, &team.namespace, create),
             None => workspace_data_directory(&self.data_dir, &["thumbnail-cache"], create),
         }
     }

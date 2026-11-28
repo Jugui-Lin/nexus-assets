@@ -64,10 +64,19 @@ pub(crate) async fn local_explorer_file_action(
     action: String,
     path: String,
     name: Option<String>,
+    paths: Option<Vec<String>>,
 ) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
         use tauri::Emitter;
+        if let Some(paths) = &paths {
+            if action != "trash" {
+                return Err("不支持此批量文件操作".into());
+            }
+            if !(1..=crate::local_explorer::MAX_ENTRIES).contains(&paths.len()) {
+                return Err("选中的文件数量超出可处理范围".into());
+            }
+        }
         let permit = FILE_OPERATION
             .try_acquire()
             .map_err(|_| "请等当前文件操作完成")?;
@@ -75,6 +84,10 @@ pub(crate) async fn local_explorer_file_action(
         let state = state.inner().clone();
         let (result, catalog_rename) = tauri::async_runtime::spawn_blocking(move || {
             let _permit = permit;
+            if let Some(paths) = paths {
+                return windows_drop::trash(owner, paths.iter().map(std::path::Path::new))
+                    .map(|()| (None, CatalogRename::None));
+            }
             windows_drop::file_action(&state, owner, &action, &path, name.as_deref())
         })
         .await
@@ -92,7 +105,7 @@ pub(crate) async fn local_explorer_file_action(
     }
     #[cfg(not(windows))]
     {
-        let _ = (window, state, action, path, name);
+        let _ = (window, state, action, path, name, paths);
         Err("当前平台暂不支持此文件操作".into())
     }
 }
@@ -391,11 +404,19 @@ mod windows_drop {
             Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => letter,
             _ => return None,
         };
-        Some([u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0])
+        Some([
+            u16::from(letter.to_ascii_uppercase()),
+            u16::from(b':'),
+            u16::from(b'\\'),
+            0,
+        ])
     }
 
-    fn verify_recycle_root(path: &Path) -> Result<(), String> {
+    fn verify_recycle_root(path: &Path, checked: &mut HashSet<[u16; 4]>) -> Result<(), String> {
         let root = disk_root(path).ok_or("此位置不支持回收站")?;
+        if !checked.insert(root) {
+            return Ok(());
+        }
         let mut info = SHQUERYRBINFO {
             cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
             ..Default::default()
@@ -410,20 +431,31 @@ mod windows_drop {
         Ok(())
     }
 
-    fn trash(owner: HWND, path: &Path) -> Result<(), String> {
+    pub(super) fn trash<'a>(
+        owner: isize,
+        paths: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<(), String> {
         let _apartment = Apartment::initialize()
             .map_err(|error| format!("无法打开 Windows 文件操作（{error}）"))?;
-        verify_recycle_root(path)?;
-        let item = existing_item(path)?;
-        if path_key(&item) != path_key(path) {
-            verify_recycle_root(&item)?;
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        let mut checked_roots = HashSet::new();
+        for path in paths {
+            verify_recycle_root(path, &mut checked_roots)?;
+            let item = existing_item(path)?;
+            let key = path_key(&item);
+            if key != path_key(path) {
+                verify_recycle_root(&item, &mut checked_roots)?;
+            }
+            if seen.insert(key) {
+                items.push(item);
+            }
         }
         let prepare = || -> windows::core::Result<IFileOperation> {
-            let item = shell_item(&item)?;
             let operation: IFileOperation =
                 unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)? };
             unsafe {
-                operation.SetOwnerWindow(owner)?;
+                operation.SetOwnerWindow(HWND(owner as _))?;
                 // The recycle-only flag requires the bin. Do not offer a permanent-delete fallback.
                 operation.SetOperationFlags(
                     FOFX_RECYCLEONDELETE
@@ -431,7 +463,12 @@ mod windows_drop {
                         | FOFX_EARLYFAILURE
                         | FOF_NO_CONNECTED_ELEMENTS,
                 )?;
-                operation.DeleteItem(&item, None::<&IFileOperationProgressSink>)?;
+            }
+            for item in items {
+                let item = shell_item(&item)?;
+                unsafe {
+                    operation.DeleteItem(&item, None::<&IFileOperationProgressSink>)?;
+                }
             }
             Ok(operation)
         };
@@ -476,7 +513,7 @@ mod windows_drop {
                     rename(&catalog, &state.root, path, name.ok_or("请输入新的名称")?)?;
                 Ok((Some(result), catalog_rename))
             }
-            "trash" => trash(HWND(owner as _), path).map(|()| (None, CatalogRename::None)),
+            "trash" => trash(owner, std::iter::once(path)).map(|()| (None, CatalogRename::None)),
             "properties" => {
                 show_properties(HWND(owner as _), path).map(|()| (None, CatalogRename::None))
             }

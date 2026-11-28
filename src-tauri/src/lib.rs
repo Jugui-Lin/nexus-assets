@@ -973,12 +973,13 @@ pub fn attachment_preview_png(path: &Path) -> Result<Option<Vec<u8>>, String> {
     if extension != "c4d" && !preview_image_format(&extension) {
         return Ok(None);
     }
-    let source_bytes = fs::metadata(path).map_err(|error| error.to_string())?.len();
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let source_bytes = metadata.len();
     if extension != "c4d" && source_bytes > MAX_PREVIEW_SOURCE_BYTES {
         return Ok(None);
     }
     const MAX_ATTACHMENT_PREVIEW_BYTES: usize = 300 * 1024;
-    Ok(decode_scaled_preview(path, &extension, 256, source_bytes)?
+    Ok(thumbnail_cache::raster::read(path, &extension, 256, source_bytes, metadata.modified().ok())?
         .filter(|bytes| bytes.len() <= MAX_ATTACHMENT_PREVIEW_BYTES))
 }
 

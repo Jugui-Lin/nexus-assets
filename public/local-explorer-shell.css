@@ -706,7 +706,7 @@
 
 #file-workspace[data-explorer-drop-active] .local-explorer-content,
 #file-workspace [data-explorer-drop-active],
-[data-open-temporary-basket][data-explorer-drop-active] {
+[data-explorer-asset-action="pane"][data-explorer-drop-active] {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }

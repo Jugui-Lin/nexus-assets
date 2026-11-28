@@ -11,306 +11,132 @@ function reference(item) {
   return null;
 }
 
-function referenceKey(item) {
+function storedKey(item) {
   return JSON.stringify(item.kind === 'asset' ? ['asset',item.scope,item.id] : ['file',item.path]);
 }
 
-export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,send,preview,locate,report,triggers = []}) {
-  const owner = dialog.ownerDocument;
-  const storage = owner.defaultView.localStorage;
-  const list = dialog.querySelector('[data-basket-list]');
-  const status = dialog.querySelector('[data-basket-status]');
-  const chooser = dialog.querySelector('[data-basket-targets]');
-  const choices = chooser.querySelector('select');
-  const chooserSubmit = chooser.querySelector('[data-basket-send]');
-  const badgeTriggers = Array.from(triggers, button => ({
-    button,label:button.getAttribute('aria-label') || button.textContent.trim(),
-  }));
-  const selected = new Set();
+export function initTemporaryAssetBasket({scope,pathKey,mount,resolve,targets,send,preview,locate,report,triggers = []}) {
+  const storage = window.localStorage;
+  const subscribers = new Set();
+  const badgeTriggers = triggers.map(button => ({button,label:button.textContent.trim()}));
+  let items = read();
+  let displayedCount;
+
   function read() {
     try {
       const stored = JSON.parse(storage.getItem(storageKey));
-      if (Array.isArray(stored)) {
-        const distinct = new Map();
-        for (const item of stored.map(reference).filter(Boolean).slice(0,limit)) distinct.set(referenceKey(item),item);
-        return [...distinct.values()];
-      }
-    } catch {}
-    return [];
+      if (!Array.isArray(stored)) return [];
+      return [...new Map(stored.map(reference).filter(Boolean).slice(0,limit).map(item => [storedKey(item),item])).values()];
+    } catch {
+      return [];
+    }
   }
-  let items = read();
-  let opener;
-  let selectedTarget;
-  let chooserVersion = 0;
-  let dragging;
-  let externalAction = false;
 
-  const visibleItems = () => {
+  function visible() {
     const activeScope = scope();
     return items.filter(item => item.kind === 'file' || item.scope === activeScope);
-  };
-  const selection = () => visibleItems().filter(item => selected.has(referenceKey(item)));
-  let displayedCount;
+  }
+
+  function identity(item) {
+    const path = pathKey(item);
+    return path ? JSON.stringify(['path',path]) : storedKey(item);
+  }
+
+  function entries() {
+    const grouped = new Map();
+    for (const item of visible()) {
+      const key = identity(item);
+      const existing = grouped.get(key);
+      if (!existing) grouped.set(key,{key:storedKey(item),item,members:[item]});
+      else {
+        existing.members.push(item);
+        if (item.kind === 'asset') existing.item = item;
+      }
+    }
+    return [...grouped.values()];
+  }
 
   function refreshCount() {
-    if (!badgeTriggers.length) return;
-    const count = visibleItems().length;
+    const count = entries().length;
     if (count === displayedCount) return;
     displayedCount = count;
     for (const {button,label} of badgeTriggers) {
       if (count) button.dataset.basketCount = String(count);
       else delete button.dataset.basketCount;
-      button.title = `${label} · ${count} 项引用`;
-      button.setAttribute('aria-label',button.title);
+      button.setAttribute('aria-label',count ? `${label} · ${count} 项已暂存` : label);
     }
   }
-  refreshCount();
+
+  function changed() {
+    refreshCount();
+    for (const subscriber of subscribers) subscriber();
+  }
 
   function save() {
     try { storage.setItem(storageKey,JSON.stringify(items)); } catch {}
-    refreshCount();
+    changed();
   }
 
-  function hideChooser() {
-    chooserVersion++;
-    selectedTarget = null;
-    chooser.hidden = true;
-    choices.replaceChildren();
-    chooserSubmit.disabled = true;
-  }
-
-  function rowButton(action,label,disabled = false) {
-    const button = owner.createElement('button');
-    button.type = 'button';
-    button.dataset.basketAction = action;
-    button.textContent = label;
-    button.disabled = disabled;
-    return button;
-  }
-
-  function updateButtons() {
-    const rows = selection().map(resolve);
-    for (const action of ['board','c4d']) dialog.querySelector(`[data-basket-action="${action}"]`).disabled =
-      !rows.some(item => item?.[action]);
-    dialog.querySelector('[data-basket-action="preview-selected"]').disabled = !rows.some(item => item?.preview);
-    dialog.querySelector('[data-basket-action="clear"]').disabled = !visibleItems().length;
-  }
-
-  function paint() {
-    const visible = visibleItems();
-    list.replaceChildren(...visible.map((item,index) => {
-      const key = referenceKey(item);
-      const result = resolve(item);
-      const label = result?.name || item.name;
-      const row = owner.createElement('li');
-      row.dataset.basketItem = key;
-      row.draggable = true;
-      const check = owner.createElement('input');
-      check.type = 'checkbox';
-      check.checked = selected.has(key);
-      check.setAttribute('aria-label','选中 ' + label);
-      const description = owner.createElement('div');
-      const title = owner.createElement('strong');
-      title.textContent = label;
-      const origin = owner.createElement('small');
-      origin.textContent = item.kind === 'file' ? item.path : result?.origin || '当前目录库中的资产引用';
-      origin.dir = item.kind === 'file' ? 'ltr' : 'auto';
-      description.append(title,origin);
-      const controls = owner.createElement('div');
-      controls.className = 'temporary-basket-row-actions';
-      controls.append(rowButton('preview','预览',!result?.preview),rowButton('locate','定位',!result?.locate),
-        rowButton('up','上移',index === 0),rowButton('down','下移',index === visible.length - 1),rowButton('remove','移除'));
-      row.append(check,description,controls);
-      return row;
-    }));
-    if (!visible.length) status.textContent = '素材篮为空。拖入文件，或从右键菜单加入引用。';
-    else status.textContent = visible.length + ' 项引用';
-    updateButtons();
+  async function prepare() {
+    await mount(visible());
+    changed();
   }
 
   function add(references) {
-    const used = new Set(items.map(referenceKey));
-    let added = 0;
+    const count = entries().length;
+    const exact = new Set(items.map(storedKey));
+    const equivalent = new Map(visible().map(item => [identity(item),item]));
+    let saved = false;
     for (const source of references) {
       const item = reference(source);
-      if (!item || used.has(referenceKey(item)) || items.length === limit) continue;
-      used.add(referenceKey(item));
+      if (!item || exact.has(storedKey(item)) || items.length >= limit) continue;
+      const key = identity(item);
+      const previous = equivalent.get(key);
+      // Keep a file reference available across workspaces if it was explicitly staged from Files.
+      if (previous && (item.kind === 'asset' || previous.kind === 'file')) continue;
+      exact.add(storedKey(item));
+      equivalent.set(key,item);
       items.push(item);
-      added++;
+      saved = true;
     }
-    if (added) save();
-    if (dialog.open) paint();
-    report(added ? '已加入素材篮 ' + added + ' 项' : items.length >= limit ? '素材篮已满' : '素材已在篮中');
+    if (saved) save();
+    const added = entries().length - count;
+    report(added ? `已暂存 ${added} 项` : items.length >= limit ? '暂存已满' : '素材已暂存');
     return added;
   }
 
-  owner.defaultView.addEventListener('storage',event => {
-    if (event.storageArea !== storage || (event.key !== null && event.key !== storageKey)) return;
-    items = read();
-    refreshCount();
-    if (dialog.open) { hideChooser(); paint(); }
-  });
+  function remove(removeEntries) {
+    const remove = new Set(removeEntries.flatMap(entry => entry.members));
+    if (!remove.size) return;
+    items = items.filter(item => !remove.has(item));
+    save();
+  }
 
   function move(from,to) {
-    const a = items.indexOf(from);
-    const b = items.indexOf(to);
-    if (a < 0 || b < 0 || a === b) return;
-    items.splice(b,0,items.splice(a,1)[0]);
+    if (!from || !to || from.key === to.key) return;
+    const fromIndex = items.indexOf(from.members[0]);
+    const toIndex = items.indexOf(to.members[0]);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const moving = new Set(from.members);
+    items = items.filter(item => !moving.has(item));
+    const anchor = items.indexOf(to.members[0]);
+    items.splice(anchor + Number(fromIndex < toIndex),0,...from.members);
     save();
-    hideChooser();
-    paint();
   }
 
-  function closeForAction() {
-    externalAction = true;
-    dialog.close();
-  }
-
-  function previewItems(items,lead,trigger) {
-    const rows = items.filter(item => resolve(item)?.preview);
-    if (!rows.length) return;
-    const collection = scope();
-    const key = trigger.closest('[data-basket-item]')?.dataset.basketItem;
-    try {
-      const player = preview(rows,lead,collection);
-      if (!player?.open) return;
-      player.addEventListener('close',() => {
-        if (!dialog.open || scope() !== collection || [...owner.querySelectorAll('dialog[open]')].some(open => open !== dialog)) return;
-        const row = key && [...list.children].find(item => item.dataset.basketItem === key);
-        const control = trigger.isConnected && !trigger.disabled ? trigger :
-          row?.querySelector('[data-basket-action="preview"]:enabled') ||
-          dialog.querySelector('[data-basket-action="preview-selected"]:enabled') ||
-          dialog.querySelector('[data-basket-action="close"]');
-        control?.focus({preventScroll:true});
-      },{once:true});
-    } catch (failure) { status.textContent = String(failure?.message || failure); }
-  }
-
-  async function chooseTarget(action) {
-    hideChooser();
-    const rows = selection().filter(item => resolve(item)?.[action]);
-    if (!rows.length) return;
-    const collection = scope();
-    const version = ++chooserVersion;
-    chooser.hidden = false;
-    status.textContent = '正在读取目标…';
-    try {
-      const result = await targets(action,rows,collection);
-      if (version !== chooserVersion || !dialog.open || collection !== scope()) return;
-      selectedTarget = {action,rows,collection};
-      choices.replaceChildren(...result.map(({id,name}) => new Option(name,id)));
-      chooserSubmit.disabled = !result.length;
-      if (result.length) { status.textContent = '选择目标'; choices.focus({preventScroll:true}); }
-      else status.textContent = action === 'board' ? '当前工作区没有可用的白板项目。' : '当前没有能接收所选素材的 Cinema 4D。';
-    } catch (failure) {
-      if (version === chooserVersion) status.textContent = String(failure?.message || failure);
-    }
-  }
-
-  dialog.addEventListener('click',event => {
-    const button = event.target.closest('[data-basket-action]');
-    if (!button || button.disabled) return;
-    const action = button.dataset.basketAction;
-    if (action === 'close') { dialog.close(); return; }
-    if (action === 'preview-selected') { previewItems(selection(),null,button); return; }
-    if (action === 'board' || action === 'c4d') { void chooseTarget(action); return; }
-    const visible = visibleItems();
-    if (action === 'clear') {
-      const remove = new Set(visible);
-      items = items.filter(item => !remove.has(item));
-      selected.clear();
-      save();
-      hideChooser();
-      paint();
-      return;
-    }
-    const key = button.closest('[data-basket-item]')?.dataset.basketItem;
-    const index = visible.findIndex(item => referenceKey(item) === key);
-    const item = visible[index];
-    if (!item) return;
-    if (action === 'up' || action === 'down') {
-      move(item,visible[index + (action === 'up' ? -1 : 1)]);
-      [...list.children].find(row => row.dataset.basketItem === key)?.querySelector(`[data-basket-action="${action}"]:not(:disabled)`)?.focus();
-    } else if (action === 'remove') {
-      items.splice(items.indexOf(item),1);
-      selected.delete(key);
-      save();
-      hideChooser();
-      paint();
-    } else if (action === 'preview') {
-      previewItems(visible,item,button);
-    } else if (action === 'locate') {
-      closeForAction();
-      void Promise.resolve().then(() => locate(item)).catch(failure => report(String(failure?.message || failure),true));
-    }
-  });
-  dialog.addEventListener('keydown',event => {
-    if (event.defaultPrevented || event.isComposing || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey ||
-        event.key.toLowerCase() !== 'a' || event.target.closest('select, textarea, input:not([type="checkbox"]), [contenteditable]')) return;
-    event.preventDefault();
-    if (event.repeat) return;
-    for (const row of list.children) {
-      selected.add(row.dataset.basketItem);
-      row.querySelector('input[type="checkbox"]').checked = true;
-    }
-    hideChooser();
-    updateButtons();
-  });
-  list.addEventListener('change',event => {
-    if (!event.target.matches('input[type="checkbox"]')) return;
-    const key = event.target.closest('[data-basket-item]')?.dataset.basketItem;
-    if (event.target.checked) selected.add(key);
-    else selected.delete(key);
-    hideChooser();
-    updateButtons();
-  });
-  list.addEventListener('dragstart',event => {
-    dragging = event.target.closest('[data-basket-item]')?.dataset.basketItem;
-    if (dragging) { event.dataTransfer.setData('application/x-nexus-basket-reorder','1'); event.dataTransfer.effectAllowed = 'move'; }
-  });
-  list.addEventListener('dragover',event => { if (dragging && event.target.closest('[data-basket-item]')) event.preventDefault(); });
-  list.addEventListener('drop',event => {
-    if (!dragging) return;
-    event.preventDefault();
-    const target = event.target.closest('[data-basket-item]')?.dataset.basketItem;
-    const visible = visibleItems();
-    move(visible.find(item => referenceKey(item) === dragging),visible.find(item => referenceKey(item) === target));
-    dragging = null;
-  });
-  list.addEventListener('dragend',() => { dragging = null; });
-  chooserSubmit.addEventListener('click',() => {
-    const destination = choices.value;
-    const snapshot = selectedTarget;
-    if (!destination || !snapshot || snapshot.collection !== scope()) return;
-    closeForAction();
-    void Promise.resolve().then(() => send(snapshot.action,snapshot.rows,destination,snapshot.collection))
-      .catch(failure => report(String(failure?.message || failure),true));
-  });
-  dialog.addEventListener('close',() => {
-    hideChooser();
-    if (!externalAction && opener?.isConnected) opener.focus({preventScroll:true});
-    externalAction = false;
+  window.addEventListener('storage',event => {
+    if (event.storageArea !== storage || (event.key !== null && event.key !== storageKey)) return;
+    items = read();
+    changed();
   });
 
   return {
-    add,
-    refreshCount,
-    show(trigger) {
-      if (dialog.open || owner.querySelector('dialog[open]')) return;
-      opener = trigger || owner.activeElement;
-      selected.clear();
-      for (const item of visibleItems()) selected.add(referenceKey(item));
-      const openingScope = scope();
-      paint();
-      dialog.showModal();
-      void Promise.resolve().then(mount).then(() => {
-        if (!dialog.open) return;
-        if (openingScope !== scope()) {
-          selected.clear();
-          for (const item of visibleItems()) selected.add(referenceKey(item));
-        }
-        paint();
-      }).catch(() => {});
-    },
+    add,clear:() => remove(entries()),entries,move,prepare,refreshCount,remove,resolve,
+    subscribe(listener) { subscribers.add(listener); },
+    preview:(items,lead) => preview(items,lead,scope()),
+    locate,
+    targets:(action,items) => targets(action,items,scope()),
+    send:(action,items,destination) => send(action,items,destination,scope()),
+    scope,
   };
 }

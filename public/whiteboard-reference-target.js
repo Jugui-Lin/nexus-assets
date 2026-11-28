@@ -1,4 +1,4 @@
-export function chooseWhiteboardReferenceTarget(projects,{workspace,count,skipped,current}) {
+export function chooseWhiteboardReferenceTarget(projects,{workspace,count,skipped,allowNasFiles,current}) {
   const dialog = document.createElement('dialog');
   dialog.className = 'modal compact-dialog';
   dialog.setAttribute('aria-labelledby','whiteboard-reference-target-title');
@@ -17,7 +17,7 @@ export function chooseWhiteboardReferenceTarget(projects,{workspace,count,skippe
   const submit = dialog.querySelector('[type=submit]');
   const status = dialog.querySelector('[data-reference-status]');
   dialog.querySelector('[data-reference-summary]').textContent = `将 ${count} 个素材引用添加到${workspace}。` +
-    (skipped ? `另有 ${skipped} 项没有可用的图片或视频索引。` : '');
+    (skipped ? `另有 ${skipped} 项${allowNasFiles ? '无法建立引用' : '没有可用的图片或视频索引'}。` : '');
   if (projects.length > 1) select.append(new Option('请选择白板', ''));
   select.append(...projects.map(project => new Option(project.name, project.id)));
   submit.disabled = !select.value;

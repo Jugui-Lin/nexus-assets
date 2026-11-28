@@ -70,6 +70,7 @@ mod team_nas;
 mod team_network_paths;
 mod team_update_version;
 mod thumbnail_desktop;
+mod thumbnail_cache_limit;
 mod workspace_asset_deletion;
 mod workspace_data;
 mod catalog_health;
@@ -1255,6 +1256,8 @@ fn main() {
                 port: 47821,
             };
             app.manage(state.clone());
+            #[cfg(windows)]
+            thumbnail_cache_limit::start(state.root.clone());
             let browser_capture = browser_capture::BrowserCapture::new(&state.root, state.port);
             app.manage(browser_capture.clone());
             let video_streams = asset_video::stream::VideoStreams::new(state.port);
@@ -1364,7 +1367,9 @@ fn main() {
             team_desktop::whiteboard::read_whiteboard_clipboard_files,
             team_desktop::whiteboard::team_import_whiteboard_files,
             team_desktop::whiteboard::team_reference_whiteboard_files,
+            team_desktop::whiteboard::pick_whiteboard_file_replacement,
             team_desktop::whiteboard::team_reveal_whiteboard_file,
+            team_desktop::whiteboard::team_whiteboard_file_location,
             team_desktop::whiteboard::team_preview_whiteboard_file,
             team_desktop::recycle::team_list_recycled_assets,
             team_desktop::recycle::team_recycle_assets,
@@ -1423,6 +1428,8 @@ fn main() {
             format_help::query_format_capabilities,
             exr_channel_desktop::read_exr_channel_view,
             thumbnail_desktop::build_thumbnail_cache,
+            thumbnail_cache_limit::get_thumbnail_cache_limit,
+            thumbnail_cache_limit::set_thumbnail_cache_limit,
             thumbnail_desktop::store_model_thumbnail,
             thumbnail_desktop::store_video_thumbnail,
             reveal_asset,
@@ -1499,6 +1506,7 @@ fn main() {
             team_desktop::team_set_mount,
             team_desktop::team_set_thumbnail_cache_root,
             team_desktop::team_trust_thumbnail_cache_root,
+            team_desktop::team_thumbnail_cache_usage,
             team_desktop::team_link_folders,
             team_desktop::classify_team_drop,
             team_desktop::team_import_paths,

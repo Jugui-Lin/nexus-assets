@@ -174,6 +174,16 @@ impl Cached {
             .unwrap_or(&self.catalog.libraries)
     }
 
+    fn thumbnail_cache_namespaces(&self) -> HashSet<String> {
+        let libraries: HashSet<_> = self.all_libraries().iter().chain(&self.catalog.libraries)
+            .map(|library| library.id.as_str())
+            .chain(self.catalog.assets.iter().flat_map(|asset| {
+                [Some(asset.library_id.as_str()), asset.storage_library_id.as_deref()].into_iter().flatten()
+            }))
+            .collect();
+        libraries.into_iter().map(|id| crate::team_covers::library_namespace(&self.team.id, id)).collect()
+    }
+
     fn has_indexed_folder(&self, library_id: &str, folder: &str) -> bool {
         use crate::folder_deletion::inside_folder;
 
@@ -1697,6 +1707,31 @@ pub fn team_status(state: tauri::State<'_, Desktop>) -> Value {
         }
         None => json!({"configured":false}),
     }
+}
+
+#[tauri::command]
+pub async fn team_thumbnail_cache_usage(
+    state: tauri::State<'_, Desktop>,
+    app_state: tauri::State<'_, crate::AppState>,
+    team_id: String,
+) -> Result<crate::thumbnail_desktop::TeamThumbnailCacheUsage, String> {
+    let (connection, namespaces) = {
+        let data = state.data.lock().unwrap();
+        let connection = data.active_connection()?;
+        if connection.identity.team_id != team_id {
+            return Err("团队工作空间已切换".into());
+        }
+        let cached = data.cache.as_ref().ok_or("请先同步团队目录")?;
+        (connection, cached.thumbnail_cache_namespaces())
+    };
+    let root = app_state.root.clone();
+    let usage = tauri::async_runtime::spawn_blocking(move || {
+        crate::thumbnail_desktop::local_team_cache_usage(&root, &namespaces)
+    }).await.map_err(|error| error.to_string())?;
+    if state.active_connection()? != connection {
+        return Err("团队工作空间已切换".into());
+    }
+    Ok(usage)
 }
 
 #[tauri::command]
@@ -3247,6 +3282,46 @@ mod tests {
         let cached = workspace.cache.as_ref().unwrap();
         assert!(workspace.thumbnail_cache_root(cached).is_none());
         assert!(workspace.thumbnail_cache_for_preview(cached).is_none());
+    }
+
+    #[test]
+    fn local_thumbnail_cache_usage_only_counts_known_team_storage_namespaces() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        let mut cached = cache_from(index_snapshot("current-team", true)).unwrap();
+        cached.catalog.assets[0].storage_library_id = Some("original-library".into());
+        cached.catalog.all_libraries = Some(vec![Library {
+            id: "hidden-library".into(), name: "隐藏库".into(), watching: true,
+        }]);
+        let namespaces = cached.thumbnail_cache_namespaces();
+        let base = root.join("team-thumbnail-cache");
+        let measure = || crate::thumbnail_desktop::local_team_cache_usage(root, &namespaces);
+
+        let empty = measure();
+        assert_eq!(empty.path, clean_path(&base));
+        assert_eq!(empty.bytes, 0);
+        assert!(empty.complete);
+        assert!(!base.exists());
+
+        let namespace = |team, library| base.join(crate::team_covers::library_namespace(team, library));
+        for (directory, size) in [
+            (namespace("current-team", "lib"), 5),
+            (namespace("current-team", "original-library"), 8),
+            (namespace("other-team", "lib"), 100),
+            (root.join("indexed-thumbnails"), 200),
+            (root.join("thumbnail-cache"), 220),
+        ] {
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("thumbnail.png"), vec![0; size]).unwrap();
+        }
+        let partial = measure();
+        assert_eq!(partial.bytes, 13);
+        assert!(partial.complete);
+
+        std::fs::write(namespace("current-team", "hidden-library"), b"cache directory conflict").unwrap();
+        let inaccessible = measure();
+        assert_eq!(inaccessible.bytes, 13);
+        assert!(!inaccessible.complete);
     }
 
     #[test]

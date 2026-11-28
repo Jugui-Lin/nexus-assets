@@ -1,5 +1,5 @@
 use super::{
-    asset_raster_preview_limit, decode_scaled_preview, preview_image_format, video_mime, Asset,
+    asset_raster_preview_limit, preview_image_format, video_mime, Asset,
     MAX_PREVIEW_SOURCE_BYTES,
 };
 use serde::Serialize;
@@ -8,8 +8,10 @@ use std::{
     fs::{self, File, Metadata},
     io::{self, Cursor, ErrorKind, Read, Write},
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+pub(crate) mod raster;
 
 pub const MAX_MESH_SOURCE_BYTES: u64 = 750_000;
 pub const MAX_NATIVE_MESH_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -18,6 +20,23 @@ const MAX_SIZE: u32 = 1024;
 const MAX_CACHED_BYTES: u64 = 8 * 1024 * 1024;
 const CACHE_VERSION: &str = "nexus-thumbnails-v1";
 const LEGACY_VIDEO_SIZES: [u32; 6] = [DEFAULT_SIZE, 512, 384, 768, 128, MAX_SIZE];
+
+#[cfg(all(windows, feature = "desktop"))]
+pub enum LocalCacheActivity<'a> {
+    Read(&'a Metadata),
+    Write,
+}
+
+#[cfg(all(windows, feature = "desktop"))]
+type LocalCacheObserver = fn(&Path, LocalCacheActivity<'_>);
+
+#[cfg(all(windows, feature = "desktop"))]
+static LOCAL_CACHE_OBSERVER: std::sync::OnceLock<LocalCacheObserver> = std::sync::OnceLock::new();
+
+#[cfg(all(windows, feature = "desktop"))]
+pub fn observe_local_cache(observer: LocalCacheObserver) {
+    let _ = LOCAL_CACHE_OBSERVER.set(observer);
+}
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +107,7 @@ struct Source<'a> {
     key: String,
     bytes: u64,
     stamp: i128,
+    modified: Option<SystemTime>,
 }
 
 impl Source<'_> {
@@ -213,7 +233,10 @@ fn make_source<'a>(
     } else {
         stamp / 1_000_000
     };
-    Ok(make_stamped_source(asset, path, role, extension, size, format, meta.len(), stamp))
+    let mut source =
+        make_stamped_source(asset, path, role, extension, size, format, meta.len(), stamp);
+    source.modified = Some(mtime);
+    Ok(source)
 }
 
 fn make_stamped_source<'a>(
@@ -250,6 +273,7 @@ fn make_stamped_source<'a>(
         key,
         bytes: length,
         stamp,
+        modified: None,
     }
 }
 
@@ -428,7 +452,7 @@ fn read_cached(source: &Source<'_>, dir: &Path) -> Result<Option<Vec<u8>>, Strin
         Err(error) => return Err(format!("无法读取缩略图缓存：{error}")),
     };
     let meta = file.metadata().map_err(|error| error.to_string())?;
-    let entry = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    let entry = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
     if is_link(&entry) || is_link(&meta) || !meta.is_file() {
         return Err("缩略图缓存文件无效".into());
     }
@@ -440,9 +464,12 @@ fn read_cached(source: &Source<'_>, dir: &Path) -> Result<Option<Vec<u8>>, Strin
         }
     }
     let limit = if source.format == ThumbnailFormat::VideoSizeRecord { 2 } else { MAX_CACHED_BYTES };
-    bounded_read(file, limit)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    let bytes = bounded_read(file, limit).map_err(|error| error.to_string())?;
+    #[cfg(all(windows, feature = "desktop"))]
+    if let Some(observer) = LOCAL_CACHE_OBSERVER.get() {
+        observer(&path, LocalCacheActivity::Read(&meta));
+    }
+    Ok(Some(bytes))
 }
 
 fn save(source: &Source<'_>, dir: &Path, bytes: &[u8]) -> Result<ThumbnailState, String> {
@@ -468,20 +495,29 @@ fn write_cache(source: &Source<'_>, dir: &Path, bytes: &[u8], replace: bool) -> 
         .write_all(bytes)
         .and_then(|()| staging.as_file().sync_all())
         .map_err(|error| format!("无法写入缩略图缓存：{error}"))?;
-    if replace {
-        return staging.persist(source.target(dir)).map(|_| ThumbnailState::Generated)
-            .map_err(|error| format!("无法发布缩略图缓存：{}", error.error));
-    }
-    match staging.persist_noclobber(source.target(dir)) {
-        Ok(_) => Ok(ThumbnailState::Generated),
-        Err(error)
-            if error.error.kind() == ErrorKind::AlreadyExists
-                && cache_file_exists(source, dir)? =>
-        {
-            Ok(ThumbnailState::Cached)
+    let path = source.target(dir);
+    let published = if replace {
+        staging.persist(&path).map(|_| ThumbnailState::Generated)
+            .map_err(|error| format!("无法发布缩略图缓存：{}", error.error))
+    } else {
+        match staging.persist_noclobber(&path) {
+            Ok(_) => Ok(ThumbnailState::Generated),
+            Err(error)
+                if error.error.kind() == ErrorKind::AlreadyExists
+                    && cache_file_exists(source, dir)? =>
+            {
+                Ok(ThumbnailState::Cached)
+            }
+            Err(error) => Err(format!("无法发布缩略图缓存：{}", error.error)),
         }
-        Err(error) => Err(format!("无法发布缩略图缓存：{}", error.error)),
+    };
+    #[cfg(all(windows, feature = "desktop"))]
+    if matches!(published, Ok(ThumbnailState::Generated)) {
+        if let Some(observer) = LOCAL_CACHE_OBSERVER.get() {
+            observer(&path, LocalCacheActivity::Write);
+        }
     }
+    published
 }
 
 fn confirm_source(asset: &Asset, selected: &Source<'_>, size: u32) -> Result<(), String> {
@@ -499,7 +535,7 @@ fn create_image(source: &Source<'_>, size: u32) -> Result<Option<Vec<u8>>, Strin
             .map(Some)
             .map_err(|error| format!("无法读取示例缩略图：{error}"))
     } else {
-        decode_scaled_preview(source.path, &source.extension, size, source.bytes)
+        raster::read(source.path, &source.extension, size, source.bytes, source.modified)
     }
 }
 

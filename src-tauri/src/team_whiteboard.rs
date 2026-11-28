@@ -283,6 +283,24 @@ fn original_nas_attachment(
 }
 
 #[tauri::command]
+pub(crate) async fn pick_whiteboard_file_replacement(
+    window: tauri::WebviewWindow,
+    is_folder: bool,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dialog = rfd::FileDialog::new().set_parent(&window);
+        let selected = if is_folder {
+            dialog.set_title("选择团队 NAS 上的文件夹").pick_folder()
+        } else {
+            dialog.set_title("选择团队 NAS 上的文件").pick_file()
+        };
+        selected.as_deref().map(clean_path)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub(crate) async fn team_reference_whiteboard_files(
     team: tauri::State<'_, Desktop>,
     team_id: String,
@@ -352,6 +370,38 @@ async fn resolve_whiteboard_file(
     }
 }
 
+async fn whiteboard_file_location(
+    team: &Desktop,
+    team_id: &str,
+    library_id: Option<String>,
+    path: Option<String>,
+    unc: Option<String>,
+    is_folder: bool,
+) -> Result<String, String> {
+    let attachment = resolve_whiteboard_file(team, team_id, library_id, path, unc).await?;
+    let (actual, directory) =
+        tauri::async_runtime::spawn_blocking(move || attachment.actual_path())
+            .await
+            .map_err(|error| error.to_string())??;
+    if directory != is_folder {
+        return Err("附件类型已变更，请重新添加引用".into());
+    }
+    Ok(clean_path(&actual))
+}
+
+#[tauri::command]
+pub(crate) async fn team_whiteboard_file_location(
+    team: tauri::State<'_, Desktop>,
+    team_id: String,
+    library_id: Option<String>,
+    path: Option<String>,
+    unc: Option<String>,
+    is_folder: Option<bool>,
+) -> Result<String, String> {
+    let _operation = team.begin_storage_operation()?;
+    whiteboard_file_location(&team, &team_id, library_id, path, unc, is_folder.unwrap_or(false)).await
+}
+
 #[tauri::command]
 pub(crate) async fn team_reveal_whiteboard_file(
     team: tauri::State<'_, Desktop>,
@@ -362,15 +412,8 @@ pub(crate) async fn team_reveal_whiteboard_file(
     is_folder: Option<bool>,
 ) -> Result<(), String> {
     let _operation = team.begin_storage_operation()?;
-    let attachment = resolve_whiteboard_file(&team, &team_id, library_id, path, unc).await?;
-    let (actual, directory) =
-        tauri::async_runtime::spawn_blocking(move || attachment.actual_path())
-            .await
-            .map_err(|error| error.to_string())??;
-    if directory != is_folder.unwrap_or(false) {
-        return Err("附件类型已变更，请重新添加引用".into());
-    }
-    let location = clean_path(&actual);
+    let directory = is_folder.unwrap_or(false);
+    let location = whiteboard_file_location(&team, &team_id, library_id, path, unc, directory).await?;
     if directory {
         crate::open_folder_location(PathBuf::from(location)).await
     } else {

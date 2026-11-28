@@ -612,6 +612,11 @@ export function initWorkspaceTabs({
       ensureScope();
       return Boolean(tabById(id));
     },
+    findWhiteboardProjectTab(projectId) {
+      ensureScope();
+      return panes.flatMap(pane => pane.tabs).find(tab => tab !== shown &&
+        tab.snapshot?.criteria?.view === 'whiteboard' && tab.snapshot?.whiteboardProject === projectId)?.id ?? null;
+    },
     getTabCount() {
       return panes.reduce((count,pane) => count + pane.tabs.length,0);
     },

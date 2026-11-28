@@ -143,7 +143,7 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
     if (topPin) positionPinMarker();
     const summary = dragged ? draggedSummary : dragSummary(nativePaths.length);
     const volumeLabel = summary && target.path && explorer.getVolumeLabel?.(target.path);
-    const description = target.basketEntries ? '松开加入素材篮' : target.openTabs ? '在新标签页打开文件夹' :
+    const description = target.basketEntries ? '松开暂存到素材' : target.openTabs ? '在新标签页打开文件夹' :
       target.pins ? (target.sidebar ? '固定到左侧快速访问' : '固定到快速访问') :
       (target.effect === 'move' ? '移动到 ' : '复制到 ') + target.label;
     const text = [description,summary,volumeLabel && volumeLabel !== target.label && '目标卷 ' + volumeLabel]

@@ -1,3 +1,5 @@
+import {matchingWhiteboardAssetCards} from './whiteboard-asset-uses.js';
+
 const lookupLimit = 8;
 const parallelReads = 3;
 const projectIdPattern = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -23,11 +25,11 @@ function readableProjects(snapshot) {
 export function initTeamWhiteboardAssetReferences(api) {
   let pending = Promise.resolve();
 
-  async function projectReferencesAsset(teamId, projectId, assetId) {
+  async function projectAssetReferences(teamId, projectId, assetId) {
     if (typeof projectId !== 'string' || !projectIdPattern.test(projectId)) throw Error('白板项目无效');
     const snapshot = await api('team_whiteboard_get',{teamId,...(projectId !== 'default' && {projectId})});
     if (!Array.isArray(snapshot?.items)) throw Error('团队白板暂不可用');
-    return snapshot.items.some(item => item?.assetId === assetId);
+    return matchingWhiteboardAssetCards(snapshot.items,assetId);
   }
 
   async function query({teamId,assetId,preferredProject,stillRequested}) {
@@ -45,7 +47,7 @@ export function initTeamWhiteboardAssetReferences(api) {
     let checked = 0;
     for (let index = 0; index < candidates.length && stillRequested(); index += parallelReads) {
       const batch = candidates.slice(index,index + parallelReads);
-      const results = await Promise.allSettled(batch.map(project => projectReferencesAsset(teamId,project.id,assetId)));
+      const results = await Promise.allSettled(batch.map(project => projectAssetReferences(teamId,project.id,assetId)));
       if (!stillRequested()) return {boards:[],note:''};
       if (results.some(result => result.status === 'rejected' && accessLost(result.reason))) {
         return {boards:[],note:'当前团队白板访问权限已变化，请重新连接后再试。'};
@@ -53,7 +55,7 @@ export function initTeamWhiteboardAssetReferences(api) {
       for (const [position,result] of results.entries()) {
         if (result.status !== 'fulfilled') continue;
         checked++;
-        if (result.value) boards.push(batch[position]);
+        if (result.value.length) boards.push({...batch[position],cards:result.value});
       }
       if (results.every(result => result.status === 'rejected' && networkUnavailable(result.reason))) break;
     }
@@ -69,6 +71,8 @@ export function initTeamWhiteboardAssetReferences(api) {
       pending = task.catch(() => {});
       return task;
     },
-    projectReferencesAsset,
+    async projectReferencesAsset(teamId,projectId,assetId,itemId) {
+      return (await projectAssetReferences(teamId,projectId,assetId)).some(card => card.itemId === itemId);
+    },
   };
 }

@@ -10,7 +10,8 @@ import {boardPorts, isBoardConnectable, boardPortPoint, nearestBoardEdge, facing
   boardConnectionControls, readBoardConnectionOffsets, writeBoardConnectionOffsets} from './whiteboard-connections.js';
 import {strokeCurve} from './whiteboard-stroke.js';
 import {readWhiteboardLink, whiteboardLinkCard, whiteboardLinkPatch} from './whiteboard-links.js';
-import {createWhiteboardFilePreviews, readWhiteboardFile, whiteboardFileCard, writeWhiteboardFile} from './whiteboard-files.js';
+import {createWhiteboardFilePreviews, readWhiteboardFile, whiteboardFileCard, whiteboardFileLocationLabel, writeWhiteboardFile} from './whiteboard-files.js';
+import {matchingWhiteboardAssetCards} from './whiteboard-asset-uses.js';
 import {initVideoHoverPreview} from './video-hover-preview.js';
 import {readVideoCover, writeVideoCover, copyVideoFrame, videoFrameUrl, loadVideoCoverFrame} from './whiteboard-video-cover.js';
 import {initWhiteboardPresence} from './whiteboard-presence.js';
@@ -263,11 +264,8 @@ function writePersonalItems(key,items) {
   localStorage.setItem(storageKey + key, JSON.stringify({items:[...items.values()]}));
 }
 
-export function personalBoardReferencesAsset(key, assetId) {
-  for (const item of loadPersonal(key).values()) {
-    if (item.assetId === assetId) return true;
-  }
-  return false;
+export function personalBoardAssetReferences(key, assetId) {
+  return matchingWhiteboardAssetCards(loadPersonal(key).values(),assetId);
 }
 
 export const personalBoardRegions = key => [...loadPersonal(key).values()].map(readWhiteboardRegion).filter(Boolean);
@@ -292,7 +290,8 @@ function loadOutbox(key, teamId) {
 
 export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage = async () => null, openLink,
   locateAsset, openVideoSource, reviewAssignees, searchReplacementImages,loadPresenceAvatar,
-  revealPastedFile, importPastedFiles, handleDroppedFiles, loadFilePreview, colorFilter}) {
+  revealPastedFile, locatePastedFileAsset, revealPastedFileInNexus, retryPastedFile, relinkPastedFile, importPastedFiles,
+  handleDroppedFiles, loadFilePreview, colorFilter}) {
   const stackSettings = initWhiteboardStackSettings(notify);
   let normalizeSource = 'first';
   try { if (localStorage.getItem(normalizeModeKey) === 'average') normalizeSource = 'average'; } catch {}
@@ -836,6 +835,58 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     } else renderSelection();
   }
 
+  const recoveringFiles = new Set();
+
+  function canRelinkFile(target) {
+    return target.loaded && !target.error && !review.presenting();
+  }
+
+  function refreshFilePreview(item, file, available) {
+    const node = nodes.get(item.id);
+    if (!filePreviews || !node || file.isFolder || !available()) return;
+    filePreviews.remove(node);
+    filePreviews.add(node,file,available);
+  }
+
+  async function recoverFile(target, item, file, available, relink) {
+    const key = JSON.stringify([target.key,item.id]);
+    if (recoveringFiles.has(key) || !available() || (relink && !canRelinkFile(target))) return;
+    recoveringFiles.add(key);
+    try {
+      if (!relink) {
+        if (await retryPastedFile(file,available) && available()) {
+          refreshFilePreview(item,file,available);
+          notify('可以访问白板引用的原位置');
+        }
+        return;
+      }
+      const replacement = await relinkPastedFile(file,available);
+      if (!available() || !replacement) return;
+      const text = writeWhiteboardFile(replacement);
+      if (!text || replacement.teamId !== target.teamId)
+        throw Error('此位置无法用作当前团队白板的文件引用。');
+      if (text === item.text) {
+        refreshFilePreview(item,file,available);
+        notify('可以访问白板引用的原位置');
+        return;
+      }
+      await sync(target);
+      if (!available()) return;
+      if (!canRelinkFile(target)) throw Error('团队白板暂未同步，请重试重新链接。');
+      commit({id:item.id,patch:{text}});
+      await sync(target);
+      if (!visible || scope !== target) return;
+      if (target.base.get(item.id)?.text === text) notify('已重新链接白板引用');
+      else if (target.queue.some(operation => operation.id === item.id && operation.patch?.text === text))
+        notify('引用已更新，等待团队同步',true);
+      else notify('白板引用已变化，请重新选择后重试。',true);
+    } catch (failure) {
+      if (available()) notify(String(failure?.message || failure),true);
+    } finally {
+      recoveringFiles.delete(key);
+    }
+  }
+
   function itemContent(node, item) {
     releaseImage(node);
     const link = item.kind === 'text' && readWhiteboardLink(item.text);
@@ -850,10 +901,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       const available = () => visible && scope === target && current(item.id)?.text === item.text;
       const reveal = revealPastedFile && file.teamId === target?.teamId ? async () => {
         if (!available()) return;
-        try { await revealPastedFile(file); }
+        try { await revealPastedFile(file,available); }
         catch (failure) { notify(String(failure?.message || failure),true); }
       } : null;
-      node.replaceChildren(whiteboardFileCard(file,icon,reveal));
+      node.replaceChildren(whiteboardFileCard(file,icon,reveal,revealPastedFileInNexus));
       if (!file.isFolder && file.teamId === target?.teamId) filePreviews?.add(node,file,available);
     } else if (item.kind === 'image') {
       renderImage(node, item);
@@ -2068,29 +2119,36 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     return insertItems(entries,assets);
   }
 
-  async function addIndexedReferences({key,teamId,projectId},assets,stillRequested) {
+  async function addProjectReferences({key,teamId,projectId},{assets = [],files = []},stillRequested) {
     if (!stillRequested()) return 0;
+    const fileTexts = files.map(file => teamId && file.teamId === teamId && writeWhiteboardFile(file));
+    if (fileTexts.some(text => !text)) throw Error('所选文件引用无效或路径过长');
+    const count = assets.length + fileTexts.length;
+    if (!count) return 0;
     const state = states.get(key);
     const target = teamId && {teamId,...(projectId !== 'default' && {projectId})};
     let before;
     if (target) {
       const snapshot = await api('team_whiteboard_get',target);
       if (!stillRequested()) return 0;
-      if (!snapshot?.assetReferences) throw Error('当前团队白板尚未支持资产引用');
-      if (!Array.isArray(snapshot.items) || !Number.isSafeInteger(snapshot.revision)) throw Error('团队白板返回了无效数据');
+      if (assets.length && !snapshot?.assetReferences) throw Error('当前团队白板尚未支持资产引用');
+      if (!Array.isArray(snapshot?.items) || !Number.isSafeInteger(snapshot.revision)) throw Error('团队白板返回了无效数据');
       if (state?.queue.length) throw Error('此白板还有尚未同步的更改，请同步后再试');
       before = fromItems(snapshot.items);
     } else {
       if (state?.storageError) throw Error('此白板还有未保存的更改，请保存后再试');
       before = loadPersonal(key,true);
     }
-    if (before.size + assets.length > limits.items) throw Error('白板已接近容量上限，请减少选择后再试');
+    if (before.size + count > limits.items) throw Error('白板已接近容量上限，请减少选择后再试');
     const bounds = [...before.values()].filter(item => !isWhiteboardRegion(item)).map(itemBounds);
     const top = bounds.length ? Math.max(...bounds.map(bound => bound.bottom)) + 48 : 0;
     const left = bounds.length ? Math.min(...bounds.map(bound => bound.left)) : 0;
-    const operations = assets.map(({id:assetId,name,kind},index) => ({id:crypto.randomUUID(),patch:{
-      kind:'image',assetId,text:name.slice(0,limits.text),x:coordinate(left + (index % 4) * 344),
-      y:coordinate(top + Math.floor(index / 4) * 264),width:320,height:kind === 'video' ? 180 : 240,
+    const patches = assets.map(({id:assetId,name,kind}) => ({
+      kind:'image',assetId,text:(name || '').slice(0,limits.text),width:320,height:kind === 'video' ? 180 : 240,
+    }));
+    patches.push(...fileTexts.map(text => ({kind:'text',text,width:272,height:64})));
+    const operations = patches.map((patch,index) => ({id:crypto.randomUUID(),patch:{
+      ...patch,x:coordinate(left + (index % 4) * 344),y:coordinate(top + Math.floor(index / 4) * 264),
     }}));
     if (!stillRequested()) return 0;
     let next;
@@ -2098,7 +2156,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       const snapshot = await api('team_whiteboard_apply',{...target,operations,batchId:crypto.randomUUID()});
       if (!Array.isArray(snapshot?.items) || !Number.isSafeInteger(snapshot.revision)) throw Error('无法确认团队白板的保存结果');
       next = fromItems(snapshot.items);
-      if (!operations.every(({id,patch}) => next.get(id)?.assetId === patch.assetId))
+      if (!operations.every(({id,patch}) => {
+        const item = next.get(id);
+        return item?.kind === patch.kind && (patch.assetId ? item.assetId === patch.assetId : item.text === patch.text);
+      }))
         throw Error('团队白板未返回新增引用，请查看目标白板');
       if (state?.busy || state?.revision > snapshot.revision) return operations.length;
       if (state) state.revision = snapshot.revision;
@@ -3402,7 +3463,7 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       render();
       sync();
     },
-    addIndexedReferences:(target,assets,stillRequested) => insertMedia(addIndexedReferences,target,assets,stillRequested),
+    addProjectReferences:(target,sources,stillRequested) => insertMedia(addProjectReferences,target,sources,stillRequested),
     showRegions:regions.open,
     async focusShotRegion(id,shot,stillRequested) {
       const target = scope;
@@ -3411,6 +3472,15 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       if (target.teamId) await sync(target);
       return visible && target === scope && revision === visibilityRevision && stillRequested() &&
         !target.error && jumpToRegion(id,shot);
+    },
+    async focusAssetReference(itemId,assetId,stillRequested) {
+      const target = scope;
+      const revision = visibilityRevision;
+      const current = () => visible && target === scope && revision === visibilityRevision && stillRequested();
+      if (!target || !current()) return false;
+      if (target.teamId) await sync(target);
+      return current() && !target.error && records().get(itemId)?.assetId === assetId &&
+        jumpToBoardResult({itemId});
     },
     dropNativeImages(paths, position) {
       if (!visible || !scope || review.presenting()) return false;
@@ -3474,10 +3544,19 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         ['edit', '剪切', () => { if (copySelected()) deleteSelected(); }, 'Ctrl+X'],
       );
       if (link && openLink) editActions.unshift(['drag-out', '在浏览器打开', () => openLink(link.url)]);
-      if (file && revealPastedFile && file.teamId === target.teamId) {
-        editActions.unshift(['folder',file.isFolder ? '打开共享文件夹' : '在共享文件夹中定位', () => {
-          if (available() && current(clicked)?.text === item.text) return revealPastedFile(file);
-        }]);
+      if (file && file.teamId === target.teamId) {
+        const fileAvailable = () => available() && current(clicked)?.text === item.text;
+        if (relinkPastedFile) editActions.unshift(['link','重新链接引用…',() =>
+          recoverFile(target,item,file,fileAvailable,true),null,!canRelinkFile(target)]);
+        if (retryPastedFile) editActions.unshift(['refresh','重试文件引用',() =>
+          recoverFile(target,item,file,fileAvailable,false)]);
+        const locate = locatePastedFileAsset?.(file,fileAvailable);
+        if (locate) editActions.unshift(['locate','在资产库中定位',locate]);
+        if (revealPastedFile) {
+          editActions.unshift(['folder',whiteboardFileLocationLabel(file,revealPastedFileInNexus), () => {
+            if (fileAvailable()) return revealPastedFile(file,fileAvailable);
+          }]);
+        }
       }
       if (item?.kind === 'image' && item.assetId && locateAsset) {
         editActions.unshift(['locate', '在资产库中定位', () => locateAsset(item.assetId,

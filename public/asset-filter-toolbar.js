@@ -94,7 +94,7 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
   activeFilters.append(chips, clearFilters);
   clearFilters.addEventListener('click', () => onChange({
     kind:'all', tag:null, search:'', rating:0, workflow:'',
-    formatIncludes:[], formatExcludes:[], tagIncludes:[], tagExcludes:[], quickFilters:[], fileNameQuery:'',
+    formatIncludes:[], formatExcludes:[], tagIncludes:[], tagExcludes:[], quickFilters:[], fileNameQuery:'', fileCheckStatus:'',
   }));
   const definitions = new Map([
     ['type', {label:'类型', icon:'grid', panel:get('asset-type-panel'), enabled:s => s.kind !== 'all'}],

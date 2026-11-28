@@ -605,6 +605,7 @@ export function initLocalExplorer({
   }
   const getSelectedEntry = () => tab.selection.size === 1 ? tab.selected || null : null;
   const getSelectedEntries = () => [...tab.selection.values()];
+  const selectedEditEntry = () => tab.selection.get(pathKey(tab.selected?.path)) || tab.selection.values().next().value || null;
   const getSelectedPath = () => getSelectedEntry()?.path || null;
   function hasSelectedFiles() {
     for (const entry of tab.selection.values()) {
@@ -850,6 +851,7 @@ export function initLocalExplorer({
     const {snapshot,selected,index,history,request,fileAction:activeFileAction} = tab;
     const blocked = request || activeFileAction;
     const multiple = tab.selection.size > 1;
+    const hasSelection = tab.selection.size > 0;
     const driveView = isDriveView(snapshot);
     const physical = driveView || catalogOnly() ? '' : snapshot?.directory;
     projectFilters?.render?.(physical,Boolean(tab.projectFilterBypass),Boolean(blocked));
@@ -862,11 +864,17 @@ export function initLocalExplorer({
     setDisabled('drives',blocked || snapshot?.directory === null);
     setDisabled('open',blocked || multiple || !selected || (!selected.isDirectory && !open));
     setDisabled('copy',blocked || !(tab.selection.size || physical));
-    setDisabled('cut-files',blocked || !clipboard || !physical || !selected);
-    setDisabled('copy-files',blocked || !clipboard || !physical || !selected);
+    setDisabled('cut-files',blocked || !clipboard || !physical || !hasSelection);
+    setDisabled('copy-files',blocked || !clipboard || !physical || !hasSelection);
     setDisabled('paste-files',blocked || !clipboard || !physical);
-    setDisabled('rename-files',blocked || !fileAction || !physical || !selected);
-    setDisabled('trash-file',blocked || !fileAction || !physical || !selected || multiple);
+    setDisabled('rename-files',blocked || !fileAction || !physical || !hasSelection);
+    setDisabled('trash-file',blocked || !fileAction || !physical || !hasSelection);
+    const rename = buttons.get('rename-files');
+    const renameLabel = multiple ? '批量重命名' : '重命名';
+    if (rename && rename.getAttribute('aria-label') !== renameLabel) {
+      rename.setAttribute('aria-label',renameLabel);
+      rename.title = renameLabel + '（F2）';
+    }
     setDisabled('reveal',blocked || multiple || !reveal || !(selected?.path || physical));
     setDisabled('previous-page',blocked || snapshot?.previousOffset == null);
     setDisabled('next-page',blocked || snapshot?.nextOffset == null);
@@ -2077,6 +2085,13 @@ export function initLocalExplorer({
       if (newDirectory || clearCatalog) item.catalogQuery = '';
       const newScope = newDirectory || item.query !== query;
       const preserveSelection = locate?.preserveSelection && !newScope && !filterChanged;
+      const requestedOriginals = locate && new Set(locate.paths.map(treePathKey));
+      const retained = locate?.retainPaths?.length && !newScope && !filterChanged
+        ? new Set(locate.retainPaths.map(treePathKey)) : null;
+      const retainedEntries = retained ? [...item.selection].filter(([,entry]) => {
+        const key = treePathKey(entry.path);
+        return retained.has(key) && !requestedOriginals.has(key);
+      }) : [];
       if (newScope || result.selectedPath && !preserveSelection) {
         item.selectionRevision++;
         item.selection.clear();
@@ -2084,12 +2099,12 @@ export function initLocalExplorer({
       }
       const entriesOnPage = new Map(result.entries.map(entry => [pathKey(entry.path),entry]));
       if (locate && !preserveSelection) {
-        const requested = new Set(locate.paths.map(treePathKey));
         item.selectionRevision++;
-        item.selection = new Map(matchedEntries.flatMap(entry => {
+        const located = matchedEntries.flatMap(entry => {
           const key = pathKey(entry.path);
-          return !entry.isDirectory && requested.has(treePathKey(entry.path)) ? [[key,entriesOnPage.get(key) || entry]] : [];
-        }));
+          return !entry.isDirectory && requestedOriginals.has(treePathKey(entry.path)) ? [[key,entriesOnPage.get(key) || entry]] : [];
+        });
+        item.selection = new Map([...retainedEntries,...located]);
         item.selected = item.selection.get(pathKey(result.selectedPath)) || item.selection.values().next().value || null;
         item.selectionAnchor = item.selected ? pathKey(item.selected.path) : null;
         if (item.selected) {
@@ -2504,7 +2519,7 @@ export function initLocalExplorer({
     return openPath(path,{force:stale});
   }
 
-  async function revealSources(paths,{directory,lead,preferredTab,keepTabs = false,keepSelection = false,linkedFilename} = {}) {
+  async function revealSources(paths,{directory,lead,preferredTab,keepTabs = false,keepSelection = false,retainPaths,refresh = false,linkedFilename} = {}) {
     const key = assetSearchKey || treePathKey;
     const location = key(directory);
     if (!isActive() || !location) return false;
@@ -2530,7 +2545,7 @@ export function initLocalExplorer({
     const query = linkedFilenameQuery(item,linkedFilename);
     const preserveSelection = keepSelection && !paths.length;
     const offset = preserveSelection && query === undefined && key(item?.snapshot?.directory) === location ? item.snapshot.offset : undefined;
-    const navigation = {offset,query,locate:{paths:selected,lead:selected[0],preserveSelection,linkedFilename:query !== undefined,
+    const navigation = {offset,query,force:refresh,locate:{paths:selected,lead:selected[0],preserveSelection,retainPaths,linkedFilename:query !== undefined,
       onFailure:() => { failed = true; }},
       focusList:!preserveSelection,clearCatalog:item?.searchScope === 'library'};
     let opening;
@@ -2549,7 +2564,10 @@ export function initLocalExplorer({
       return {unavailable:'directory'};
     }
     if (!opened || key(getCurrentDirectory()) !== location) return false;
-    return {count:selected.length ? target.selection.size : 0,requested:selected.length,limited:ordered.length-selected.length,
+    const requested = new Set(selected.map(treePathKey));
+    const matchedPaths = [...target.selection.values()].map(entry => entry.path).filter(path => requested.has(treePathKey(path)));
+    const limitedPaths = ordered.slice(sourceSelectionLimit);
+    return {count:matchedPaths.length,requested:selected.length,limited:limitedPaths.length,matchedPaths,limitedPaths,
       ...(query !== undefined && {appliedFilename:query})};
   }
 
@@ -2668,6 +2686,16 @@ export function initLocalExplorer({
     refreshStaleTab(tab);
   }
 
+  function unselectEditedPaths(item,paths) {
+    let edited = false;
+    for (const path of paths) if (item.selection.delete(pathKey(path))) edited = true;
+    if (!edited) return;
+    item.selectionRevision++;
+    item.selected = item.selection.get(pathKey(item.selected?.path)) || item.selection.values().next().value || null;
+    item.selectionAnchor = item.selected ? pathKey(item.selected.path) : null;
+    if (item === tab) drawSelection();
+  }
+
   async function performFileAction(action,path,success = '',changed = false) {
     if (tab.request || tab.fileAction) return;
     const item = tab;
@@ -2687,14 +2715,26 @@ export function initLocalExplorer({
         refreshStaleTab(item);
       }
     }
-    if (changed === 'remove' && item.selection.delete(pathKey(path))) {
-      item.selectionRevision++;
-      item.selected = item.selection.values().next().value;
-      item.selectionAnchor = item.selected ? pathKey(item.selected.path) : null;
-      if (item === tab) drawSelection();
-    }
+    if (changed === 'remove') unselectEditedPaths(item,[path]);
     if (changed && item === tab) refresh();
     return true;
+  }
+
+  async function trashSelected(paths,directory) {
+    if (getFileActionDirectory() !== directory) return;
+    const item = tab;
+    const completed = await performFileAction(path => fileAction({action:'trash',path,paths}),paths[0]);
+    if (completed) {
+      unselectEditedPaths(item,paths);
+      refreshAfterTransfer({directoryPath:directory});
+    } else if (item !== tab) {
+      refreshAfterTransfer({directoryPath:directory});
+    } else if (item.error && getFileActionDirectory() === directory) {
+      // Windows can stop a batch after moving some of the items to the Recycle Bin.
+      const message = item.status;
+      const refreshed = await navigate(directory,{index:item.index,offset:item.snapshot.offset,force:true});
+      if (refreshed && item === tab && getCurrentDirectory() === directory) report(item,message,true);
+    }
   }
 
   function openEntry(entry) {
@@ -3099,7 +3139,9 @@ export function initLocalExplorer({
           return performFileAction(target => onCompareExrChannels({path:target}),path);
         break;
       case 'trash':
-        return fileAction && performFileAction(target => fileAction({action,path:target}),path,'','remove');
+        if (!fileAction || !directory || !entry) return;
+        return paths.length > 1 ? trashSelected(paths,directory)
+          : performFileAction(target => fileAction({action,path:target}),path,'','remove');
       case 'properties':
         return fileAction && performFileAction(target => fileAction({action,path:target}),path);
       default: return applyViewAction(action,current);
@@ -3126,8 +3168,8 @@ export function initLocalExplorer({
       const move = onMoveIndexedFiles && canMoveIndexedFiles?.(getSelectedEntries());
       if (directory && clipboard) tools.push(row('cut','剪切','Ctrl+X'),row('copy','复制','Ctrl+C'));
       tools.push(row('copy-path','复制路径','Ctrl+Shift+C'),copyPathFormats(row),row('copy-names','复制所选项目名称'));
-      if (directory && fileAction) tools.push(row('batch-rename','批量重命名…','F2'));
-      if (directory && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
+      if (directory && fileAction) tools.push(row('batch-rename','批量重命名…','F2'),row('trash','将所选项目移到回收站','Delete'));
+      if (directory && onAddToBasket) tools.push(row('add-to-basket','暂存文件'));
       if (directory && hasSelectedFiles() && (onAddToCollection || onSendToC4d || onAddToWhiteboard || move || ratingItem || compareTarget)) {
         tools.push(separator);
         if (compareTarget) tools.push(row('compare-assets','并排对比'));
@@ -3197,7 +3239,7 @@ export function initLocalExplorer({
         if (file && onSendToC4d) tools.push(row('send-to-c4d','发送到 Cinema 4D…'));
         if (file && onMoveIndexedFiles && canMoveIndexedFiles?.([entry]))
           tools.push(row('move-indexed-files','移动原件并保留资产记录…'));
-        if (entry && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
+        if (entry && onAddToBasket) tools.push(row('add-to-basket','暂存文件'));
         if (file && onProjectDependencies && /\.gltf$/i.test(path)) tools.push(row('project-dependencies','检查与替换 glTF 依赖…'));
         if (onInspectRenderSequence && (!file || isExplorerRenderFrame(entry.name)))
           tools.push(row('inspect-render-sequence','检查渲染序列…'));
@@ -3245,7 +3287,7 @@ export function initLocalExplorer({
           if (!scroller.contains(owner.activeElement)) focusContent();
           assetComparison.show(compareTarget,entries);
         }
-      } else void applyAction(action,entry,current);
+      } else if (action !== 'trash' || stillSelected()) void applyAction(action,entry,current);
     } catch (failure) {
       if (item.snapshot === current) report(item,String(failure?.message || failure),true);
     } finally {
@@ -3430,11 +3472,11 @@ export function initLocalExplorer({
     close: exit,
     open: () => openEntry(tab.selected),
     copy: () => applyAction('copy-path',tab.selected,tab.snapshot),
-    'cut-files': () => applyAction('cut',tab.selected,tab.snapshot),
-    'copy-files': () => applyAction('copy',tab.selected,tab.snapshot),
+    'cut-files': () => applyAction('cut',selectedEditEntry(),tab.snapshot),
+    'copy-files': () => applyAction('copy',selectedEditEntry(),tab.snapshot),
     'paste-files': () => applyAction('paste',null,tab.snapshot),
-    'rename-files': () => applyAction(tab.selection.size > 1 ? 'batch-rename' : 'rename',tab.selected,tab.snapshot),
-    'trash-file': () => applyAction('trash',tab.selected,tab.snapshot),
+    'rename-files': () => applyAction(tab.selection.size > 1 ? 'batch-rename' : 'rename',selectedEditEntry(),tab.snapshot),
+    'trash-file': () => applyAction('trash',selectedEditEntry(),tab.snapshot),
     reveal: () => performFileAction(path => reveal({path}),tab.selected?.path || tab.snapshot.directory),
     'previous-page': () => navigate(tabPath(tab),{index:tab.index,offset:tab.snapshot.previousOffset}),
     'next-page': () => navigate(tabPath(tab),{index:tab.index,offset:tab.snapshot.nextOffset}),
@@ -4041,6 +4083,7 @@ export function initLocalExplorer({
     const focused = scroller.contains(event.target) ? clickedEntry(event.target) : undefined;
     const selected = focused || (sequence ? null : tab.selected);
     const multiple = tab.selection.size > 1;
+    const editSelection = multiple && !sequence ? selectedEditEntry() : selected;
     const physical = current && !isDriveView(current) && current.directory;
     const assetSearchResult = catalogOnly() || catalogPane?.contains(event.target);
     const space = key === ' ' || key === 'spacebar';
@@ -4089,11 +4132,11 @@ export function initLocalExplorer({
         shortcut = () => applyAction('properties',selected,current);
       } else if (physical && fileAction && modified && event.shiftKey && key === 'n') {
         shortcut = () => applyAction('new-folder',null,current);
-      } else if (physical && fileAction && selected && !modified && !event.altKey && (key === 'f2' || key === 'delete' && !multiple)) {
-        shortcut = () => applyAction(key === 'f2' ? (multiple ? 'batch-rename' : 'rename') : 'trash',selected,current);
+      } else if (physical && fileAction && editSelection && !modified && !event.altKey && (key === 'f2' || key === 'delete')) {
+        shortcut = () => applyAction(key === 'f2' ? (multiple ? 'batch-rename' : 'rename') : 'trash',editSelection,current);
       } else if (physical && clipboard && modified && !event.shiftKey && ['c','x','v'].includes(key) &&
-          (selected || key === 'v')) {
-        shortcut = () => applyAction({c:'copy',x:'cut',v:'paste'}[key],key === 'v' ? null : selected,current);
+          (editSelection || key === 'v')) {
+        shortcut = () => applyAction({c:'copy',x:'cut',v:'paste'}[key],key === 'v' ? null : editSelection,current);
       }
     }
     if (shortcut) {

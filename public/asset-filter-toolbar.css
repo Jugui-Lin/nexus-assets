@@ -443,6 +443,45 @@
 .asset-active-filter-chip:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 .asset-active-filter-clear { flex: none; padding-inline: 6px; }
 
+.asset-file-check:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 9px;
+  margin-block-end: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.asset-file-check [data-file-check-filter][aria-pressed="true"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.asset-file-check [data-file-check-dismiss] { width: 24px; height: 24px; }
+.asset-file-check [data-file-check-dismiss] svg { width: 13px; height: 13px; }
+.asset-file-check-dialog ul {
+  display: grid;
+  gap: 5px;
+  max-height: 45vh;
+  overflow: auto;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.asset-file-check-dialog li {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-block: 5px;
+  border-top: 1px solid var(--line);
+}
+.asset-file-check-dialog li > div { min-width: 0; }
+.asset-file-check-dialog li :is(strong, small) { display: block; overflow-wrap: anywhere; }
+.asset-file-check-dialog li small { margin-block-start: 3px; color: var(--muted); }
+.asset-file-check-dialog li button { flex: none; }
+
 .results-line:has(.asset-browse-marker:not([hidden]), .asset-browse-exit:not([hidden])) {
   flex-wrap: wrap;
   gap: 4px 10px;
