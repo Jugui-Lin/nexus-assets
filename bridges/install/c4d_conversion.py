@@ -3,10 +3,13 @@
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
-from pathlib import Path
+from collections import Counter, defaultdict
+from functools import lru_cache
+from pathlib import Path, PureWindowsPath
 
 
 _TIMEOUT_SECONDS = 180
@@ -20,6 +23,73 @@ _MAX_FINISH_MARKER = b"NEXUS_MAX_STAGE finish"
 _MAX_MISSING = re.compile(rb"NEXUS_MAX_MISSING (\d{1,9}) (\d{1,9}) (\d{1,9})\b")
 _MAX_LOG_ERRORS = re.compile(rb"(?m)^\d{4}/\d{2}/\d{2} [\d:]+ (?:ERR|FTL): [^\r\n]+")
 _MAX_LOG_VALIDATION_BYTES = 1024 * 1024
+_FBX_TEXTURE_EXTENSIONS = frozenset({
+    ".bmp", ".dds", ".exr", ".gif", ".hdr", ".jpeg", ".jpg", ".png", ".psd", ".tga", ".tif", ".tiff", ".webp",
+})
+_FBX_MATERIAL_SLOTS = {
+    "diffusecolor": "base_color", "basecolor": "base_color", "opacity": "opacity",
+    "bump": "bump", "normalmap": "normal", "roughness": "roughness", "metalness": "metallic",
+    "specularcolor": "specular", "emissivecolor": "emission",
+}
+_MAX_FBX_MATERIAL_SLOTS = {
+    "texmap_diffuse": "base_color", "texmap_opacity": "opacity", "texmap_bump": "bump",
+    "texmap_reflectionroughness": "roughness", "texmap_reflectionglossiness": "glossiness",
+    "texmap_metalness": "metallic",
+}
+_MAX_FBX_TEXTURE_FIELDS = {"3dsMax|Params|HDRIMapName", "3dsMax|Parameters|filename", "3dsMax|BitmapTex|filename"}
+_MAX_FBX_VRAY_MATERIAL = (935280431, 1882483036)
+_MAX_FBX_NORMAL_WRAPPER = (1912237649, 1912962095)
+_MAX_FBX_CORONA_NORMAL = (678481578, -870825092)
+_MAX_FBX_NORMAL_ON = "3dsMax|VRayNormalMap Parameters|normal_map_on"
+_MAX_FBX_NORMAL_AMOUNT = "3dsMax|VRayNormalMap Parameters|normal_map_multiplier"
+_MAX_FBX_CORONA_NORMAL_AMOUNT = "3dsMax|CoronaNormalPb|multiplier"
+_MAX_FBX_VRAY_FIELDS = {
+    "3dsMax|basic|diffuse", "3dsMax|basic|reflection", "3dsMax|basic|reflection_weight",
+    "3dsMax|basic|reflection_glossiness", "3dsMax|BRDF|brdf_useRoughness",
+    "3dsMax|basic|reflection_metalness", "3dsMax|basic|reflection_fresnel",
+    "3dsMax|basic|reflection_lockIOR", "3dsMax|basic|reflection_ior", "3dsMax|basic|refraction_ior",
+    "3dsMax|maps|texmap_reflectionGlossiness_multiplier",
+    "3dsMax|maps|texmap_bump_multiplier", _MAX_FBX_NORMAL_ON, _MAX_FBX_NORMAL_AMOUNT,
+}
+_MAX_FBX_WRAPPERS = {
+    (720, 0): {"3dsmax|parameters|map"},  # Color Correction
+    (1858302732, 0): {"3dsmax|parameters|map1", "3dsmax|parameters|map2"},  # Falloff
+    _MAX_FBX_NORMAL_WRAPPER: {"3dsmax|vraynormalmap parameters|normal_map"},
+    _MAX_FBX_CORONA_NORMAL: {"3dsmax|coronanormalpb|normalmap"},
+}
+_MAX_FBX_CORONA_LEGACY = (1891525894, 1149841885)
+_MAX_FBX_CORONA_LEGACY_PREFIX = "3dsMax|CoronaMtlPb|"
+_MAX_FBX_CORONA_PHYSICAL = (1762831241, -2028660960)
+_MAX_FBX_CORONA_PHYSICAL_PREFIX = "3dsMax|CoronaPhysicalMtlPb|"
+_MAX_FBX_CORONA_SLOTS = {
+    _MAX_FBX_CORONA_LEGACY: (_MAX_FBX_CORONA_LEGACY_PREFIX, {
+        "texmapdiffuse": ("base_color", "texmapOnDiffuse", "mapamountDiffuse"),
+        "texmapreflect": ("specular", "texmapOnReflect", "mapamountReflect"),
+        "texmapreflectglossiness": ("glossiness", "texmapOnReflectGlossiness", "mapamountReflectGlossiness"),
+        "texmapopacity": ("opacity", "texmapOnOpacity", "mapamountOpacity"),
+        "texmapbump": ("bump", "texmapOnBump", None),
+    }),
+    _MAX_FBX_CORONA_PHYSICAL: (_MAX_FBX_CORONA_PHYSICAL_PREFIX, {
+        "basetexmap": ("base_color", "baseTexmapOn", "baseMapAmount"),
+        "baseroughnesstexmap": ("roughness", "baseRoughnessTexmapOn", "baseRoughnessMapAmount"),
+        "opacitytexmap": ("opacity", "opacityTexmapOn", "opacityMapAmount"),
+        "basebumptexmap": ("bump", "baseBumpTexmapOn", None),
+        "metalnesstexmap": ("metallic", "metalnessTexmapOn", None),
+    }),
+}
+_MAX_FBX_CORONA_FIELDS = {
+    _MAX_FBX_CORONA_NORMAL_AMOUNT,
+    *(_MAX_FBX_CORONA_LEGACY_PREFIX + field for field in (
+        "colorDiffuse", "levelDiffuse", "colorReflect", "levelReflect", "reflectGlossiness", "fresnelIor",
+        "colorOpacity", "levelOpacity",
+    )),
+    *(_MAX_FBX_CORONA_PHYSICAL_PREFIX + field for field in (
+        "baseColor", "baseLevel", "baseRoughness", "roughnessMode", "baseIor", "iorMode", "useComplexIor",
+        "metalnessMode", "opacityColor", "opacityLevel",
+    )),
+    *(prefix + field for prefix, slots in _MAX_FBX_CORONA_SLOTS.values()
+      for _, enable, amount in slots.values() for field in (enable, amount) if field is not None),
+}
 _MAX_SAFETY_ERROR = "请在 3ds Max 的安全首选项中启用安全场景执行，阻止嵌入式 Python、.NET 和 MAXScript 系统命令，并取消排除脚本资源"
 _MAX_STAGE_NAMES = (
     (b"NEXUS_MAX_STAGE security", "检查安全场景设置"),
@@ -43,6 +113,209 @@ if 'FINISHED' not in result:
     raise RuntimeError('FBX export did not finish')
 """
 
+_MAX_MATERIAL_CAPTURE = r"""
+    fn nexusProp item key = (
+        try (if isProperty item key then getProperty item key else undefined) catch undefined
+    )
+
+    fn nexusNumber value low high = (
+        (isKindOf value Number) and value >= low and value <= high
+    )
+
+    fn nexusSwitch value = (
+        if value == true or value == 1 then true else (
+            if value == false or value == 0 then false else undefined
+        )
+    )
+
+    fn nexusDecimal value = (formattedPrint (value as float) format:".9g")
+
+    fn nexusSafeText value limit = (
+        (isKindOf value String) and value.count > 0 and value.count <= limit and
+        (findString value "\t") == undefined and (findString value "\r") == undefined and
+        (findString value "\n") == undefined
+    )
+
+    fn nexusScalar rows key value low high = (
+        if nexusNumber value low high do append rows ("N\t" + key + "\t" + (nexusDecimal value))
+    )
+
+    fn nexusRGB rows key rgb = (
+        if (isKindOf rgb Color) and (nexusNumber rgb.r 0 255) and
+            (nexusNumber rgb.g 0 255) and (nexusNumber rgb.b 0 255) do (
+            append rows ("C\t" + key + "\t" + (nexusDecimal (rgb.r / 255.0)) + "\t" +
+                (nexusDecimal (rgb.g / 255.0)) + "\t" + (nexusDecimal (rgb.b / 255.0)))
+        )
+    )
+
+    fn nexusBitmapPath bitmap = (
+        local kind = classOf bitmap
+        if kind == Bitmaptexture or kind == CoronaBitmap then nexusProp bitmap #filename
+        else if kind == VRayBitmap or kind == VRayHDRI then nexusProp bitmap #HDRIMapName
+        else undefined
+    )
+
+    fn nexusEnabledMap item key enabled = (
+        if (nexusSwitch (nexusProp item enabled)) == true then nexusProp item key else undefined
+    )
+
+    fn nexusFullMap item key enabled amount = (
+        if (nexusProp item amount) == 100 then nexusEnabledMap item key enabled else undefined
+    )
+
+    fn nexusImage rows channel bitmap amount = (
+        local path = nexusBitmapPath bitmap
+        if not (nexusSafeText path 4096) then return false
+        local line = "T\t" + channel + "\t" + path
+        if nexusNumber amount 0 100 do line += "\t" + (nexusDecimal amount)
+        append rows line
+        true
+    )
+
+    fn nexusBump rows bitmap amount = (
+        local kind = classOf bitmap
+        if kind == CoronaNormal then (
+            nexusImage rows "normal" (nexusProp bitmap #normalMap) (nexusProp bitmap #multiplier)
+        ) else if kind == VRayNormalMap then (
+            nexusImage rows "normal" (nexusEnabledMap bitmap #normal_map #normal_map_on) (nexusProp bitmap #normal_map_multiplier)
+        ) else (
+            nexusImage rows "bump" bitmap amount
+        )
+    )
+
+    fn nexusOpacity rows bitmap mapAmount level rgb = (
+        if bitmap != undefined and mapAmount != 0 then (
+            if mapAmount == 100 do nexusImage rows "opacity" bitmap undefined
+        )
+        else if (isKindOf rgb Color) and rgb.r == rgb.g and rgb.r == rgb.b and
+            (nexusNumber rgb.r 0 255) and (nexusNumber level 0 1) do (
+            nexusScalar rows "opacity" ((rgb.r / 255.0) * level) 0 1
+        )
+    )
+
+    fn nexusSpecular rows bitmap mapAmount level rgb = (
+        if bitmap == undefined then (
+            if (isKindOf rgb Color) and rgb.r == rgb.g and rgb.r == rgb.b and
+                (nexusNumber rgb.r 0 255) and (nexusNumber level 0 1) do (
+                nexusScalar rows "specular_strength" ((rgb.r / 255.0) * level) 0 1
+            )
+        ) else if mapAmount == 100 and (nexusImage rows "specular" bitmap undefined) do (
+            nexusScalar rows "specular_strength" level 0 1
+        )
+    )
+
+    fn nexusRoughness rows value mode bitmap = (
+        if mode == 0 or mode == 1 do (
+            if nexusNumber value 0 1 do nexusScalar rows "roughness" (if mode == 0 then value else 1.0 - value) 0 1
+            nexusImage rows (if mode == 0 then "roughness" else "glossiness") bitmap undefined
+        )
+    )
+
+    fn nexusCaptureParams rows item family = (
+        case family of (
+            "corona_legacy": (
+                nexusRGB rows "base_color" (nexusProp item #colorDiffuse)
+                nexusScalar rows "diffuse_strength" (nexusProp item #levelDiffuse) 0 100
+                nexusScalar rows "ior" (nexusProp item #fresnelIor) 1 8
+                nexusRoughness rows (nexusProp item #reflectGlossiness) 1 (nexusFullMap item #texmapReflectGlossiness #texmapOnReflectGlossiness #mapamountReflectGlossiness)
+                nexusImage rows "base_color" (nexusFullMap item #texmapDiffuse #texmapOnDiffuse #mapamountDiffuse) undefined
+                nexusBump rows (nexusEnabledMap item #texmapBump #texmapOnBump) (nexusProp item #mapamountBump)
+                nexusOpacity rows (nexusEnabledMap item #texmapOpacity #texmapOnOpacity) (nexusProp item #mapamountOpacity) (nexusProp item #levelOpacity) (nexusProp item #colorOpacity)
+                nexusSpecular rows (nexusEnabledMap item #texmapReflect #texmapOnReflect) (nexusProp item #mapamountReflect) (nexusProp item #levelReflect) (nexusProp item #colorReflect)
+            )
+            "corona_physical": (
+                nexusRGB rows "base_color" (nexusProp item #baseColor)
+                nexusScalar rows "diffuse_strength" (nexusProp item #baseLevel) 0 100
+                nexusScalar rows "metallic" (nexusProp item #metalnessMode) 0 1
+                if (nexusProp item #iorMode) == 0 do nexusScalar rows "ior" (nexusProp item #baseIor) 1 8
+                nexusRoughness rows (nexusProp item #baseRoughness) (nexusProp item #roughnessMode) (nexusFullMap item #baseRoughnessTexmap #baseRoughnessTexmapOn #baseRoughnessMapAmount)
+                nexusImage rows "base_color" (nexusFullMap item #baseTexmap #baseTexmapOn #baseMapAmount) undefined
+                nexusImage rows "metallic" (nexusEnabledMap item #metalnessTexmap #metalnessTexmapOn) undefined
+                nexusBump rows (nexusEnabledMap item #baseBumpTexmap #baseBumpTexmapOn) (nexusProp item #baseBumpMapAmount)
+                nexusOpacity rows (nexusEnabledMap item #opacityTexmap #opacityTexmapOn) (nexusProp item #opacityMapAmount) (nexusProp item #opacityLevel) (nexusProp item #opacityColor)
+            )
+            "vray": (
+                nexusRGB rows "base_color" (nexusProp item #diffuse)
+                nexusScalar rows "metallic" (nexusProp item #reflection_metalness) 0 1
+                local fresnel = nexusSwitch (nexusProp item #reflection_fresnel)
+                local locked = nexusSwitch (nexusProp item #reflection_lockIOR)
+                if fresnel == true and (locked == true or locked == false) do (
+                    nexusScalar rows "ior" (nexusProp item (if locked then #refraction_ior else #reflection_ior)) 1 8
+                )
+                local useRoughness = nexusSwitch (nexusProp item #brdf_useRoughness)
+                if useRoughness == true or useRoughness == false do (
+                    nexusRoughness rows (nexusProp item #reflection_glossiness) (if useRoughness then 0 else 1) (nexusFullMap item #texmap_reflectionGlossiness #texmap_reflectionGlossiness_on #texmap_reflectionGlossiness_multiplier)
+                )
+                nexusImage rows "base_color" (nexusFullMap item #texmap_diffuse #texmap_diffuse_on #texmap_diffuse_multiplier) undefined
+                nexusImage rows "metallic" (nexusFullMap item #texmap_metalness #texmap_metalness_on #texmap_metalness_multiplier) undefined
+                local bump = nexusProp item #texmap_bump_multiplier
+                if nexusNumber bump 0 10000 do bump /= 100.0
+                nexusBump rows (nexusEnabledMap item #texmap_bump #texmap_bump_on) bump
+                nexusOpacity rows (nexusEnabledMap item #texmap_opacity #texmap_opacity_on) (nexusProp item #texmap_opacity_multiplier) 1.0 (nexusProp item #opacity)
+                nexusSpecular rows (nexusEnabledMap item #texmap_reflection #texmap_reflection_on) (nexusProp item #texmap_reflection_multiplier) (nexusProp item #reflection_weight) (nexusProp item #reflection)
+            )
+        )
+    )
+
+    fn nexusWriteMaterials stream = (
+        if sceneMaterials.count >= 8192 then return false
+        local queue = #()
+        for idx = 1 to sceneMaterials.count do appendIfUnique queue sceneMaterials[idx]
+        local cursor = 1
+        local examined = 0
+        while cursor <= queue.count do (
+            local item = queue[cursor]
+            cursor += 1
+            local count = try (getNumSubMtls item) catch 0
+            examined += count
+            if examined > 30000 then return false
+            for idx = 1 to count do (
+                local child = try (getSubMtl item idx) catch undefined
+                if child != undefined do appendIfUnique queue child
+                if queue.count >= 8192 then return false
+            )
+        )
+        local names = Dictionary #string
+        for item in queue do (
+            local label = nexusProp item #name
+            if nexusSafeText label 256 do names[label] = if names[label] == undefined then 1 else 2
+        )
+        local rowCount = 1
+        local charCount = 0
+        format "NEXUS_MAX_MATERIALS_V1\n" to:stream
+        for item in queue do (
+            local kind = classOf item
+            local family = if kind == VRayMtl then "vray" else (
+                if kind == CoronaLegacyMtl then "corona_legacy" else (
+                    if kind == CoronaPhysicalMtl then "corona_physical" else undefined
+                )
+            )
+            local label = if family != undefined then nexusProp item #name else undefined
+            if (nexusSafeText label 256) and names[label] == 1 do (
+                local rows = #("M\t" + label + "\t" + family)
+                try (nexusCaptureParams rows item family) catch (rows = #())
+                local size = 0
+                for row in rows do size += row.count + 2
+                if rowCount + rows.count >= 30000 or charCount + size > 1500000 then return false
+                for row in rows do format "%\n" row to:stream
+                rowCount += rows.count
+                charCount += size
+            )
+        )
+        format "END\n" to:stream
+        true
+    )
+
+    fn nexusCaptureMaterials destination = (
+        local temporary = destination + ".tmp"
+        local stream = createFile temporary encoding:#utf8 writeBOM:false
+        if stream == undefined then return false
+        local complete = try (nexusWriteMaterials stream) catch false
+        close stream
+        if complete then renameFile temporary destination else false
+    )
+"""
+
 _MAX_EXPORT = r"""
 (
     fn requireSafeScene = (
@@ -54,6 +327,7 @@ _MAX_EXPORT = r"""
                 security.IsSafeScriptAssetExecutionEnabled()) do
             throw "NEXUS_MAX_SAFE_SCENE_REQUIRED"
     )
+""" + _MAX_MATERIAL_CAPTURE + r"""
     logsystem.logEntry "NEXUS_MAX_STAGE security" broadcast:true
     requireSafeScene()
 
@@ -72,6 +346,9 @@ _MAX_EXPORT = r"""
     requireSafeScene()
     logsystem.logEntry "NEXUS_MAX_SAFE_SCENE_VERIFIED" broadcast:true
     format "NEXUS_MAX_MISSING % % %\n" missingFiles.count missingPlugins.count missingReferences.count
+    if not (try (nexusCaptureMaterials ((getFilenamePath output) + "max-material-data.tsv")) catch false) do (
+        format "NEXUS_MAX_MATERIAL_CAPTURE_FAILED\n"
+    )
     logsystem.logEntry "NEXUS_MAX_STAGE configure-fbx" broadcast:true
     pluginManager.loadClass FbxExporter
     FBXExporterSetParam "ASCII" false
@@ -177,6 +454,8 @@ def max_export_warning(output):
     warnings = [f"MAX 场景缺少 {missing}"] if missing else []
     if any(_blocked_scene_error(line) for line in _MAX_LOG_ERRORS.findall(logs)):
         warnings.append("3ds Max 安全设置已拦截场景中的嵌入式脚本")
+    if b"NEXUS_MAX_MATERIAL_CAPTURE_FAILED" in logs:
+        warnings.append("未能记录 MAX 原生材质，已使用 FBX 材质数据")
     return " · ".join(warnings)
 
 
@@ -252,6 +531,500 @@ def _complete_binary_fbx(output):
             return first_node_min_end < first_node_end < footer_start and file.read() == footer
     except OSError:
         return False
+
+
+class _FbxTextureReader:
+    """Read only relevant FBX metadata. Embedded media and geometry are skipped by offset."""
+
+    def __init__(self, file):
+        self.file = file
+        self.end = file.seek(0, os.SEEK_END)
+        file.seek(0)
+        if file.read(len(_FBX_HEADER)) != _FBX_HEADER:
+            raise ValueError("Missing binary FBX header")
+        version, = struct.unpack("<I", file.read(4))
+        if not 7000 <= version <= 7700:
+            raise ValueError("Unsupported binary FBX version")
+        self.header = struct.Struct("<QQQB" if version >= 7500 else "<IIIB")
+        self.remaining_nodes = 250_000
+
+    def nodes(self, parent_end):
+        while self.file.tell() < parent_end:
+            start = self.file.tell()
+            if parent_end - start < self.header.size or self.remaining_nodes <= 0:
+                raise ValueError("Invalid FBX node boundary")
+            self.remaining_nodes -= 1
+            end, count, size, name_size = self.header.unpack(self.file.read(self.header.size))
+            if not end:
+                if count or size or name_size or (parent_end != self.end and self.file.tell() != parent_end):
+                    raise ValueError("Invalid FBX node terminator")
+                return
+            properties_end = self.file.tell() + name_size + size
+            if not name_size or not start < properties_end <= end <= parent_end or count > size:
+                raise ValueError("Invalid FBX node offset")
+            name = self.file.read(name_size)
+            yield name, count, properties_end, end
+            self.file.seek(end)
+
+    def properties(self, count, end):
+        if count > 64 or not 0 <= end - self.file.tell() <= 32_768:
+            return ()
+        payload = self.file.read(end - self.file.tell())
+        values = []
+        offset = 0
+        numeric = {b"Y": "<h", b"C": "<?", b"I": "<i", b"F": "<f", b"D": "<d", b"L": "<q"}
+        for _ in range(count):
+            kind = payload[offset:offset + 1]
+            offset += 1
+            if kind in numeric:
+                shape = numeric[kind]
+                value, = struct.unpack_from(shape, payload, offset)
+                offset += struct.calcsize(shape)
+            elif kind in {b"S", b"R"}:
+                size, = struct.unpack_from("<I", payload, offset)
+                offset += 4
+                if size > len(payload) - offset:
+                    raise ValueError("Invalid FBX property size")
+                value = payload[offset:offset + size].decode("utf-8", "replace") if kind == b"S" else None
+                offset += size
+            else:
+                return ()
+            values.append(value)
+        if offset != len(payload):
+            raise ValueError("Invalid FBX property boundary")
+        return values
+
+    def material_fields(self, properties_end, end):
+        paths = []
+        class_ids = {}
+        disabled = set()
+        native = {}
+        self.file.seek(properties_end)
+        for name, count, prop_end, node_end in self.nodes(end):
+            if name in {b"FileName", b"Filename", b"RelativeFilename"}:
+                paths.extend(value for value in self.properties(count, prop_end) if isinstance(value, str) and value)
+            elif name == b"Properties70":
+                self.file.seek(prop_end)
+                for field, count, field_end, _ in self.nodes(node_end):
+                    if field != b"P":
+                        continue
+                    values = self.properties(count, field_end)
+                    if len(values) < 5 or not isinstance(values[0], str):
+                        continue
+                    key, value = values[0], values[4]
+                    if key in _MAX_FBX_VRAY_FIELDS or key in _MAX_FBX_CORONA_FIELDS:
+                        native[key] = value if len(values) == 5 else tuple(values[4:])
+                    if len(values) != 5:
+                        continue
+                    if key in {"3dsMax|ClassIDa", "3dsMax|ClassIDb"} and type(value) is int:
+                        class_ids[key] = value
+                    elif key in _MAX_FBX_TEXTURE_FIELDS and isinstance(value, str) and value:
+                        paths.append(value)
+                    elif key.startswith("3dsMax|maps|") and key.endswith("_on") and value == 0:
+                        channel = _MAX_FBX_MATERIAL_SLOTS.get(key.removeprefix("3dsMax|maps|").removesuffix("_on").lower())
+                        if channel:
+                            disabled.add(channel)
+        return paths, (class_ids.get("3dsMax|ClassIDa"), class_ids.get("3dsMax|ClassIDb")), disabled, native
+
+    def texture_graph(self):
+        objects = {}
+        connections = []
+        seen = set()
+        for name, _, prop_end, end in self.nodes(self.end):
+            if name not in {b"Objects", b"Connections"}:
+                continue
+            if name in seen:
+                raise ValueError("Duplicate FBX section")
+            seen.add(name)
+            self.file.seek(prop_end)
+            for kind, count, node_prop_end, node_end in self.nodes(end):
+                if name == b"Objects" and kind in {b"Material", b"Texture", b"Video", b"LayeredTexture"}:
+                    values = self.properties(count, node_prop_end)
+                    if len(values) < 2 or type(values[0]) is not int or not isinstance(values[1], str):
+                        continue
+                    node_id, label = values[:2]
+                    if node_id <= 0 or node_id in objects:
+                        raise ValueError("Duplicate or invalid FBX object identifier")
+                    label = label.split("\x00\x01", 1)[0]
+                    fields = self.material_fields(node_prop_end, node_end) if kind != b"LayeredTexture" else ((), None, (), {})
+                    objects[node_id] = kind, label, fields
+                elif name == b"Connections" and kind == b"C":
+                    values = self.properties(count, node_prop_end)
+                    if (len(values) in {3, 4} and values[0] in {"OO", "OP"}
+                            and all(type(value) is int for value in values[1:3])):
+                        slot = values[3].lower() if len(values) == 4 and isinstance(values[3], str) else ""
+                        if (values[0] == "OP") == bool(slot):
+                            connections.append((values[1], values[2], slot))
+        return objects, connections
+
+
+def _fbx_texture_path(reference, root, embedded):
+    if (len(reference) > 4096 or any(ord(char) < 32 or char in '*?<>|"\ufffd' for char in reference)
+            or ":" in reference[2:]):
+        return None
+    entry = PureWindowsPath(reference)
+    if not entry.name or ".." in entry.parts or entry.suffix.lower() not in _FBX_TEXTURE_EXTENSIONS:
+        return None
+    if entry.parts[0].startswith(("\\\\?\\", "\\\\.\\")):
+        return None
+
+    def contained_file(candidate, folder):
+        try:
+            if not candidate.is_relative_to(folder):
+                return None
+            resolved = candidate.resolve(strict=True)
+            if resolved.is_relative_to(folder) and resolved.is_file():
+                return resolved
+        except (OSError, RuntimeError, ValueError):
+            pass
+        return None
+
+    native_path = Path(reference)
+    if entry.anchor and not entry.is_absolute() and not native_path.is_absolute():
+        return None
+    if root:
+        candidate = native_path if entry.is_absolute() or native_path.is_absolute() else root.joinpath(*entry.parts)
+        if original := contained_file(candidate, root):
+            return original
+    return contained_file(embedded / entry.name, embedded) if embedded else None
+
+
+def _fbx_number(value, minimum=0.0, maximum=1.0):
+    if type(value) in (int, float) and minimum <= value <= maximum:
+        return float(value)
+    return None
+
+
+def _fbx_rgb(value):
+    if isinstance(value, tuple) and len(value) == 3 and all(_fbx_number(component) is not None for component in value):
+        return value
+    return None
+
+
+def _fbx_gray(value):
+    color = _fbx_rgb(value)
+    if color is not None and color[0] == color[1] == color[2]:
+        return color[0]
+    return None
+
+
+def _vray_material_settings(native, maps):
+    settings = {}
+    if (color := _fbx_rgb(native.get("3dsMax|basic|diffuse"))) is not None:
+        settings["base_color"] = color
+    if (metallic := _fbx_number(native.get("3dsMax|basic|reflection_metalness"))) is not None:
+        settings["metallic"] = metallic
+    roughness_mode = native.get("3dsMax|BRDF|brdf_useRoughness")
+    gloss = _fbx_number(native.get("3dsMax|basic|reflection_glossiness"))
+    if roughness_mode in (0, 1) and gloss is not None:
+        settings["roughness"] = gloss if roughness_mode else 1.0 - gloss
+    if native.get("3dsMax|basic|reflection_fresnel") == 1:
+        locked = native.get("3dsMax|basic|reflection_lockIOR")
+        if locked in (0, 1):
+            key = "refraction_ior" if locked else "reflection_ior"
+            if (ior := _fbx_number(native.get("3dsMax|basic|" + key), 1.0, 8.0)) is not None:
+                settings["ior"] = ior
+    reflection = _fbx_gray(native.get("3dsMax|basic|reflection"))
+    weight = _fbx_number(native.get("3dsMax|basic|reflection_weight"))
+    if reflection is not None and weight is not None:
+        settings["specular_strength"] = reflection * weight
+    if "bump" in maps:
+        bump = _fbx_number(native.get("3dsMax|maps|texmap_bump_multiplier"), maximum=10000.0)
+        if bump is not None:
+            settings.update(bump_map=str(maps["bump"]), bump_strength=bump / 100.0)
+    return settings
+
+
+def _corona_legacy_settings(native, maps):
+    prefix = _MAX_FBX_CORONA_LEGACY_PREFIX
+    settings = {}
+    if (color := _fbx_rgb(native.get(prefix + "colorDiffuse"))) is not None:
+        settings["base_color"] = color
+    if (diffuse := _fbx_number(native.get(prefix + "levelDiffuse"), maximum=100.0)) is not None:
+        settings["diffuse_strength"] = diffuse
+    if (gloss := _fbx_number(native.get(prefix + "reflectGlossiness"))) is not None:
+        settings["roughness"] = 1.0 - gloss
+    if (ior := _fbx_number(native.get(prefix + "fresnelIor"), 1.0, 8.0)) is not None:
+        settings["ior"] = ior
+    reflection = 1.0 if "specular" in maps else _fbx_gray(native.get(prefix + "colorReflect"))
+    reflection_level = _fbx_number(native.get(prefix + "levelReflect"))
+    if reflection is not None and reflection_level is not None:
+        settings["specular_strength"] = reflection * reflection_level
+    opacity = _fbx_gray(native.get(prefix + "colorOpacity"))
+    opacity_level = _fbx_number(native.get(prefix + "levelOpacity"))
+    if opacity is not None and opacity_level is not None:
+        settings["opacity"] = opacity * opacity_level
+    return settings
+
+
+def _corona_physical_settings(native, has_metalness_map):
+    prefix = _MAX_FBX_CORONA_PHYSICAL_PREFIX
+    settings = {}
+    if (color := _fbx_rgb(native.get(prefix + "baseColor"))) is not None:
+        settings["base_color"] = color
+    if (diffuse := _fbx_number(native.get(prefix + "baseLevel"), maximum=100.0)) is not None:
+        settings["diffuse_strength"] = diffuse
+    mode = native.get(prefix + "roughnessMode")
+    roughness = _fbx_number(native.get(prefix + "baseRoughness"))
+    if mode in (0, 1) and roughness is not None:
+        settings["roughness"] = 1.0 - roughness if mode else roughness
+    metalness = native.get(prefix + "metalnessMode")
+    if metalness in (0, 1) and not has_metalness_map:
+        settings["metallic"] = float(metalness)
+    if metalness == 0 and native.get(prefix + "iorMode") == 0 and native.get(prefix + "useComplexIor") != 1:
+        if (ior := _fbx_number(native.get(prefix + "baseIor"), 1.0, 8.0)) is not None:
+            settings["ior"] = ior
+    opacity = _fbx_gray(native.get(prefix + "opacityColor"))
+    opacity_level = _fbx_number(native.get(prefix + "opacityLevel"))
+    if opacity is not None and opacity_level is not None:
+        settings["opacity"] = opacity * opacity_level
+    return settings
+
+
+def _corona_map_channel(slot, native, class_id):
+    prefix, slots = _MAX_FBX_CORONA_SLOTS[class_id]
+    if not slot.startswith(prefix.lower()) or (binding := slots.get(slot[len(prefix):])) is None:
+        return None
+    channel, enable, amount = binding
+    if native.get(prefix + enable) != 1 or (amount is not None and native.get(prefix + amount) != 1.0):
+        return None
+    if class_id == _MAX_FBX_CORONA_PHYSICAL and channel == "roughness":
+        mode = native.get(prefix + "roughnessMode")
+        if mode not in (0, 1):
+            return None
+        return "glossiness" if mode else "roughness"
+    return channel
+
+
+def _max_fbx_material_data(output, source, *, include_textures=True):
+    """Read unambiguous image paths and known native material values from a 3ds Max Batch export."""
+    try:
+        output = Path(output).resolve(strict=True)
+        media = output.with_suffix(".fbm")
+        embedded = media if include_textures and media.is_dir() and media.resolve() == media else None
+        with output.open("rb") as file:
+            objects, connections = _FbxTextureReader(file).texture_graph()
+    except (OSError, RuntimeError, ValueError, struct.error):
+        return {}, {}
+    root = None
+    if include_textures:
+        try:
+            root = Path(source).absolute().parent.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            pass
+
+    incoming = defaultdict(set)
+    if include_textures:
+        for child, target, slot in connections:
+            if child in objects and target in objects:
+                incoming[target].add((child, slot))
+    material_names = Counter(label for kind, label, _ in objects.values() if kind == b"Material")
+
+    @lru_cache(maxsize=8192)
+    def verified(reference, embedded_only=False):
+        return _fbx_texture_path(reference, None if embedded_only else root, embedded if embedded_only else None)
+
+    def map_texture(node, channel, depth=0, normal_amount=None):
+        kind, _, (paths, class_id, _, native) = objects[node]
+        if kind != b"Texture" or depth >= 8:
+            return None
+        if class_id == _MAX_FBX_NORMAL_WRAPPER:
+            if channel not in {"bump", "normal"} or native.get(_MAX_FBX_NORMAL_ON) == 0:
+                return None
+            channel = "normal"
+            if native.get(_MAX_FBX_NORMAL_ON) == 1:
+                normal_amount = _fbx_number(native.get(_MAX_FBX_NORMAL_AMOUNT), maximum=100.0)
+        elif class_id == _MAX_FBX_CORONA_NORMAL:
+            if channel not in {"bump", "normal"}:
+                return None
+            channel = "normal"
+            normal_amount = _fbx_number(native.get(_MAX_FBX_CORONA_NORMAL_AMOUNT), maximum=100.0)
+        links = incoming[node]
+        references = set(paths)
+        for child, slot in links:
+            if not slot and objects[child][0] == b"Video":
+                references.update(objects[child][2][0])
+        files = {file for reference in references if (file := verified(reference))}
+        if embedded:
+            original_names = {file.name.casefold() for file in files}
+            files.update(file for reference in references if PureWindowsPath(reference).name.casefold() not in original_names
+                         and (file := verified(reference, embedded_only=True)))
+        if len(files) == 1:
+            return channel, files.pop(), normal_amount
+        slots = _MAX_FBX_WRAPPERS.get(class_id)
+        upstream = {child for child, slot in links if slot}
+        if not files and slots and len(upstream) == 1 and {slot for _, slot in links if slot} == slots:
+            return map_texture(upstream.pop(), channel, depth + 1, normal_amount)
+        return None
+
+    texture_bindings = {}
+    material_settings = {}
+    for material, (kind, name, (_, class_id, disabled, native)) in objects.items():
+        if (kind != b"Material" or material_names[name] != 1 or not 0 < len(name) <= 256
+                or any(ord(char) < 32 or char == "\ufffd" for char in name)):
+            continue
+        slots = defaultdict(set)
+        for child, slot in incoming[material]:
+            if slot.startswith(("3dsmax|basic|", "3dsmax|maps|")):
+                channel = _MAX_FBX_MATERIAL_SLOTS.get(slot.rsplit("|", 1)[-1])
+            elif class_id in _MAX_FBX_CORONA_SLOTS and slot.startswith("3dsmax|corona"):
+                channel = _corona_map_channel(slot, native, class_id)
+            else:
+                channel = _FBX_MATERIAL_SLOTS.get(slot)
+            if not channel or channel in disabled or objects[child][0] not in {b"Texture", b"LayeredTexture"}:
+                continue
+            if channel == "glossiness" and class_id not in _MAX_FBX_CORONA_SLOTS:
+                mode = native.get("3dsMax|BRDF|brdf_useRoughness")
+                amount = native.get("3dsMax|maps|texmap_reflectionGlossiness_multiplier")
+                if class_id != _MAX_FBX_VRAY_MATERIAL or mode not in (0, 1) or amount != 100:
+                    continue
+                channel = "roughness" if mode else "glossiness"
+            slots[channel].add(child)
+
+        channels = defaultdict(set)
+        normal_amounts = defaultdict(set)
+        for channel, textures in slots.items():
+            bindings = {map_texture(texture, channel) for texture in textures}
+            if None in bindings:
+                continue
+            paths = {(mapped_channel, path) for mapped_channel, path, _ in bindings}
+            if len(paths) != 1:
+                continue
+            mapped_channel, path = paths.pop()
+            channels[mapped_channel].add(path)
+            if mapped_channel == "normal":
+                normal_amounts[path].update(amount for _, _, amount in bindings if amount is not None)
+        resolved = {channel: paths.pop() for channel, paths in channels.items() if len(paths) == 1}
+        if resolved:
+            texture_bindings[name] = {channel: str(path) for channel, path in resolved.items()}
+        if class_id == _MAX_FBX_VRAY_MATERIAL:
+            settings = _vray_material_settings(native, resolved)
+        elif class_id == _MAX_FBX_CORONA_LEGACY:
+            settings = _corona_legacy_settings(native, resolved)
+        elif class_id == _MAX_FBX_CORONA_PHYSICAL:
+            prefix = _MAX_FBX_CORONA_PHYSICAL_PREFIX
+            has_metalness_map = native.get(prefix + "metalnessTexmapOn") == 1 and any(
+                slot == prefix.lower() + "metalnesstexmap" for _, slot in incoming[material]
+            )
+            settings = _corona_physical_settings(native, has_metalness_map)
+        else:
+            settings = {}
+        if "normal" in resolved and len(normal_amounts[resolved["normal"]]) == 1:
+            strength, = normal_amounts[resolved["normal"]]
+            settings.update(normal_map=str(resolved["normal"]), normal_strength=strength)
+        if settings:
+            material_settings[name] = settings
+    return texture_bindings, material_settings
+
+
+_MAX_CAPTURE_FILE = "max-material-data.tsv"
+_MAX_CAPTURE_LIMIT = 8 * 1024 * 1024
+_MAX_CAPTURE_FAMILIES = {"vray", "corona_legacy", "corona_physical"}
+_MAX_CAPTURE_SCALARS = {
+    "diffuse_strength": (0.0, 100.0), "specular_strength": (0.0, 1.0),
+    "roughness": (0.0, 1.0), "metallic": (0.0, 1.0), "ior": (1.0, 8.0), "opacity": (0.0, 1.0),
+}
+_MAX_CAPTURE_TEXTURES = {
+    "base_color", "roughness", "glossiness", "metallic", "specular", "normal", "bump", "opacity",
+}
+
+
+def _max_capture_number(text, minimum, maximum):
+    try:
+        return _fbx_number(float(text), minimum, maximum)
+    except ValueError:
+        return None
+
+
+def _max_capture_material_data(output, source, include_textures):
+    try:
+        output = Path(output).resolve(strict=True)
+        capture = output.with_name(_MAX_CAPTURE_FILE)
+        if capture.resolve(strict=True) != capture:
+            return {}, {}
+        with capture.open("rb") as file:
+            raw = file.read(_MAX_CAPTURE_LIMIT + 1)
+        if len(raw) > _MAX_CAPTURE_LIMIT:
+            return {}, {}
+        lines = raw.decode("utf-8-sig").rstrip("\r\n").split("\n")
+    except (OSError, RuntimeError, ValueError):
+        return {}, {}
+    if lines[0].rstrip("\r") != "NEXUS_MAX_MATERIALS_V1" or lines[-1].rstrip("\r") != "END":
+        return {}, {}
+
+    root = embedded = None
+    if include_textures:
+        try:
+            root = Path(source).absolute().parent.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            pass
+        media = output.with_suffix(".fbm")
+        try:
+            if media.resolve(strict=True) == media and media.is_dir():
+                embedded = media
+        except (OSError, RuntimeError, ValueError):
+            pass
+
+    @lru_cache(maxsize=8192)
+    def resolve(path):
+        return _fbx_texture_path(path, root, embedded)
+
+    materials = {}
+    names = Counter()
+    record = None
+    for line in lines[1:-1]:
+        tag, *fields = line.rstrip("\r").split("\t")
+        if tag == "M":
+            record = None
+            if len(fields) != 2 or fields[1] not in _MAX_CAPTURE_FAMILIES:
+                continue
+            name = fields[0]
+            if not 0 < len(name) <= 256 or any(ord(char) < 32 or char == "\ufffd" for char in name):
+                continue
+            names[name] += 1
+            record = materials.setdefault(name, ({}, {})) if names[name] == 1 else None
+            continue
+        if record is None or len(fields) < 2:
+            continue
+        maps, settings = record
+        key = fields[0]
+        if tag == "N" and len(fields) == 2 and key in _MAX_CAPTURE_SCALARS:
+            if (number := _max_capture_number(fields[1], *_MAX_CAPTURE_SCALARS[key])) is not None:
+                settings[key] = number
+        elif tag == "C" and key == "base_color" and len(fields) == 4:
+            rgb = tuple(_max_capture_number(value, 0.0, 1.0) for value in fields[1:])
+            if None not in rgb:
+                settings[key] = rgb
+        elif tag == "T" and include_textures and key in _MAX_CAPTURE_TEXTURES and len(fields) in (2, 3):
+            if path := resolve(fields[1]):
+                maps[key] = str(path)
+                if len(fields) == 3 and key in {"normal", "bump"}:
+                    if (strength := _max_capture_number(fields[2], 0.0, 100.0)) is not None:
+                        settings[key + "_map"] = str(path)
+                        settings[key + "_strength"] = strength
+    return ({name: maps for name, (maps, _) in materials.items() if names[name] == 1 and maps},
+            {name: values for name, (_, values) in materials.items() if names[name] == 1 and values})
+
+
+def max_material_data(output, source, *, include_textures=True):
+    """Use verified native Batch capture first, with FBX metadata as a fallback."""
+    maps, settings = _max_fbx_material_data(output, source, include_textures=include_textures)
+    captured_maps, captured_settings = _max_capture_material_data(output, source, include_textures)
+    for name, channels in captured_maps.items():
+        target = maps.setdefault(name, {})
+        if "normal" in channels and target.get("bump") == channels["normal"]:
+            target.pop("bump")
+        for channel, opposite in (("roughness", "glossiness"), ("glossiness", "roughness")):
+            if channel in channels and opposite not in channels and target.get(opposite) == channels[channel]:
+                target.pop(opposite)
+        target.update(channels)
+    for name, values in captured_settings.items():
+        settings.setdefault(name, {}).update(values)
+    return maps, settings
+
+
+def max_texture_bindings(output, source):
+    return max_material_data(output, source)[0]
 
 
 def _terminate_converter(process):

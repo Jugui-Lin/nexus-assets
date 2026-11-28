@@ -142,8 +142,8 @@ def file_asset_metadata(data):
     return paths, aliases, bitmap_guids
 
 
-def corona_bitmap_asset_path(reader, bitmap, bitmap_guids):
-    if reader.get_guid(bitmap) != 0x65484244ABBA5784:  # CoronaBitmap.
+def bitmap_asset_path(reader, bitmap, bitmap_guids):
+    if reader.get_guid(bitmap) not in (0x65484244ABBA5784, 0x02C1017D6769144B):  # CoronaBitmap, VRayBitmap.
         return None
     references = reader.get_references(bitmap)
     block = references[0] if references else None
@@ -345,11 +345,49 @@ def find_asset_path(index):
 
 
 def find_bitmap_path(bitmap):
-    path = get_bitmap(bitmap)
-    if path:
-        return path
+    if bitmap is None:
+        return None
     paths = getattr(reader.META_DATA[0], "nexus_paths", None) if reader.META_DATA else None
-    return corona_bitmap_asset_path(reader, bitmap, paths[2]) if paths is not None else None
+    bitmap_guids = paths[2] if paths is not None else {}
+    # These slots are the color inputs. Mask, bump and control inputs must
+    # never become the diffuse map of the material.
+    vray_dirt = 0x090D5EA42F567899
+    inputs = {
+        0x230: (1, 2),  # Mix.
+        0x2D0: (1,),  # Color Correction.
+        0x6EC3730C: (4, 5),  # Falloff.
+        vray_dirt: (5, 6),
+    }
+    pending = [bitmap]
+    seen = set()
+    found = {}
+    while pending:
+        node = pending.pop()
+        key = id(node)
+        if key in seen:
+            continue
+        if len(seen) >= 32:
+            return None
+        seen.add(key)
+        try:
+            kind = reader.get_guid(node)
+            slots = inputs.get(kind)
+            if slots is not None:
+                if kind == vray_dirt:
+                    node = reference_slots(node, 1)[0]
+                    if reader.get_guid(node) != 0x82:
+                        continue
+                references = reference_slots(node, slots[-1] + 1)
+                pending.extend(references[slot] for slot in slots if references[slot] is not None)
+                continue
+            path = bitmap_asset_path(reader, node, bitmap_guids) or get_bitmap(node)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, struct.error):
+            continue
+        if isinstance(path, str) and path:
+            found[str(PureWindowsPath(path)).casefold()] = path
+            if len(found) > 1:
+                return None
+    return next(iter(found.values()), None)
 
 
 def build_corona_material(references):

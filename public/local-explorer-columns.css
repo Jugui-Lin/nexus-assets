@@ -20,6 +20,23 @@
   vertical-align: middle;
 }
 
+#file-workspace th[data-column-sort] { padding: 0; }
+
+#file-workspace th[data-column-sort] .local-explorer-column-label {
+  display: block;
+  inline-size: 100%;
+  padding: 6px 12px 6px 10px;
+  text-align: inherit;
+}
+
+#file-workspace th[data-column-sort] .local-explorer-column-label:hover {
+  background: var(--card);
+  color: var(--text);
+}
+
+#file-workspace th[data-column-sort] .local-explorer-column-label:focus-visible { outline-offset: -2px; }
+#file-workspace th[aria-sort] .local-explorer-column-label { color: var(--accent); }
+
 [data-explorer-custom-columns] th[aria-sort="ascending"] .local-explorer-column-label::after { content: " ↑"; }
 [data-explorer-custom-columns] th[aria-sort="descending"] .local-explorer-column-label::after { content: " ↓"; }
 

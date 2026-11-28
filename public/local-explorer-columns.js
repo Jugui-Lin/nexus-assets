@@ -165,7 +165,8 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
       const index = visibleColumns().findIndex(col => col.id === id);
       if (index < 0) continue;
       const th = header.cells[index];
-      let width = textWidth(th.firstElementChild) + horizontalPadding(th) + 26;
+      const heading = th.firstElementChild;
+      let width = textWidth(heading) + horizontalPadding(th) + horizontalPadding(heading) + 26;
       for (const row of table.tBodies[0].querySelectorAll('tr[data-entry-index]')) {
         const cell = row.cells[index];
         const label = id === 'name' ? cell.querySelector('.local-explorer-entry-name') : cell;
@@ -236,9 +237,7 @@ export function initExplorerColumns({table,onSort,formatters,onChange,showProper
       if (col.sort) {
         th.dataset.columnSort = col.sort;
         label.type = 'button';
-        label.addEventListener('click',() => onSort({
-          sortBy:col.sort,descending:sorting?.sortBy === col.sort ? !sorting.descending : false,
-        }));
+        label.addEventListener('click',() => onSort(col.sort));
       }
       const grip = owner.createElement('button');
       grip.type = 'button';

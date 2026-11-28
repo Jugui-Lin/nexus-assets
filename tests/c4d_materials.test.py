@@ -213,6 +213,77 @@ class TextureTests(unittest.TestCase):
         self.assertEqual(inserted[1][MATERIALS._OCT_SYMBOLS["OCT_MATERIAL_DIFFUSE_LINK"]][file_id], baked)
 
 
+class StandardBatchScalarTests(unittest.TestCase):
+    def setUp(self):
+        constants = (
+            "Mmaterial Xbitmap MSG_UPDATE BITMAPSHADER_FILENAME MATERIAL_COLOR_COLOR MATERIAL_USE_COLOR "
+            "MATERIAL_USE_REFLECTION MATERIAL_BUMP_SHADER MATERIAL_USE_BUMP "
+            "MATERIAL_BUMP_STRENGTH MATERIAL_NORMAL_SHADER MATERIAL_USE_NORMAL MATERIAL_NORMAL_STRENGTH "
+            "REFLECTION_DISTRIBUTION_GGX REFLECTION_FRESNEL_DIELECTRIC REFLECTION_FRESNEL_DIELECTRIC_CUSTOM "
+            "REFLECTION_FRESNEL_CONDUCTOR"
+        )
+        layer_constants = (
+            "REFLECTION_LAYER_MAIN_DISTRIBUTION REFLECTION_LAYER_MAIN_VALUE_SPECULAR "
+            "REFLECTION_LAYER_MAIN_SHADER_SPECULAR REFLECTION_LAYER_MAIN_VALUE_ROUGHNESS "
+            "REFLECTION_LAYER_MAIN_SHADER_ROUGHNESS REFLECTION_LAYER_FRESNEL_MODE "
+            "REFLECTION_LAYER_FRESNEL_SHADER_IOR REFLECTION_LAYER_FRESNEL_PRESET REFLECTION_LAYER_FRESNEL_VALUE_IOR"
+        )
+        self.c4d = SimpleNamespace(**{key: key for key in constants.split()},
+                                   **{key: i for i, key in enumerate(layer_constants.split())},
+                                   BaseShader=Node, Vector=lambda *values: values)
+        self.layer_id = 5000
+
+    def material(self, name, count=1):
+        material = Node("Mmaterial", name)
+        material.GetReflectionLayerCount = lambda: count
+        layer = SimpleNamespace(GetDataID=lambda: self.layer_id)
+        material.GetReflectionLayerIndex = lambda _: layer
+        material.AddReflectionLayer = lambda: layer
+        material.Message = lambda _: None
+        return material
+
+    def test_classic_batch_restores_validated_values_and_exact_map_strength(self):
+        c4d = self.c4d
+        material = self.material("Leaf")
+        normal_path = str(Path.cwd() / "maps" / "leaf_normal.png")
+        bump_path = str(Path.cwd() / "maps" / "leaf_bump.png")
+        other_bump = str(Path.cwd() / "other" / "leaf_bump.png")
+        material[c4d.MATERIAL_USE_NORMAL] = True
+        material[c4d.MATERIAL_NORMAL_SHADER] = Node(c4d.Xbitmap, BITMAPSHADER_FILENAME=normal_path)
+        material[c4d.MATERIAL_USE_BUMP] = True
+        material[c4d.MATERIAL_BUMP_SHADER] = Node(c4d.Xbitmap, BITMAPSHADER_FILENAME=other_bump)
+        plan = {"max_batch_material_settings": {"Leaf": {
+            "base_color": [0.24, 0.48, 0.13],
+            "specular_strength": 0.55, "roughness": 0.35, "ior": 1.45,
+            "normal_strength": 0.3, "normal_map": normal_path,
+            "bump_strength": 0.2, "bump_map": bump_path,
+        }}}
+        text = MATERIALS.apply_max_batch_material_settings(c4d, [material], plan)
+        self.assertIn("1 个", text)
+        self.assertEqual(material[c4d.MATERIAL_COLOR_COLOR], (0.24, 0.48, 0.13))
+        self.assertEqual(material[c4d.MATERIAL_NORMAL_STRENGTH], 0.3)
+        self.assertIsNone(material[c4d.MATERIAL_BUMP_STRENGTH])
+        self.assertEqual(material[self.layer_id + c4d.REFLECTION_LAYER_MAIN_VALUE_ROUGHNESS], 0.35)
+        self.assertEqual(material[self.layer_id + c4d.REFLECTION_LAYER_MAIN_VALUE_SPECULAR], 0.55)
+        self.assertEqual(material[self.layer_id + c4d.REFLECTION_LAYER_FRESNEL_VALUE_IOR], 1.45)
+
+    def test_classic_batch_retains_connected_graphs_and_ambiguous_or_invalid_values(self):
+        c4d = self.c4d
+        material = self.material("Leaf")
+        material[self.layer_id + c4d.REFLECTION_LAYER_MAIN_SHADER_ROUGHNESS] = roughness = Node(c4d.Xbitmap)
+        material[self.layer_id + c4d.REFLECTION_LAYER_FRESNEL_MODE] = c4d.REFLECTION_FRESNEL_CONDUCTOR
+        repeated = [self.material("Duplicate"), self.material("Duplicate")]
+        plan = {"max_batch_material_settings": {
+            "Leaf": {"base_color": [-1.0, 0.2, 0.3], "roughness": 0.2, "ior": 1.5},
+            "Duplicate": {"base_color": [0.2, 0.3, 0.4]},
+        }}
+        self.assertEqual(MATERIALS.apply_max_batch_material_settings(c4d, [material, *repeated], plan), "")
+        self.assertIs(material[self.layer_id + c4d.REFLECTION_LAYER_MAIN_SHADER_ROUGHNESS], roughness)
+        self.assertEqual(material[self.layer_id + c4d.REFLECTION_LAYER_FRESNEL_MODE], c4d.REFLECTION_FRESNEL_CONDUCTOR)
+        for item in [material, *repeated]:
+            self.assertIsNone(item[c4d.MATERIAL_COLOR_COLOR])
+
+
 class OctaneScalarTests(unittest.TestCase):
     def setUp(self):
         self.c4d = SimpleNamespace(BaseMaterial=Node, BaseShader=Node, Vector=lambda *values: values)
@@ -346,6 +417,43 @@ class OctaneScalarTests(unittest.TestCase):
         mix = self.value(mat, "OCT_MATERIAL_NORMAL_LINK")
         self.assertEqual(self.value(mix, "MIXTEX_AMOUNT_FLOAT"), 0.65)
         self.assertEqual(self.value(self.value(mix, "MIXTEX_TEXTURE2_LNK"), "IMAGETEXTURE_FILE"), "tex/normal.png")
+
+    def test_vray_batch_values_and_glossiness_are_mapped_to_octane(self):
+        self.c4d.Mmaterial = "Mmaterial"
+        self.c4d.MATERIAL_USE_COLOR = "color"
+        self.c4d.MATERIAL_USE_REFLECTION = "reflection"
+        self.c4d.Ttexture = "texture"
+        textured = Node("Mmaterial", "textured")
+        constant = Node("Mmaterial", "constant")
+        normal = str(Path.cwd() / "reference" / "normal.png")
+        bump = str(Path.cwd() / "reference" / "bump.png")
+        other_bump = str(Path.cwd() / "unrelated" / "bump.png")
+        replacements = []
+        doc = SimpleNamespace(InsertMaterial=replacements.append, GetDocumentPath=lambda: "")
+        plan = {"path": "scene.fbx", "renderer": "octane", "scene_material_maps": {
+            "textured": {"glossiness": "gloss.png", "normal": normal, "bump": other_bump},
+        }, "max_batch_material_settings": {
+            "textured": {"normal_map": normal, "normal_strength": 0.35, "bump_map": bump,
+                         "bump_strength": 0.2, "roughness": 0.55, "metallic": 0.25, "ior": 1.52},
+            "constant": {"base_color": (0.1, 0.2, 0.3), "roughness": 0.2, "specular_strength": 0.5,
+                         "opacity": 0.6},
+        }}
+        with patch.object(MATERIALS, "wants_octane", return_value=True), patch.object(MATERIALS, "_renderer"), \
+             patch.object(MATERIALS, "_imported_standard_channels", side_effect=lambda *_: ({}, None, 0.8, 0)):
+            MATERIALS.convert_octane(self.c4d, doc, [textured, constant], [], plan)
+
+        leaf, solid = replacements
+        roughness = self.value(leaf, "OCT_MATERIAL_ROUGHNESS_LINK")
+        self.assertEqual(self.value(roughness, "IMAGETEXTURE_FILE"), "gloss.png")
+        self.assertTrue(self.value(roughness, "IMAGETEXTURE_INVERT"))
+        self.assertEqual(self.value(leaf, "OCT_MAT_SPECULAR_MAP_FLOAT"), 0.25)
+        self.assertEqual(self.value(leaf, "OCT_MATERIAL_INDEX"), 1.52)
+        self.assertEqual(self.value(self.value(leaf, "OCT_MATERIAL_NORMAL_LINK"), "MIXTEX_AMOUNT_FLOAT"), 0.35)
+        self.assertIsNone(self.value(self.value(leaf, "OCT_MATERIAL_BUMP_LINK"), "IMAGETEXTURE_POWER_FLOAT"))
+        self.assertEqual(self.value(solid, "OCT_MATERIAL_DIFFUSE_COLOR"), (0.1, 0.2, 0.3))
+        self.assertEqual(self.value(solid, "OCT_MATERIAL_ROUGHNESS_FLOAT"), 0.2)
+        self.assertEqual(self.value(solid, "OCT_MATERIAL_SPECULAR_FLOAT"), 0.5)
+        self.assertEqual(self.value(solid, "OCT_MATERIAL_OPACITY_FLOAT"), 0.6)
 
 
 class LightVector(tuple):

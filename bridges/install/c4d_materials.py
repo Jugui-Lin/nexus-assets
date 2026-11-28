@@ -59,6 +59,7 @@ _OCT_SYMBOLS = {
     "OCT_MATERIAL_ROUGHNESS_FLOAT": 2532, "OCT_MATERIAL_INDEX": 2551,
     "OCT_MATERIAL_ROUGHNESS_LINK": 2533, "OCT_MATERIAL_BUMP_LINK": 2539,
     "OCT_MATERIAL_NORMAL_LINK": 2542, "OCT_MATERIAL_OPACITY_LINK": 2545,
+    "OCT_MATERIAL_OPACITY_FLOAT": 2547,
     "OCT_MATERIAL_TRANSMISSION_COLOR": 2554, "OCT_MATERIAL_TRANSMISSION_LINK": 2555,
     "OCT_MATERIAL_TRANSMISSION_FLOAT": 2556, "OCT_MATERIAL_EMISSION": 2557,
     "OCT_MAT_USE_COLOR": 2563, "OCT_MAT_USE_SPECULAR": 2564, "OCT_MAT_USE_ROUGHNESS": 2565,
@@ -488,6 +489,7 @@ def _oct_material(c4d, name, channels, *, base_color=None, roughness=None, setti
     normal = settings.get("normal_strength")
     metallic = settings.get("metallic")
     ior = settings.get("ior")
+    opacity = settings.get("opacity")
     notes = []
     fields = {
         "roughness": ("ROUGHNESS", "OCT_MATERIAL_ROUGHNESS_LINK"),
@@ -517,6 +519,9 @@ def _oct_material(c4d, name, channels, *, base_color=None, roughness=None, setti
     if ior is not None:
         _oct_param(c4d, mat, "OCT_MAT_USE_INDEX", True)
         _oct_scalar(c4d, mat, "OCT_MATERIAL_INDEX", ior)
+    if opacity is not None and opacity < 1.0 and "opacity" not in channels:
+        _oct_param(c4d, mat, "OCT_MAT_USE_OPACITY", True)
+        _oct_scalar(c4d, mat, "OCT_MATERIAL_OPACITY_FLOAT", opacity)
     if "normal" in channels and _directx_normal(channels["normal"]):
         notes.append("检测到 DirectX 法线，需在 Octane 中检查 Y 轴方向")
     if "glossiness" in channels:
@@ -782,6 +787,80 @@ def link_standard_scene_textures(c4d, doc, imported_materials, plan, family_key=
     return f"标准材质已关联 {linked} 项贴图" if linked else ""
 
 
+def _apply_max_batch_reflectance(c4d, material, source):
+    specular = _scalar(source.get("specular_strength"))
+    roughness = _scalar(source.get("roughness"))
+    ior = _scalar(source.get("ior"), 1.0, 8.0)
+    if all(value is None for value in (specular, roughness, ior)):
+        return False
+    layers = material.GetReflectionLayerCount()
+    if layers > 1 or not layers and not specular:
+        return False
+    layer = material.GetReflectionLayerIndex(0) if layers else material.AddReflectionLayer()
+    if layer is None:
+        return False
+    layer_id = layer.GetDataID()
+    changed = False
+    if not layers:
+        material[layer_id + c4d.REFLECTION_LAYER_MAIN_DISTRIBUTION] = c4d.REFLECTION_DISTRIBUTION_GGX
+        material[c4d.MATERIAL_USE_REFLECTION] = True
+        changed = True
+    for value, parameter, shader in (
+        (specular, c4d.REFLECTION_LAYER_MAIN_VALUE_SPECULAR, c4d.REFLECTION_LAYER_MAIN_SHADER_SPECULAR),
+        (roughness, c4d.REFLECTION_LAYER_MAIN_VALUE_ROUGHNESS, c4d.REFLECTION_LAYER_MAIN_SHADER_ROUGHNESS),
+    ):
+        if value is not None and material[layer_id + shader] is None:
+            material[layer_id + parameter] = value
+            changed = True
+    fresnel_mode = layer_id + c4d.REFLECTION_LAYER_FRESNEL_MODE
+    if (ior is not None and material[fresnel_mode] != c4d.REFLECTION_FRESNEL_CONDUCTOR
+            and material[layer_id + c4d.REFLECTION_LAYER_FRESNEL_SHADER_IOR] is None):
+        material[fresnel_mode] = c4d.REFLECTION_FRESNEL_DIELECTRIC
+        material[layer_id + c4d.REFLECTION_LAYER_FRESNEL_PRESET] = c4d.REFLECTION_FRESNEL_DIELECTRIC_CUSTOM
+        material[layer_id + c4d.REFLECTION_LAYER_FRESNEL_VALUE_IOR] = ior
+        changed = True
+    return changed
+
+
+def apply_max_batch_material_settings(c4d, imported_materials, plan):
+    """Restore authored Batch scalars to exact matching classic materials."""
+    source_settings = plan.get("max_batch_material_settings", {})
+    if not source_settings:
+        return ""
+    names = Counter(material.GetName() for material in imported_materials)
+    edited = 0
+    for material in imported_materials:
+        name = material.GetName()
+        source = source_settings.get(name) if names[name] == 1 else None
+        if not source or not material.CheckType(c4d.Mmaterial) or getattr(material, "IsNodeBased", lambda: False)():
+            continue
+        changed = False
+        color = source.get("base_color")
+        if (isinstance(color, (list, tuple)) and len(color) == 3
+                and all(_scalar(component) is not None for component in color)):
+            material[c4d.MATERIAL_COLOR_COLOR] = c4d.Vector(*color)
+            material[c4d.MATERIAL_USE_COLOR] = True
+            changed = True
+        diffuse = _scalar(source.get("diffuse_strength"), maximum=100.0)
+        if diffuse is not None and material[c4d.MATERIAL_USE_COLOR]:
+            material[c4d.MATERIAL_COLOR_BRIGHTNESS] = diffuse
+            changed = True
+        for channel, slot, enabled, parameter in (
+            ("bump", c4d.MATERIAL_BUMP_SHADER, c4d.MATERIAL_USE_BUMP, c4d.MATERIAL_BUMP_STRENGTH),
+            ("normal", c4d.MATERIAL_NORMAL_SHADER, c4d.MATERIAL_USE_NORMAL, c4d.MATERIAL_NORMAL_STRENGTH),
+        ):
+            strength = _scalar(source.get(channel + "_strength"), maximum=100.0)
+            shader = material[slot] if strength is not None and material[enabled] else None
+            if (shader is not None and shader.CheckType(c4d.Xbitmap)
+                    and _matches_source_texture(source, channel, shader[c4d.BITMAPSHADER_FILENAME])):
+                material[parameter] = strength
+                changed = True
+        if _apply_max_batch_reflectance(c4d, material, source) or changed:
+            material.Message(c4d.MSG_UPDATE)
+            edited += 1
+    return f"标准材质已恢复 {edited} 个 MAX 材质的数值" if edited else ""
+
+
 def _imported_standard_channels(c4d, material, resolve_texture):
     channels = {}
     unlinked = 0
@@ -865,9 +944,14 @@ def _material_parameter(c4d, material, name, offset=None):
     return material[parameter if offset is None else offset + parameter]
 
 
-def _matches_source_normal(source, path):
-    filename = source.get("normal_map") if isinstance(source, dict) else None
-    return isinstance(filename, str) and bool(path) and Path(path).name.casefold() == filename.casefold()
+def _matches_source_texture(source, channel, path):
+    filename = source.get(channel + "_map") if isinstance(source, dict) else None
+    if not isinstance(filename, str) or not path:
+        return False
+    path = str(path)
+    if Path(filename).is_absolute():
+        return os.path.normcase(os.path.normpath(path)) == os.path.normcase(os.path.normpath(filename))
+    return Path(path).name.casefold() == filename.casefold()
 
 
 def _imported_octane_settings(c4d, original, channels, source):
@@ -910,13 +994,16 @@ def _imported_octane_settings(c4d, original, channels, source):
         for key, minimum, maximum in (
             ("diffuse_strength", 0.0, 100.0), ("specular_strength", 0.0, 1.0),
             ("roughness", 0.0, 1.0), ("metallic", 0.0, 1.0), ("ior", 1.0, 8.0),
+            ("opacity", 0.0, 1.0),
         ):
             value = _scalar(source.get(key), minimum, maximum)
             if value is not None:
                 settings[key] = value
-        strength = _scalar(source.get("normal_strength"), maximum=100.0)
-        if strength is not None and _matches_source_normal(source, channels.get("normal")):
-            settings["normal_strength"] = strength
+        for channel in ("normal", "bump"):
+            key = channel + "_strength"
+            strength = _scalar(source.get(key), maximum=100.0)
+            if strength is not None and _matches_source_texture(source, channel, channels.get(channel)):
+                settings[key] = strength
     return settings
 
 
@@ -933,7 +1020,7 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
                 for tag in obj.GetTags() if tag.CheckType(c4d.Ttexture)]
     originals = [material for material in imported_materials if material.CheckType(c4d.Mmaterial)]
     names = Counter(material.GetName() for material in originals)
-    source_settings = plan.get("max_material_settings")
+    source_settings = plan.get("max_batch_material_settings") or plan.get("max_material_settings")
     if not isinstance(source_settings, dict):
         source_settings = {}
     source_maps = plan.get("scene_material_maps") if include_source else None
@@ -961,7 +1048,7 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
             normal_path = authored.get("normal")
             bump_path = channels.get("bump")
             same_bitmap = normal_path and bump_path and os.path.normcase(normal_path) == os.path.normcase(bump_path)
-            if "normal" not in channels and (same_bitmap or _matches_source_normal(source, bump_path)):
+            if "normal" not in channels and (same_bitmap or _matches_source_texture(source, "normal", bump_path)):
                 channels["normal"] = channels.pop("bump")
             source_supplements = {key: path for key, path in authored.items() if key not in channels}
             channels.update(source_supplements)
@@ -969,6 +1056,10 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
                            if key not in channels and not (key == "bump" and "normal" in channels)}
             channels.update(supplements)
             settings = _imported_octane_settings(c4d, original, channels, source)
+            rgb = source.get("base_color") if isinstance(source, dict) else None
+            if ("base_color" not in channels and isinstance(rgb, (list, tuple)) and len(rgb) == 3
+                    and all(_scalar(component) is not None for component in rgb)):
+                color = c4d.Vector(*rgb)
             replacement, warnings = _oct_material(c4d, name, channels, base_color=color, roughness=roughness,
                                                  settings=settings)
         except (AttributeError, RuntimeError, TypeError, ValueError) as error:

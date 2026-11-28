@@ -66,14 +66,15 @@ class MaxTextureTests(TestCase):
     @classmethod
     def setUpClass(cls):
         script = ast.parse(DECODER._WORKER)
-        names = {"file_asset_metadata", "corona_bitmap_asset_path", "disabled_corona_channels",
-                 "ProjectImages", "preserve_legacy_corona_images"}
+        names = {"file_asset_metadata", "bitmap_asset_path", "disabled_corona_channels",
+                 "find_bitmap_path", "reference_slots", "ProjectImages", "preserve_legacy_corona_images"}
         definitions = [node for node in script.body
                        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
         namespace = {"os": os, "stat": stat, "struct": struct, "PureWindowsPath": PureWindowsPath}
         exec(compile(ast.Module(body=definitions, type_ignores=[]), str(DECODE_PATH), "exec"), namespace)
         cls.metadata = staticmethod(namespace["file_asset_metadata"])
-        cls.corona_bitmap = staticmethod(namespace["corona_bitmap_asset_path"])
+        cls.bitmap_asset = staticmethod(namespace["bitmap_asset_path"])
+        cls.find_bitmap = staticmethod(namespace["find_bitmap_path"])
         cls.disabled_channels = staticmethod(namespace["disabled_corona_channels"])
         cls.project_images = namespace["ProjectImages"]
         cls.legacy_corona = staticmethod(namespace["preserve_legacy_corona_images"])
@@ -95,7 +96,7 @@ class MaxTextureTests(TestCase):
                                                          {8: saved, 9: original, 2: None},
                                                          {first[:16]: saved, second[:16]: original}))
 
-    def test_corona_bitmap_uses_exact_unambiguous_bitmap_guid(self):
+    def test_renderer_bitmaps_use_exact_unambiguous_asset_guids(self):
         original = self.record(101, 8, 2, "Bitmap", "", "maps/normal.png")
         unrelated = self.record(101, 9, 2, "Bitmap", "", "maps/not-this.png")
         conflicting = self.record(101, 8, 2, "Bitmap", "", "maps/different.png")
@@ -103,16 +104,44 @@ class MaxTextureTests(TestCase):
         identifier = SimpleNamespace(data=original[:16])
         asset = SimpleNamespace(get_first={0x0002: identifier}.get)
         parameters = SimpleNamespace(guid=0x82, get_first={0x000F: asset}.get)
-        bitmap = SimpleNamespace(guid=0x65484244ABBA5784)
         reader = SimpleNamespace(get_guid=lambda chunk: getattr(chunk, "guid", None),
                                  get_references=lambda _chunk: [parameters])
-        self.assertEqual(self.corona_bitmap(reader, bitmap, self.metadata(original + unrelated)[2]),
-                         "maps/normal.png")
-        self.assertIsNone(self.corona_bitmap(reader, bitmap, self.metadata(original + conflicting)[2]))
-        self.assertIsNone(self.corona_bitmap(reader, bitmap, self.metadata(non_bitmap)[2]))
-        self.assertIsNone(self.corona_bitmap(reader, SimpleNamespace(guid=0x240), self.metadata(original)[2]))
+        for guid in (0x65484244ABBA5784, 0x02C1017D6769144B):
+            bitmap = SimpleNamespace(guid=guid)
+            self.assertEqual(self.bitmap_asset(reader, bitmap, self.metadata(original + unrelated)[2]),
+                             "maps/normal.png")
+            self.assertIsNone(self.bitmap_asset(reader, bitmap, self.metadata(original + conflicting)[2]))
+            self.assertIsNone(self.bitmap_asset(reader, bitmap, self.metadata(non_bitmap)[2]))
+        self.assertIsNone(self.bitmap_asset(reader, SimpleNamespace(guid=0x240), self.metadata(original)[2]))
         identifier.data = original[:15]
-        self.assertIsNone(self.corona_bitmap(reader, bitmap, self.metadata(original)[2]))
+        self.assertIsNone(self.bitmap_asset(reader, bitmap, self.metadata(original)[2]))
+
+    def test_color_wrappers_choose_only_an_unambiguous_bitmap_in_the_color_slots(self):
+        texture = SimpleNamespace(guid=0x240, path="maps/leaf.png")
+        mask = SimpleNamespace(guid=0x240, path="maps/mask.png")
+        correction = SimpleNamespace(guid=0x2D0, positional=[None, texture])
+        falloff = SimpleNamespace(guid=0x6EC3730C, keyed={3: mask, 4: correction})
+        reader = SimpleNamespace(
+            META_DATA=[],
+            get_guid=lambda node: node.guid,
+            get_reference=lambda node: getattr(node, "keyed", {}),
+            get_references=lambda node: getattr(node, "positional", ()),
+        )
+        with patch.dict(self.find_bitmap.__globals__, reader=reader, get_bitmap=lambda node: getattr(node, "path", None)):
+            self.assertEqual(self.find_bitmap(falloff), texture.path)
+            falloff.keyed[5] = texture
+            self.assertEqual(self.find_bitmap(falloff), texture.path)
+            falloff.keyed[5] = mask
+            self.assertIsNone(self.find_bitmap(falloff))
+            correction.positional[1] = falloff
+            del falloff.keyed[5]
+            self.assertIsNone(self.find_bitmap(falloff))
+            mix = SimpleNamespace(guid=0x230, positional=[None, texture, None, mask])
+            dirt_inputs = SimpleNamespace(guid=0x82, keyed={5: mix, 6: texture})
+            dirt = SimpleNamespace(guid=0x090D5EA42F567899, positional=[dirt_inputs])
+            self.assertEqual(self.find_bitmap(dirt), texture.path)
+            dirt_inputs.keyed[6] = mask
+            self.assertIsNone(self.find_bitmap(dirt))
 
     def test_corona_map_filter_uses_only_known_explicit_disabled_flags(self):
         def flag(identifier, enabled, kind=4):
@@ -377,6 +406,322 @@ class ConversionTests(TestCase):
                 with self.assertRaises(subprocess.TimeoutExpired) as result:
                     CONVERSION._run_converter(command, directory, dict(os.environ), log, timeout=.25)
         self.assertEqual(result.exception.timeout, .25)
+
+
+class MaxBatchTextureTests(TestCase):
+    def _fbx(self, path, objects, links, *, version=7700):
+        header = struct.Struct("<QQQB" if version >= 7500 else "<IIIB")
+        terminator = bytes(header.size)
+
+        def encode(node, offset):
+            name, properties, children = node
+            label = name.encode("ascii")
+            data = b""
+            for value in properties:
+                if isinstance(value, str):
+                    value = value.encode("utf-8")
+                    data += b"S" + struct.pack("<I", len(value)) + value
+                elif isinstance(value, float):
+                    data += b"D" + struct.pack("<d", value)
+                else:
+                    data += b"L" + struct.pack("<q", value)
+            subtree = b""
+            start = offset + header.size + len(label) + len(data)
+            for child in children:
+                subtree += encode(child, start + len(subtree))
+            if children:
+                subtree += terminator
+            return header.pack(start + len(subtree), len(properties), len(data), len(label)) + label + data + subtree
+
+        payload = CONVERSION._FBX_HEADER + struct.pack("<I", version)
+        # Invalid property contents in an unrelated object must be skipped by offset.
+        geometry_end = len(payload) + header.size + len("Geometry") + 1
+        geometry = header.pack(geometry_end, 1, 1, len("Geometry")) + b"Geometry!"
+        payload += geometry
+        payload += encode(("Objects", (), objects), len(payload))
+        payload += encode(("Connections", (), [("C", link, ()) for link in links]), len(payload))
+        path.write_bytes(payload + terminator)
+
+    @staticmethod
+    def _object(kind, key, name, filename=None, **properties):
+        children = []
+        if filename:
+            children.append(("Filename" if kind == "Video" else "FileName", (filename,), ()))
+        if properties:
+            values = [(key, value if isinstance(value, tuple) else (value,)) for key, value in properties.items()]
+            children.append(("Properties70", (), [("P", (key, "", "", "", *value), ()) for key, value in values]))
+        return kind, (key, name + "\x00\x01" + kind, ""), children
+
+    def test_batch_resolves_native_slots_from_video_and_typed_bitmap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source" / "plants.max"
+            source.parent.mkdir()
+            source.touch()
+            embedded = root / "scene.fbm"
+            embedded.mkdir()
+            base = embedded / "leaf.jpg"
+            opacity = source.parent / "cutout.png"
+            normal = source.parent / "leaf-normal.tif"
+            for image in (base, opacity, normal):
+                image.touch()
+            fbx = root / "scene.fbx"
+            objects = [
+                self._object("Material", 1, "树叶"),
+                self._object("Material", 9, "Disabled", **{"3dsMax|maps|texmap_diffuse_on": 0}),
+                self._object("Texture", 2, "Leaf correction", **{"3dsMax|ClassIDa": 720, "3dsMax|ClassIDb": 0}),
+                self._object("Texture", 3, "Leaf bitmap"),
+                self._object("Video", 4, "Leaf media", r"D:\materials\leaf.jpg"),
+                self._object("Texture", 5, "Opacity", **{"3dsMax|Params|HDRIMapName": str(opacity)}),
+                self._object("Texture", 6, "Normal wrapper",
+                             **{"3dsMax|ClassIDa": 1912237649, "3dsMax|ClassIDb": 1912962095}),
+                self._object("Texture", 7, "Normal", normal.name),
+                self._object("Texture", 8, "Leaf alias", base.name),
+            ]
+            self._fbx(fbx, objects, [
+                ("OP", 2, 1, "3dsMax|basic|texmap_diffuse"),
+                ("OP", 8, 1, "3dsMax|maps|texmap_diffuse"),
+                ("OP", 3, 2, "3dsMax|parameters|map"),
+                ("OO", 4, 3),
+                ("OP", 5, 1, "3dsMax|maps|texmap_opacity"),
+                ("OP", 6, 1, "3dsMax|maps|texmap_bump"),
+                ("OP", 7, 6, "3dsMax|VRayNormalMap Parameters|normal_map"),
+                ("OP", 7, 1, "3dsMax|maps|texmap_reflectionGlossiness"),
+                ("OP", 8, 9, "3dsMax|basic|texmap_diffuse"),
+            ])
+            self.assertEqual(CONVERSION.max_texture_bindings(fbx, source), {
+                "树叶": {"base_color": str(base.resolve()), "opacity": str(opacity.resolve()),
+                         "normal": str(normal.resolve())},
+            })
+
+    def test_batch_rejects_ambiguous_materials_and_paths_outside_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source" / "plants.max"
+            source.parent.mkdir()
+            source.touch()
+            for image in (source.parent / "a.png", source.parent / "b.png", root / "outside.png",
+                          source.parent / "script.ms"):
+                image.touch()
+            fbx = root / "scene.fbx"
+            objects = [
+                self._object("Material", 1, "Same"), self._object("Material", 2, "Same"),
+                self._object("Material", 3, "Conflicting"), self._object("Material", 4, "Outside"),
+                self._object("Material", 5, "Traversal"), self._object("Material", 6, "Script"),
+                self._object("Texture", 10, "A", "a.png"), self._object("Texture", 11, "B", "b.png"),
+                self._object("Texture", 12, "Outside", str(root / "outside.png")),
+                self._object("Texture", 13, "Traversal", r"..\outside.png"),
+                self._object("Texture", 14, "Script", "script.ms"),
+            ]
+            self._fbx(fbx, objects, [
+                ("OP", 10, 1, "DiffuseColor"), ("OP", 10, 3, "DiffuseColor"),
+                ("OP", 11, 3, "3dsMax|maps|texmap_diffuse"), ("OP", 12, 4, "DiffuseColor"),
+                ("OP", 13, 5, "DiffuseColor"), ("OP", 14, 6, "DiffuseColor"),
+            ], version=7400)
+            self.assertEqual(CONVERSION.max_texture_bindings(fbx, source), {})
+
+    def test_batch_preserves_exact_original_paths_and_rejects_mixed_falloff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fbx = root / "scene.fbx"
+            source = root / "source" / "plants.max"
+            originals = [source.parent / "a" / "leaf.png", source.parent / "b" / "leaf.png"]
+            for image in (*originals, root / "scene.fbm" / "leaf.png"):
+                image.parent.mkdir(parents=True)
+                image.touch()
+            source.touch()
+            falloff = {"3dsMax|ClassIDa": 1858302732, "3dsMax|ClassIDb": 0}
+            self._fbx(fbx, [
+                self._object("Material", 1, "Same branches"), self._object("Material", 2, "Color blend"),
+                self._object("Material", 3, "Distinct origins"),
+                self._object("Texture", 10, "First original", str(originals[0])),
+                self._object("Texture", 11, "Second original", str(originals[1])),
+                self._object("Texture", 12, "Same texture in both slots", **falloff),
+                self._object("Texture", 13, "Different textures", **falloff),
+                self._object("Video", 14, "Alternate unpacked location", r"C:\\elsewhere\\leaf.png"),
+            ], [
+                ("OO", 14, 10),
+                ("OP", 10, 12, "3dsMax|parameters|map1"), ("OP", 10, 12, "3dsMax|parameters|map2"),
+                ("OP", 10, 13, "3dsMax|parameters|map1"), ("OP", 11, 13, "3dsMax|parameters|map2"),
+                ("OP", 12, 1, "DiffuseColor"), ("OP", 13, 2, "DiffuseColor"),
+                ("OP", 10, 3, "3dsMax|basic|texmap_diffuse"), ("OP", 11, 3, "3dsMax|maps|texmap_diffuse"),
+            ])
+            self.assertEqual(CONVERSION.max_texture_bindings(fbx, source), {
+                "Same branches": {"base_color": str(originals[0].resolve())},
+            })
+
+    def test_batch_maps_vray_values_and_preserves_material_only_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scene.max"
+            fbx = root / "scene.fbx"
+            normal = root / "normal.tif"
+            bump = root / "bump.png"
+            surface = root / "surface.jpg"
+            for asset in (source, normal, bump, surface):
+                asset.touch()
+            case = {"3dsMax|ClassIDa": 935280431, "3dsMax|ClassIDb": 1882483036,
+                    "3dsMax|basic|diffuse": (0.1, 0.2, 0.3), "3dsMax|basic|reflection_metalness": 0.25,
+                    "3dsMax|basic|reflection_glossiness": 0.75, "3dsMax|BRDF|brdf_useRoughness": 0,
+                    "3dsMax|basic|reflection_fresnel": 1, "3dsMax|basic|reflection_lockIOR": 1,
+                    "3dsMax|basic|reflection_ior": 2.0, "3dsMax|basic|refraction_ior": 1.52,
+                    "3dsMax|basic|reflection": (0.5, 0.5, 0.5), "3dsMax|basic|reflection_weight": 0.75,
+                    "3dsMax|maps|texmap_bump_multiplier": 30.0,
+                    "3dsMax|maps|texmap_reflectionGlossiness_multiplier": 100.0}
+            rough = dict(case, **{"3dsMax|BRDF|brdf_useRoughness": 1, "3dsMax|basic|reflection_lockIOR": 0,
+                                  "3dsMax|basic|reflection": (0.6, 0.5, 0.4)})
+            wrapper = {"3dsMax|ClassIDa": 1912237649, "3dsMax|ClassIDb": 1912962095,
+                       "3dsMax|VRayNormalMap Parameters|normal_map_multiplier": 0.35,
+                       "3dsMax|VRayNormalMap Parameters|normal_map_on": 1}
+            self._fbx(fbx, [
+                self._object("Material", 1, "Leaf", **case),
+                self._object("Material", 2, "Soil", **rough),
+                self._object("Material", 3, "Other renderer", **dict(case, **{"3dsMax|ClassIDb": 1})),
+                self._object("Texture", 4, "V-Ray normal", **wrapper),
+                self._object("Texture", 5, "Normal", normal.name),
+                self._object("Texture", 6, "Bump", bump.name),
+                self._object("Texture", 7, "Differing surface semantics", surface.name),
+                self._object("Material", 8, "Disabled surface map",
+                             **dict(case, **{"3dsMax|maps|texmap_reflectionGlossiness_on": 0})),
+                self._object("Material", 9, "Partial surface map",
+                             **dict(case, **{"3dsMax|maps|texmap_reflectionGlossiness_multiplier": 40.0})),
+            ], [
+                ("OP", 4, 1, "3dsMax|maps|texmap_bump"),
+                ("OP", 5, 4, "3dsMax|VRayNormalMap Parameters|normal_map"),
+                ("OP", 6, 2, "3dsMax|maps|texmap_bump"),
+                ("OP", 7, 1, "3dsMax|basic|texmap_reflectionGlossiness"),
+                ("OP", 7, 2, "3dsMax|maps|texmap_reflectionGlossiness"),
+                ("OP", 7, 3, "3dsMax|maps|texmap_reflectionGlossiness"),
+                ("OP", 7, 8, "3dsMax|maps|texmap_reflectionGlossiness"),
+                ("OP", 7, 9, "3dsMax|maps|texmap_reflectionGlossiness"),
+            ])
+            leaf = {"base_color": (0.1, 0.2, 0.3), "metallic": 0.25, "roughness": 0.25,
+                    "ior": 1.52, "specular_strength": 0.375}
+            soil = {"base_color": (0.1, 0.2, 0.3), "metallic": 0.25, "roughness": 0.75, "ior": 2.0}
+            self.assertEqual(CONVERSION.max_material_data(fbx, source), ({
+                "Leaf": {"normal": str(normal.resolve()), "glossiness": str(surface.resolve())},
+                "Soil": {"bump": str(bump.resolve()), "roughness": str(surface.resolve())},
+            }, {
+                "Leaf": dict(leaf, normal_map=str(normal.resolve()), normal_strength=0.35),
+                "Soil": dict(soil, bump_map=str(bump.resolve()), bump_strength=0.30),
+                "Disabled surface map": leaf, "Partial surface map": leaf,
+            }))
+            with patch.object(CONVERSION, "_fbx_texture_path", side_effect=AssertionError("should not resolve textures")):
+                self.assertEqual(CONVERSION.max_material_data(fbx, source, include_textures=False),
+                                 ({}, {"Leaf": leaf, "Soil": soil, "Disabled surface map": leaf,
+                                       "Partial surface map": leaf}))
+
+    def test_batch_reads_native_corona_legacy_material_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scene.max"
+            fbx = root / "scene.fbx"
+            source.touch()
+            legacy = {"3dsMax|ClassIDa": 1891525894, "3dsMax|ClassIDb": 1149841885,
+                      "3dsMax|CoronaMtlPb|colorDiffuse": (0.25, 0.50, 0.75),
+                      "3dsMax|CoronaMtlPb|levelDiffuse": 0.375,
+                      "3dsMax|CoronaMtlPb|colorReflect": (0.5, 0.5, 0.5),
+                      "3dsMax|CoronaMtlPb|levelReflect": 0.75,
+                      "3dsMax|CoronaMtlPb|reflectGlossiness": 0.625,
+                      "3dsMax|CoronaMtlPb|fresnelIor": 2.125,
+                      "3dsMax|CoronaMtlPb|colorOpacity": (0.25, 0.25, 0.25),
+                      "3dsMax|CoronaMtlPb|levelOpacity": 0.5}
+            tinted = dict(legacy, **{"3dsMax|CoronaMtlPb|colorReflect": (0.5, 0.25, 0.125),
+                                     "3dsMax|CoronaMtlPb|fresnelIor": 999.0,
+                                     "3dsMax|CoronaMtlPb|colorOpacity": (0.3, 0.5, 1.0)})
+            self._fbx(fbx, [
+                self._object("Material", 1, "Legacy", **legacy),
+                self._object("Material", 2, "Tinted", **tinted),
+                self._object("Material", 3, "Other class", **dict(legacy, **{"3dsMax|ClassIDb": 1})),
+            ], [])
+            self.assertEqual(CONVERSION.max_material_data(fbx, source, include_textures=False), ({}, {
+                "Legacy": {"base_color": (0.25, 0.50, 0.75), "diffuse_strength": 0.375, "roughness": 0.375,
+                           "ior": 2.125, "specular_strength": 0.375, "opacity": 0.125},
+                "Tinted": {"base_color": (0.25, 0.50, 0.75), "diffuse_strength": 0.375, "roughness": 0.375},
+            }))
+
+    def test_batch_reads_corona_physical_values_and_fully_applied_bitmap_slots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scene.max"
+            fbx = root / "scene.fbx"
+            bitmap = root / "surface.png"
+            source.touch()
+            bitmap.touch()
+            prefix = "3dsMax|CoronaPhysicalMtlPb|"
+            physical = {"3dsMax|ClassIDa": 1762831241, "3dsMax|ClassIDb": -2028660960}
+            physical.update({prefix + key: value for key, value in {
+                "baseColor": (0.25, 0.50, 0.75), "baseLevel": 0.625, "baseRoughness": 0.25,
+                "roughnessMode": 0, "baseIor": 1.5, "iorMode": 0, "metalnessMode": 0,
+                "opacityColor": (1.0, 1.0, 1.0), "opacityLevel": 0.5, "baseTexmapOn": 1,
+                "baseMapAmount": 1.0, "baseRoughnessTexmapOn": 1, "baseRoughnessMapAmount": 1.0,
+                "baseBumpTexmapOn": 1,
+            }.items()})
+            glossy = dict(physical, **{prefix + "roughnessMode": 1, prefix + "metalnessMode": 1,
+                                       prefix + "iorMode": 1, prefix + "baseMapAmount": 0.25})
+            self._fbx(fbx, [
+                self._object("Material", 1, "Dielectric", **physical),
+                self._object("Material", 2, "Metal", **glossy),
+                self._object("Texture", 3, "Corona Bitmap", **{"3dsMax|BitmapTex|filename": bitmap.name}),
+                self._object("Texture", 4, "Corona Normal", **{
+                    "3dsMax|ClassIDa": 678481578, "3dsMax|ClassIDb": -870825092,
+                    "3dsMax|CoronaNormalPb|multiplier": 0.375,
+                }),
+            ], [
+                ("OP", 3, 1, prefix + "baseTexmap"), ("OP", 3, 1, prefix + "baseRoughnessTexmap"),
+                ("OP", 3, 2, prefix + "baseTexmap"), ("OP", 3, 2, prefix + "baseRoughnessTexmap"),
+                ("OP", 4, 1, prefix + "baseBumpTexmap"), ("OP", 3, 4, "3dsMax|CoronaNormalPb|normalMap"),
+            ])
+            maps, values = CONVERSION.max_material_data(fbx, source)
+            self.assertEqual(maps, {"Dielectric": {"base_color": str(bitmap.resolve()), "roughness": str(bitmap.resolve()),
+                                                   "normal": str(bitmap.resolve())},
+                                    "Metal": {"glossiness": str(bitmap.resolve())}})
+            common = {"base_color": (0.25, 0.50, 0.75), "diffuse_strength": 0.625, "opacity": 0.5}
+            self.assertEqual(values, {"Dielectric": dict(common, roughness=0.25, metallic=0.0, ior=1.5,
+                                                        normal_map=str(bitmap.resolve()), normal_strength=0.375),
+                                      "Metal": dict(common, roughness=0.75, metallic=1.0)})
+
+    def test_batch_ignores_out_of_bounds_fbx_and_unsupported_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fbx = root / "scene.fbx"
+            source = root / "plants.max"
+            source.touch()
+            for version, length in ((7700, 40), (7700, 1_000_000), (7800, 60)):
+                with self.subTest(version=version, length=length):
+                    fbx.write_bytes(CONVERSION._FBX_HEADER + struct.pack("<IQQQB", version, length, 0, 0, 7)
+                                    + b"Objects")
+                    self.assertEqual(CONVERSION.max_texture_bindings(fbx, source), {})
+
+    def test_native_batch_capture_fills_missing_fbx_data_and_rejects_duplicate_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source" / "plants.max"
+            source.parent.mkdir()
+            normal = source.parent / "normal.png"
+            diffuse = source.parent / "leaf.jpg"
+            outside = root / "other.png"
+            for item in (source, normal, diffuse, outside):
+                item.touch()
+            fbx = root / "scene.fbx"
+            self._fbx(fbx, [self._object("Material", 1, "树叶")], [])
+            capture = fbx.with_name("max-material-data.tsv")
+            rows = [
+                "NEXUS_MAX_MATERIALS_V1", "M\t树叶\tcorona_physical",
+                "C\tbase_color\t0.2\t0.3\t0.4", "N\troughness\t0.32", "N\tior\t1.55",
+                "N\tmetallic\tnan", "N\tunknown\t0.5", "T\tbase_color\tleaf.jpg",
+                "T\tnormal\tnormal.png\t0.35", f"T\topacity\t{outside}",
+                "M\tAmbiguous\tcorona_legacy", "N\topacity\t0.25",
+                "M\tAmbiguous\tvray", "N\troughness\t0.3", "END",
+            ]
+            capture.write_text("\r\n".join(rows), encoding="utf-8-sig")
+            values = {"base_color": (0.2, 0.3, 0.4), "roughness": 0.32, "ior": 1.55}
+            self.assertEqual(CONVERSION.max_material_data(fbx, source), ({
+                "树叶": {"base_color": str(diffuse.resolve()), "normal": str(normal.resolve())},
+            }, {"树叶": dict(values, normal_map=str(normal.resolve()), normal_strength=0.35)}))
+            self.assertEqual(CONVERSION.max_material_data(fbx, source, include_textures=False), ({}, {"树叶": values}))
+            capture.write_text("\n".join(rows[:-1]), encoding="utf-8")
+            self.assertEqual(CONVERSION.max_material_data(fbx, source), ({}, {}))
 
 
 class DirectMaxBudgetTests(TestCase):

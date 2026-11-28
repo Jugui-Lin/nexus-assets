@@ -4,7 +4,7 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 [下载 Windows x64 最新版](https://github.com/Jugui-Lin/nexus-assets/releases/latest) · [团队部署与使用](团队版部署与使用.md) · [NAS 镜像更新](nas/README.md#github-镜像自动更新)
 
-本页对应 Windows 客户端 v0.10.62。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.62)
+本页对应 Windows 客户端 v0.10.63。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.63)
 
 ![Nexus 资产库演示，左侧文件夹树，中间是模型与图片的预览卡片](docs/screenshots/asset-library.png)
 
@@ -39,7 +39,7 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 切到团队库即可浏览已同步的索引和资料，也可查看能访问的缓存缩略图。打开原件、全尺寸预览和向 DCC 发送素材都需要访问原件目录。要启用 NAS 自动扫描，在容器中另行挂载要扫描的素材目录。 [NAS 部署与扫描](nas/README.md#服务器自动扫描素材)
 
-Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未信任的共享路径时，可在「当前团队」核对路径并点「允许此共享路径」。未设置或无法访问共享路径时，客户端可以使用本机缓存。NAS 服务可更新到 `ghcr.io/jugui-lin/nexus-team:0.10.62`。 [NAS 镜像更新](nas/README.md#github-镜像自动更新)
+Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未信任的共享路径时，可在「当前团队」核对路径并点「允许此共享路径」。未设置或无法访问共享路径时，客户端可以使用本机缓存。对应的团队服务镜像为 `ghcr.io/jugui-lin/nexus-team:0.10.63`。 [NAS 镜像更新](nas/README.md#github-镜像自动更新)
 
 <details>
 <summary>打开已有库、预览和缓存</summary>
@@ -54,6 +54,7 @@ Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未�
 
 ## 文件夹与资产库联动
 
+- 在文件夹详细列表中，可点「名称」「修改日期」「类型」或「大小」的整列表头排序。再次点同一表头切换升降序。显示「创建日期」列后也可按该列排序。
 - 文件夹默认堆叠序列帧，也可在「查看 → 显示」关闭。像 `S04_11180000.exr` 这样以日期和帧号相连命名的图片也能堆叠。PNG 和 EXR 分别分组，开启缩略图时图标视图会用第一帧做封面，点堆叠可展开单帧。
 - 文件夹默认隐藏「未入库」标记，可在「查看 → 显示」打开。有资产标签页时，关闭最后一个文件夹标签页会回到资产库。再次进入文件夹时才打开新的标签页。
 - 从文件列表空白处拖动可框选文件和文件夹。工具栏支持对选区批量剪切、复制和重命名，也可用 `Delete` 把本地选区移入 Windows 回收站。
@@ -96,12 +97,14 @@ Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未�
 - 智能导入时，「将贴图归档到工程 tex」适用于已保存的工程。新建工程也可直接导入模型和材质，任务结果会提示已保留贴图引用并跳过归档。
 - 手动清理 Cinema 4D 导入缓存前，请使用 Cinema 4D 的「文件 → 保存工程（包含资源）」收集贴图，再关闭占用该缓存的 Cinema 4D。Nexus 会在清理前显示确认。
 - 发送 MAX 时可沿用工作区保存的读取方式，也可为本次导入选择读取方式。「Blender 直接解析」需要 Blender 4.2 或更新版本。「调用 3ds Max Batch」需要 Windows 上已安装并完成授权的 3ds Max Batch。
+- Blender 直接导入 MAX 和 Cinema 4D 的「Blender 直接解析」可补接部分 V-Ray 和 Corona 材质引用的贴图。
+- 「调用 3ds Max Batch」会在导出 FBX 前记录可识别的 V-Ray、Corona Legacy 和 Corona Physical 原生材质数值与贴图引用。导入时可从原生记录或 FBX 恢复底色、粗糙度、金属度、折射率 (IOR)、不透明度和法线等通道。光泽度贴图可反相接入 Octane 的粗糙度。混合和分层材质只恢复可识别的部分。
 - 更新 Cinema 4D 桥接并重开后，MAX 智能导入默认生成 Octane 材质。点发送按钮旁的「MAX 导入偏好」可修改工作区默认值，也可在导入对话框里为本次选择。「按场景使用 Octane 或标准材质」会读取当前工程的渲染器。当前实例未加载 Octane 时使用标准材质。
 - Windows 上可把 MAX 拖进 Blender 4.5 或更新版本的 3D 视口。桥接安装或更新后，重开 Blender 即可使用。
 
 在 Blender 视口放置时用 `S` 缩放、`R` 旋转。在 Cinema 4D 用 `T` 缩放、`R` 旋转，再按住左键拖动调整。左键确认放置，`Esc` 取消。导入任务收到 DCC 回执后会显示结果。
 
-已用带贴图的 MAX 场景在 Blender 和 3ds Max Batch 中验证 FBX 转换。本版的 Cinema 4D 2023 智能导入和 MAX 材质选项通过模拟测试，实际宿主内合并与 Octane 渲染待验证。
+已用原始 MAX 场景验证 Blender 直接导入，并用 3ds Max Batch 验证 V-Ray、Corona Legacy 和 Corona Physical 材质记录。Cinema 4D 智能导入与 Octane 通道映射通过桥接测试，实际宿主渲染待验证。
 
 ## 从源码运行
 

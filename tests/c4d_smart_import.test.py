@@ -281,7 +281,9 @@ class SmartImportTests(TestCase):
         importer.import_progress = Queue()
         converter_calls = []
         linked = []
+        applied_settings = []
         importer.materials.link_standard_scene_textures = lambda *args: linked.append(args)
+        importer.materials.apply_max_batch_material_settings = lambda *args: applied_settings.append(args)
         with TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "Fixture.Max"
@@ -308,11 +310,24 @@ class SmartImportTests(TestCase):
                 render_settings=lambda _output: {},
                 texture_bindings=lambda filename, original: bindings if (filename, original) == (output, str(source)) else {},
             )
+            application_bindings = {"BatchStandard": {"base_color": "from-embedded-image.png"}}
+            application_settings = {"BatchStandard": {"roughness": 0.4, "ior": 1.6}}
+            media = Path(output).with_suffix(".fbm")
+
+            def read_batch_materials(filename, original, *, include_textures=True):
+                self.assertEqual((filename, original), (output, str(source)))
+                return (application_bindings if media.is_dir() and include_textures else {}, application_settings)
+
+            def merge_and_extract(doc, path, flags, thread):
+                media.mkdir(parents=True, exist_ok=True)
+                return self.merge_document(doc, path, flags, thread)
+
             importer.conversion = SimpleNamespace(
                 convert=lambda filename, cache, executable_path, cancel: convert(
                     "application", filename, cache, executable_path, cancel,
                 ),
                 max_export_warning=lambda _output: "",
+                max_material_data=read_batch_materials,
             )
             preferences = {"maxMode": "application", "maxMaterialRenderer": "standard",
                            "blenderExecutable": "blender", "maxBatchExecutable": "3dsmaxbatch"}
@@ -345,10 +360,18 @@ class SmartImportTests(TestCase):
                     if expected == "direct":
                         self.assertEqual(plan["scene_material_maps"], bindings)
                         self.assertEqual(plan["baked_material_maps"], baked)
-                    importer._apply(self.doc, plan)
+                    else:
+                        self.assertNotIn("scene_material_maps", plan)
+                        self.assertEqual(plan["max_batch_material_settings"], application_settings)
+                    with patch.object(importer.c4d.documents, "MergeDocument", merge_and_extract):
+                        importer._apply(self.doc, plan)
                     self.assertEqual(linked[-1][2], self.doc.materials[-1:])
+                    self.assertEqual(linked[-1][3]["scene_material_maps"],
+                                     bindings if expected == "direct" else application_bindings)
                     self.assertNotIn(keep, linked[-1][2])
                     self.assertEqual(self.filter_arguments[-1][0], output)
+            self.assertEqual(len(applied_settings), 1)
+            self.assertEqual(applied_settings[0][-1]["max_batch_material_settings"], application_settings)
             with self.assertRaisesRegex(ValueError, "MAX 转换模式无效"):
                 importer._standard_scene_job({"id": "invalid", "path": str(source), "options": {"max_mode": "burn"}})
             self.assertEqual(self.converted, [])
@@ -548,7 +571,7 @@ class SmartImportTests(TestCase):
         spec.loader.exec_module(importer.texture_archive)
         importer.preparation = SimpleNamespace(prepare=lambda _host, source, *_: {"kind": "scene", "path": source})
         importer._convert = lambda *_: "converted.fbx"
-        importer.conversion = SimpleNamespace(max_export_warning=lambda _: "")
+        importer.conversion = SimpleNamespace(max_export_warning=lambda _: "", max_material_data=lambda *_, **__: ({}, {}))
         importer.project_export = SimpleNamespace(_rename_without_replacing=lambda *_: None)
         linked, archived = [], []
         importer.materials.link_standard_scene_textures = lambda *args: linked.append(args[2])
@@ -599,8 +622,16 @@ class SmartImportTests(TestCase):
         )
         importer.max_decode = SimpleNamespace(texture_warning=lambda _: "", scene_object_warning=lambda *_: "",
                                              render_settings=lambda _: {}, texture_bindings=lambda *_: {})
-        importer.conversion = SimpleNamespace(max_export_warning=lambda _: "")
+        application_settings = {"Surface": {"roughness": 0.35}}
+        importer.conversion = SimpleNamespace(max_export_warning=lambda _: "", max_material_data=lambda *_, **__: ({}, application_settings))
         importer.materials.link_standard_scene_textures = lambda *_: ""
+        scalar_calls = []
+
+        def apply_max_batch_material_settings(c4d, materials, plan):
+            scalar_calls.append((materials, plan["max_batch_material_settings"]))
+            return "已应用材质数值"
+
+        importer.materials.apply_max_batch_material_settings = apply_max_batch_material_settings
         detached = Document()
         Node("material", detached.materials)
         conversions = []
@@ -626,7 +657,8 @@ class SmartImportTests(TestCase):
                 self.assertTrue(result["ok"], result)
                 self.assertEqual(result["projectPath"], "project.c4d")
                 self.assertEqual(conversions[-1], mode)
-        self.assertEqual(export_calls, [[], []])
+        self.assertEqual(export_calls, [[], ["已应用材质数值"]])
+        self.assertEqual(scalar_calls, [(detached.materials, application_settings)])
         self.assertEqual(len(self.converted), 1)
         self.assertIs(self.converted[0][1], detached)
         self.assertEqual(self.converted[0][-1]["renderer"], "octane")

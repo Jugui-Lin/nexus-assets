@@ -1,6 +1,12 @@
 const cacheKey = 'nexus-release-notes-v1';
 const releasesUrl = 'https://github.com/Jugui-Lin/nexus-assets/releases';
 const bundledNotes = new Map([
+  ['0.10.63', [
+    '文件夹详细列表整列表头可点，按名称、修改日期、类型、大小或已启用的创建日期切换升降序。',
+    '从 Blender 直接导入 MAX，或通过 Blender 直接解析到 Cinema 4D 时，可补接更多材质贴图。',
+    '3ds Max Batch 记录 V-Ray、Corona Legacy 和 Corona Physical 的原生材质数值与贴图引用，并在导入时结合 FBX 恢复可识别的通道。',
+    'Octane 材质可恢复底色、粗糙度、金属度、折射率、不透明度和法线等通道。复杂混合与分层材质只恢复可识别的部分。',
+  ]],
   ['0.10.62', [
     '从 Windows 文件夹视图拖动已入库的 MAX 到 Cinema 4D，会打开目标实例的智能导入选项。',
     '手动清理 Cinema 4D 导入缓存前，会提示先随工程保存贴图并关闭占用缓存的实例。',

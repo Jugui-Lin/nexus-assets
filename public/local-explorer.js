@@ -660,9 +660,13 @@ export function initLocalExplorer({
     showProperties:Boolean(entryDetails),
     showAssets:Boolean(lookupAssets),
     formatters:{dateText,sizeText,fileType},
-    onSort({sortBy,descending}) {
+    onSort(sortBy) {
+      const directory = getCurrentDirectory();
+      if (!directory) return;
+      const order = orderFor(tab,directory);
+      const descending = order.sortBy === sortBy && !order.descending;
       setOrder({sortBy,descending});
-      void navigate(tabPath(tab),{index:tab.index,offset:0});
+      void navigate(directory,{index:tab.index,offset:0});
     },
     onChange(addedAssetColumn) {
       if (!tab.snapshot || isDriveView(tab.snapshot)) return;
@@ -1811,7 +1815,8 @@ export function initLocalExplorer({
     const {snapshot} = tab;
     const directory = tabPath(tab);
     const sameLocation = previous && previous.directory === snapshot?.directory;
-    const samePage = sameLocation && previous.offset === snapshot?.offset;
+    const samePage = sameLocation && previous.offset === snapshot?.offset &&
+      previous.listingOrderKey === snapshot?.listingOrderKey;
     const driveView = isDriveView(snapshot);
     table.hidden = !snapshot || driveView;
     drivesHost.hidden = !driveView;
@@ -2142,7 +2147,8 @@ export function initLocalExplorer({
       committed = true;
       item.query = query;
       if (!result.directory && !query && !places) listedDrives = result.entries;
-      if (result.directory !== previous?.directory || result.offset !== previous?.offset) item.scrollTop = 0;
+      if (result.directory !== previous?.directory || result.offset !== previous?.offset ||
+          appliedOrder !== previous?.listingOrderKey) item.scrollTop = 0;
       if (restored) item.scrollTop = restored.scrollTop;
       remember(item,result.directory || '',index);
       item.initialPath = undefined;

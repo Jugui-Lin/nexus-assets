@@ -273,15 +273,23 @@ class SmartImporter:
                         raise ValueError("MAX 导入材质设置无效。")
                     plan["renderer"] = renderer
                     plan["max_material_import"] = True
-                    if restore:
-                        plan["restore_scene_textures"] = True
-                    if mode == "direct" and restore:
-                        bindings = self.max_decode.texture_bindings(plan["path"], source)
+                    if mode != "direct" and (scene_import is None or scene_import["materials"]):
+                        if restore:
+                            plan["batch_media_pending"] = not Path(plan["path"]).with_suffix(".fbm").is_dir()
+                        bindings, settings = self.conversion.max_material_data(plan["path"], source, include_textures=restore)
+                        if settings:
+                            plan["max_batch_material_settings"] = settings
                         if bindings:
                             plan["scene_material_maps"] = bindings
-                        baked = self.preparation.collect_baked_scene_maps(source, options, cache)
-                        if baked:
-                            plan["baked_material_maps"] = baked
+                    if restore:
+                        plan["restore_scene_textures"] = True
+                        if mode == "direct":
+                            bindings = self.max_decode.texture_bindings(plan["path"], source)
+                            if bindings:
+                                plan["scene_material_maps"] = bindings
+                            baked = self.preparation.collect_baked_scene_maps(source, options, cache)
+                            if baked:
+                                plan["baked_material_maps"] = baked
                 if scene_import is not None:
                     plan["scene_import"] = scene_import
             if export:
@@ -404,6 +412,14 @@ class SmartImporter:
             return False, "当前 Cinema 4D 未加载 Octane，已使用标准材质"
         return True, None
 
+    def _link_scene_textures(self, doc, materials, plan, *family):
+        # Cinema 4D may extract embedded FBX media only when loading the scene.
+        if plan.get("batch_media_pending") and Path(plan["path"]).with_suffix(".fbm").is_dir():
+            bindings, settings = self.conversion.max_material_data(plan["path"], plan["source_path"])
+            plan["scene_material_maps"] = bindings
+            plan["max_batch_material_settings"] = settings
+        return self.materials.link_standard_scene_textures(self.c4d, doc, materials, plan, *family)
+
     def _prepare_export_materials(self, doc, plan):
         materials = doc.GetMaterials()
         if not materials:
@@ -411,7 +427,7 @@ class SmartImporter:
         notes = []
         if plan.get("restore_scene_textures"):
             try:
-                notes.append(self.materials.link_standard_scene_textures(self.c4d, doc, materials, plan))
+                notes.append(self._link_scene_textures(doc, materials, plan))
             except Exception as error:
                 notes.append("标准材质贴图未能关联：" + (str(error) or type(error).__name__))
         octane, warning = self._max_octane(doc, plan)
@@ -422,6 +438,11 @@ class SmartImporter:
                 notes.append(self.materials.convert_octane(self.c4d, doc, materials, list(self._objects(doc)), plan))
             except Exception as error:
                 notes.append("Octane 材质转换失败：" + (str(error) or type(error).__name__))
+        elif plan.get("max_batch_material_settings"):
+            try:
+                notes.append(self.materials.apply_max_batch_material_settings(self.c4d, materials, plan))
+            except Exception as error:
+                notes.append("MAX 材质数值未能应用：" + (str(error) or type(error).__name__))
         return [note for note in notes if note]
 
     def _apply(self, doc, plan):
@@ -540,7 +561,7 @@ class SmartImporter:
             if materials and (plan.get("standard_scene") or plan.get("restore_scene_textures")):
                 family = (self.preparation._family_tokens,) if plan.get("standard_scene") else ()
                 try:
-                    conversions.append(self.materials.link_standard_scene_textures(c4d, doc, materials, plan, *family))
+                    conversions.append(self._link_scene_textures(doc, materials, plan, *family))
                 except Exception as error:
                     conversions.append("标准材质贴图未能关联：" + (str(error) or type(error).__name__))
             if convert_materials:
@@ -555,6 +576,11 @@ class SmartImporter:
                         conversions.append(self.materials.convert_octane_lights(c4d, doc, imported, plan))
                     except Exception as error:
                         conversions.append("Octane 灯光转换失败：" + (str(error) or type(error).__name__))
+            elif materials and plan.get("max_batch_material_settings"):
+                try:
+                    conversions.append(self.materials.apply_max_batch_material_settings(c4d, materials, plan))
+                except Exception as error:
+                    conversions.append("MAX 材质数值未能应用：" + (str(error) or type(error).__name__))
             if not doc.StartUndo():
                 raise RuntimeError("无法开启 Cinema 4D 撤销记录。")
             try:
