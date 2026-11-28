@@ -1,6 +1,9 @@
 const cacheKey = 'nexus-release-notes-v1';
 const releasesUrl = 'https://github.com/Jugui-Lin/nexus-assets/releases';
 const bundledNotes = new Map([
+  ['0.10.61', [
+    'Cinema 4D 智能导入可用于尚未保存的工程。模型和材质照常导入，保留贴图引用，任务结果会提示已跳过归档。',
+  ]],
   ['0.10.60', [
     '文件夹的素材搜索和暂存合为一张列表。暂存项置顶，同一原件只显示一条，可在列表内预览、定位或发送。',
     '框选文件和文件夹后可批量剪切、复制、重命名或移入 Windows 回收站。',

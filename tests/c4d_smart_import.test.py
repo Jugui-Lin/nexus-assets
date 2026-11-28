@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "bridges" / "install" / "c4d_smart_import.py"
@@ -535,6 +536,57 @@ class SmartImportTests(TestCase):
         self.assertEqual(requests, [("source.MAX", "direct")])
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "preparing"})
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "direct-max"})
+
+    def test_max_import_archives_only_when_the_target_project_is_saved(self):
+        importer = self.importer
+        importer.results = Queue()
+        importer.import_progress = Queue()
+        importer.generation = 0
+        importer.c4d.documents.GetActiveDocument = lambda: self.doc
+        spec = importlib.util.spec_from_file_location("test_texture_archive", SCRIPT.with_name("c4d_texture_archive.py"))
+        importer.texture_archive = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(importer.texture_archive)
+        importer.preparation = SimpleNamespace(prepare=lambda _host, source, *_: {"kind": "scene", "path": source})
+        importer._convert = lambda *_: "converted.fbx"
+        importer.conversion = SimpleNamespace(max_export_warning=lambda _: "")
+        importer.project_export = SimpleNamespace(_rename_without_replacing=lambda *_: None)
+        linked, archived = [], []
+        importer.materials.link_standard_scene_textures = lambda *args: linked.append(args[2])
+        importer.materials._texture_resolver = lambda *_: None
+
+        def collect(_c4d, doc, _nodes, _resolve, _publish):
+            archived.append(importer.texture_archive.project_directory(doc))
+            return 1, []
+
+        importer.texture_archive.collect = collect
+        options = dict(objects=True, materials=True, textures=True, cameras=True, lights=True,
+                       animation=True, emptyObjects=True, storeTextures=True)
+        job = {"id": "max", "path": "source.max", "options": {"scene_import": options}}
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            importer._job_runtime = lambda _: (root, None, {"maxMode": "application"})
+            self.doc.GetDocumentPath = lambda: ""
+            self.doc.GetDocumentName = lambda: "Untitled 1"
+            with patch.object(BRIDGE.threading.Thread, "start", lambda worker: worker.run()):
+                importer.submit(job)
+                result = importer.poll()
+                self.assertTrue(result["ok"], result)
+                self.assertIn("已跳过贴图归档并保留贴图引用", result["message"])
+                self.assertEqual(archived, [])
+                self.assertEqual(linked, [self.doc.materials[:]])
+                self.assertEqual(len(self.converted), 1)
+                self.assertTrue(options["storeTextures"])
+                self.assertFalse((root / "tex").exists())
+
+                self.doc.GetDocumentPath = lambda: str(root)
+                self.doc.GetDocumentName = lambda: "Saved.c4d"
+                (root / "Saved.c4d").touch()
+                importer.submit(job)
+                result = importer.poll()
+                self.assertTrue(result["ok"], result)
+                self.assertIn("已将 1 项贴图改为工程内相对引用", result["message"])
+                self.assertEqual(archived, [root])
+                self.assertEqual(len(linked), 2)
 
     def test_saved_max_project_applies_renderer_preference_before_packaging(self):
         importer = self.importer

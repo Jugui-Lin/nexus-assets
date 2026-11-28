@@ -169,7 +169,8 @@ class SmartImporter:
         if self.document is None and not job.get("projectExport"):
             raise RuntimeError("请先打开一个 Cinema 4D 工程。")
         scene = (job.get("options") or {}).get("scene_import") or {}
-        self.archive_target = self.texture_archive.project_directory(self.document) if scene.get("storeTextures") else None
+        self.archive_target = (self.texture_archive.project_directory(self.document, allow_unsaved=True)
+                               if scene.get("storeTextures") else None)
         self.generation += 1
         self.active_job = job["id"]
         self.cancel_event = threading.Event()
@@ -429,7 +430,10 @@ class SmartImporter:
         if plan["kind"] == "scene":
             path = plan["path"]
             options = plan.get("scene_import")
-            store_textures = bool(options and options.get("storeTextures"))
+            archive_requested = bool(options and options.get("storeTextures"))
+            store_textures = archive_requested and self.archive_target is not None
+            if archive_requested and not store_textures:
+                warnings.append("当前工程没有可用的保存位置，已跳过贴图归档并保留贴图引用")
             previous_materials = doc.GetMaterials() if store_textures else ()
             link_maps = bool(plan.get("maps"))
             is_fbx = Path(path).suffix.lower() == ".fbx"

@@ -13,12 +13,14 @@ _LIMIT = 512 * 1024 * 1024
 _CHUNK = 1024 * 1024
 
 
-def project_directory(doc):
+def project_directory(doc, *, allow_unsaved=False):
     path = Path(doc.GetDocumentPath())
     name = Path(doc.GetDocumentName())
     if (not path.is_absolute() or name.name != str(name)
             or name.suffix.lower() != ".c4d" or not (path / name).is_file()):
-        raise RuntimeError("先保存当前 Cinema 4D 工程，或取消「将贴图归档到工程」后导入。")
+        if allow_unsaved:
+            return None
+        raise RuntimeError("请先保存当前 Cinema 4D 工程，再归档贴图。")
     path = path.resolve(strict=True)
     tex = path / "tex"
     if os.path.lexists(tex):
