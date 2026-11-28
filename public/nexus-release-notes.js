@@ -1,6 +1,10 @@
 const cacheKey = 'nexus-release-notes-v1';
 const releasesUrl = 'https://github.com/Jugui-Lin/nexus-assets/releases';
 const bundledNotes = new Map([
+  ['0.10.62', [
+    '从 Windows 文件夹视图拖动已入库的 MAX 到 Cinema 4D，会打开目标实例的智能导入选项。',
+    '手动清理 Cinema 4D 导入缓存前，会提示先随工程保存贴图并关闭占用缓存的实例。',
+  ]],
   ['0.10.61', [
     'Cinema 4D 智能导入可用于尚未保存的工程。模型和材质照常导入，保留贴图引用，任务结果会提示已跳过归档。',
   ]],

@@ -21,9 +21,10 @@ pub async fn start_asset_drag(
 #[tauri::command]
 pub async fn start_local_file_drag(
     window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
     paths: Vec<String>,
-) -> Result<bool, String> {
-    let _ = (window, paths);
+) -> Result<(), String> {
+    let _ = (window, state, paths);
     Err("当前系统暂不支持将文件拖到其他应用".into())
 }
 
@@ -102,6 +103,16 @@ mod windows_drag {
         skipped: Vec<SkippedAsset>,
     }
 
+    #[derive(Default, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct LocalDragResult {
+        copied: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        c4d_session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bridge_required: Option<&'static str>,
+    }
+
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct C4dImport {
@@ -147,12 +158,14 @@ mod windows_drag {
     #[tauri::command]
     pub async fn start_local_file_drag(
         window: tauri::WebviewWindow,
+        state: tauri::State<'_, AppState>,
         paths: Vec<String>,
-    ) -> Result<bool, String> {
+    ) -> Result<LocalDragResult, String> {
         if !drag_button_pressed() || escape_pressed() {
-            return Ok(false);
+            return Ok(LocalDragResult::default());
         }
         let paths = local_drag_paths(paths)?;
+        let state = state.inner().clone();
         let (send, receive) = tokio::sync::oneshot::channel();
         let source = window.clone();
         window
@@ -161,13 +174,17 @@ mod windows_drag {
                     .hwnd()
                     .map_err(|error| error.to_string())
                     .and_then(|hwnd| {
-                        drag_local_paths(hwnd, &paths)
+                        drag_local_paths(hwnd, state, &paths)
                             .map_err(|error| format!("无法启动系统拖放：{error}"))
                     });
                 let _ = send.send(result);
             })
             .map_err(|error| error.to_string())?;
-        receive.await.map_err(|error| error.to_string())?
+        let result = receive.await.map_err(|error| error.to_string())??;
+        if result.c4d_session_id.is_some() || result.bridge_required.is_some() {
+            let _ = window.set_focus();
+        }
+        Ok(result)
     }
 
     fn local_drag_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
@@ -395,7 +412,11 @@ mod windows_drag {
     }
 
     #[implement(IDropSource)]
-    struct LocalFileDropSource {}
+    struct LocalFileDropSource {
+        state: AppState,
+        scenes: Vec<PlacementFile>,
+        handoff: Rc<RefCell<Option<LocalDragResult>>>,
+    }
 
     impl IDropSource_Impl for LocalFileDropSource_Impl {
         fn QueryContinueDrag(&self, escape: BOOL, _keys: MODIFIERKEYS_FLAGS) -> HRESULT {
@@ -404,7 +425,16 @@ mod windows_drag {
             } else if drag_button_pressed() {
                 S_OK
             } else {
-                DRAGDROP_S_DROP
+                let mut handoff = self.handoff.borrow_mut();
+                if handoff.is_none() {
+                    *handoff = local_c4d_handoff(&self.state, &self.scenes, pointer_process);
+                }
+                // Keep raw file drops for ordinary targets; Cinema receives a bridge handoff.
+                if handoff.is_some() {
+                    DRAGDROP_S_CANCEL
+                } else {
+                    DRAGDROP_S_DROP
+                }
             }
         }
 
@@ -413,25 +443,85 @@ mod windows_drag {
         }
     }
 
-    fn drag_local_paths(hwnd: HWND, paths: &[PathBuf]) -> windows::core::Result<bool> {
+    fn local_c4d_scenes(paths: &[PathBuf]) -> Vec<PlacementFile> {
+        if !paths.iter().any(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("max"))
+        }) {
+            return Vec::new();
+        }
+        paths
+            .iter()
+            .filter_map(|path| {
+                Some(PlacementFile {
+                    path: path.clone(),
+                    name: path.file_stem()?.to_string_lossy().into_owned(),
+                    ext: path.extension()?.to_str()?.to_owned(),
+                })
+            })
+            .collect()
+    }
+
+    fn local_c4d_handoff(
+        state: &AppState,
+        scenes: &[PlacementFile],
+        target: impl FnOnce() -> u32,
+    ) -> Option<LocalDragResult> {
+        if scenes.is_empty() {
+            return None;
+        }
+        match c4d_scene_handoff(state, target(), scenes)? {
+            Handoff::C4dImport(session) => Some(LocalDragResult {
+                c4d_session_id: Some(session),
+                ..Default::default()
+            }),
+            Handoff::Blocked(message) => Some(LocalDragResult {
+                bridge_required: Some(message),
+                ..Default::default()
+            }),
+            Handoff::Placement { .. } => None,
+        }
+    }
+
+    fn drag_local_paths(
+        hwnd: HWND,
+        state: AppState,
+        paths: &[PathBuf],
+    ) -> windows::core::Result<LocalDragResult> {
         if !drag_button_pressed()
             || escape_pressed()
             || DRAG_IN_PROGRESS.swap(true, Ordering::AcqRel)
         {
-            return Ok(false);
+            return Ok(LocalDragResult::default());
         }
         let _active = ActiveDrag;
         let _ole = OleApartment::initialize()?;
+        let scenes = local_c4d_scenes(paths);
         let data = file_data_object(paths)?;
-        if !drag_button_pressed() {
-            return Ok(false);
+        if escape_pressed() {
+            return Ok(LocalDragResult::default());
         }
-        let source: IDropSource = LocalFileDropSource {}.into();
+        if !drag_button_pressed() {
+            return Ok(local_c4d_handoff(&state, &scenes, pointer_process).unwrap_or_default());
+        }
+        let handoff = Rc::new(RefCell::new(None));
+        let source: IDropSource = LocalFileDropSource {
+            state,
+            scenes,
+            handoff: handoff.clone(),
+        }
+        .into();
         let effect = unsafe {
             let _ = ReleaseCapture();
-            SHDoDragDrop(Some(hwnd), &data, &source, DROPEFFECT_COPY)?
+            SHDoDragDrop(Some(hwnd), &data, &source, DROPEFFECT_COPY)
         };
-        Ok(effect.contains(DROPEFFECT_COPY))
+        if let Some(result) = handoff.take() {
+            return Ok(result);
+        }
+        Ok(LocalDragResult {
+            copied: effect?.contains(DROPEFFECT_COPY),
+            ..Default::default()
+        })
     }
 
     enum Handoff {
@@ -845,6 +935,15 @@ mod windows_drag {
             assert!(matches!(blocked, Handoff::Blocked(_)) && blocked.replaces_system_drop());
             assert!(matches!(c4d_scene_handoff(&state, pid, fbx_files),
                 Some(Handoff::C4dImport(id)) if id == "legacy"));
+            let local_max = local_c4d_scenes(&[max.path.with_extension("MAX")]);
+            let local_fbx = local_c4d_scenes(std::slice::from_ref(&fbx.path));
+            assert!(local_fbx.is_empty());
+            assert!(local_c4d_handoff(&state, &local_fbx, || panic!(
+                "ordinary drops do not inspect the target"
+            ))
+            .is_none());
+            let local_blocked = local_c4d_handoff(&state, &local_max, || pid).unwrap();
+            assert!(local_blocked.bridge_required.is_some() && !local_blocked.copied);
 
             state.sessions.lock().unwrap().insert(
                 "restricted-instance".into(),
@@ -878,6 +977,16 @@ mod windows_drag {
             assert!(matches!(&converted, Handoff::C4dImport(id) if id == "target-instance"));
             assert!(converted.replaces_system_drop());
             assert!(c4d_scene_handoff(&state, 0, max_files).is_none());
+            let local_mixed = local_c4d_scenes(&[max.path.clone(), fbx.path.clone()]);
+            assert_eq!(local_mixed.len(), 2);
+            let local_import = local_c4d_handoff(&state, &local_mixed, || pid).unwrap();
+            assert_eq!(
+                serde_json::to_value(local_import).unwrap(),
+                serde_json::json!({
+                    "copied": false, "c4dSessionId": "target-instance",
+                })
+            );
+            assert!(local_c4d_handoff(&state, &local_mixed, || 0).is_none());
 
             for files in [max_files, fbx_files] {
                 assert!(matches!(released_drop(&state, pid, files),

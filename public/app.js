@@ -307,7 +307,7 @@ const explorerFileDrop = nativeDragOut ? initExplorerFileDrop({
       void folderAssetPane.show();
     },
   },
-  dragOut:args => invoke('start_local_file_drag',args),
+  dragOut:dragExplorerFilesOut,
   waitForExit:() => invoke('wait_asset_drag_exit'),
 }) : null;
 const assetSearchInput = $('#search');
@@ -7519,6 +7519,43 @@ async function sendExplorerFilesToC4d({files,stillSelected}) {
     },
   });
   if (!chosen) return;
+  return sendExplorerC4dPlan(chosen,checkSelection);
+}
+
+async function dragExplorerFilesOut({paths,entries}) {
+  const initialScope = assetWorkspaceReady && !appRoot.classList.contains('app-starting') ? collectionScope() : null;
+  const result = await invoke('start_local_file_drag',{paths});
+  if (fileWorkspace.hidden || initialScope && initialScope !== collectionScope()) return;
+  if (result?.bridgeRequired) {
+    runtimeLog.add(result.bridgeRequired,'error','transfer');
+    dccConnections.show(result.bridgeRequired);
+    return;
+  }
+  const sessionId = result?.c4dSessionId;
+  if (!sessionId || $('dialog[open]')) return;
+  await ensureAssetWorkspace();
+  const scope = collectionScope();
+  const checkSelection = () => {
+    if (fileWorkspace.hidden || scope !== collectionScope() || initialScope && initialScope !== scope) {
+      throw Error('资产库已切换，请重新拖动文件。');
+    }
+  };
+  checkSelection();
+  const session = (await refreshExplorerC4dSessions()).find(item => item.id === sessionId);
+  checkSelection();
+  if (!session) throw Error('接收文件的 Cinema 4D 实例已离线。');
+  if ($('dialog[open]')) return;
+  const files = entries?.filter(item => !item.isDirectory) ??
+    paths.map(path => ({path,name:path.split(/[\\/]/).at(-1)}));
+  const sources = inspectExplorerC4dSources(files).filter(({asset}) => !asset || isC4dSceneAsset(asset));
+  const {ready,excluded} = planExplorerC4dSend(sources,session);
+  if (!ready.length) throw Error('当前资产库没有可导入的模型。请确认模型已入库、原件可访问且 Cinema 4D 桥接支持该格式。');
+  if (excluded.length) toast('已跳过 ' + excluded.length + ' 项 · ' + excluded[0].name + ' · ' + excluded[0].reason,true);
+  const sourcePaths = new Map(ready.map(({id,path}) => [id,path]));
+  return sendExplorerC4dPlan({sessionId,paths:sourcePaths},checkSelection);
+}
+
+function sendExplorerC4dPlan(chosen,checkSelection) {
   checkSelection();
   const validate = (id,sessionId) => {
     checkSelection();
@@ -7529,7 +7566,7 @@ async function sendExplorerFilesToC4d({files,stillSelected}) {
     if (!c4dCanReceiveAsset(session,asset)) throw Error('目标实例不再支持此文件。');
     return {asset,session};
   };
-  await sendAssets([...chosen.paths.keys()],chosen.sessionId,{validate,exactSources:true});
+  return sendAssets([...chosen.paths.keys()],chosen.sessionId,{validate,exactSources:true});
 }
 
 function addExplorerEntriesToBasket(entries) {

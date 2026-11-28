@@ -215,7 +215,7 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
     outgoing = true;
     clear();
     try {
-      await dragOut({paths:source.paths});
+      await dragOut({paths:source.paths,entries:source.entries});
     } catch (failure) {
       report(String(failure?.message || failure),true);
     } finally {

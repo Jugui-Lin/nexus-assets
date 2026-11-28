@@ -31,6 +31,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
   const startup = get('c4d-import-cleanup-on-startup');
   const threshold = get('c4d-import-cache-reminder-gb');
   const clearCache = get('c4d-import-clear-cache');
+  const cleanupDialog = get('c4d-import-cleanup-dialog');
   const cacheStatus = get('c4d-import-cache-status');
   const cacheSize = get('c4d-import-cache-size');
   const reminder = get('c4d-cache-reminder');
@@ -51,6 +52,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
   let busy = false;
   let baseline;
   let openedWorkspace;
+  let pendingCleanup;
 
   for (const section of nativeSections) section.hidden = !native;
   for (const tab of tabs) tab.hidden = !native && tab.hasAttribute('data-native-only');
@@ -205,17 +207,29 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
   }
 
   dialog.addEventListener('close', () => {
-    if (!dialog.open) generation++;
+    if (dialog.open) return;
+    generation++;
+    if (cleanupDialog.open) cleanupDialog.close();
   });
 
-  clearCache.addEventListener('click', async () => {
-    const token = generation;
+  clearCache.addEventListener('click', () => {
     const workspace = openedWorkspace;
-    if (!dialog.open || !baseline || busy || cleanupWorkspaces.has(workspace)) return;
+    if (!dialog.open || !baseline || busy || pendingCleanup || cleanupWorkspaces.has(workspace)) return;
     if (workspace !== scope()) {
       showCacheStatus('资产库已切换，请重新打开导入设置。', true);
       return;
     }
+    cleanupDialog.returnValue = '';
+    cleanupDialog.showModal();
+    pendingCleanup = {token:generation, workspace};
+  });
+
+  cleanupDialog.addEventListener('close', async () => {
+    const request = pendingCleanup;
+    pendingCleanup = undefined;
+    if (!request || cleanupDialog.returnValue !== 'clear') return;
+    const {token, workspace} = request;
+    if (!current(token, workspace) || busy || cleanupWorkspaces.has(workspace)) return;
     cleanupWorkspaces.add(workspace);
     measurement++;
     reminderMeasurement++;

@@ -760,7 +760,11 @@ mod windows_drop {
 
         #[test]
         fn remote_items_are_rejected_before_querying_recycle_bin() {
-            assert!(verify_recycle_root(Path::new(r"\\server\share\file.txt")).is_err());
+            assert!(verify_recycle_root(
+                Path::new(r"\\server\share\file.txt"),
+                &mut HashSet::new()
+            )
+            .is_err());
         }
 
         #[test]

@@ -4,7 +4,7 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 [下载 Windows x64 最新版](https://github.com/Jugui-Lin/nexus-assets/releases/latest) · [团队部署与使用](团队版部署与使用.md) · [NAS 镜像更新](nas/README.md#github-镜像自动更新)
 
-本页对应 Windows 客户端 v0.10.61。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.61)
+本页对应 Windows 客户端 v0.10.62。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.62)
 
 ![Nexus 资产库演示，左侧文件夹树，中间是模型与图片的预览卡片](docs/screenshots/asset-library.png)
 
@@ -39,7 +39,7 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 切到团队库即可浏览已同步的索引和资料，也可查看能访问的缓存缩略图。打开原件、全尺寸预览和向 DCC 发送素材都需要访问原件目录。要启用 NAS 自动扫描，在容器中另行挂载要扫描的素材目录。 [NAS 部署与扫描](nas/README.md#服务器自动扫描素材)
 
-Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未信任的共享路径时，可在「当前团队」核对路径并点「允许此共享路径」。未设置或无法访问共享路径时，客户端可以使用本机缓存。NAS 服务可更新到 `ghcr.io/jugui-lin/nexus-team:0.10.61`。 [NAS 镜像更新](nas/README.md#github-镜像自动更新)
+Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未信任的共享路径时，可在「当前团队」核对路径并点「允许此共享路径」。未设置或无法访问共享路径时，客户端可以使用本机缓存。NAS 服务可更新到 `ghcr.io/jugui-lin/nexus-team:0.10.62`。 [NAS 镜像更新](nas/README.md#github-镜像自动更新)
 
 <details>
 <summary>打开已有库、预览和缓存</summary>
@@ -92,7 +92,9 @@ Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未�
 - Cinema 4D 2023 和 2024 支持基础导入，可把 C4D、FBX、OBJ、Alembic 和 STL 合并到当前场景。
 - 从资产库或文件夹把已入库的 FBX、OBJ 和 MAX 发送到在线的 Cinema 4D 2023 实例，可智能导入到当前场景。Nexus 会自动查找模型附近匹配的贴图。FBX 和 OBJ 智能导入使用标准材质。
 - Cinema 4D 2025 及以上版本的智能导入和视口放置按在线实例显示的能力提供。智能导入支持模型、PBR 贴图、HDRI 和 IES。
+- 在 Windows 文件夹视图中，将已入库的 MAX 文件拖到支持该格式的 Cinema 4D 窗口，会打开该实例的智能导入选项。
 - 智能导入时，「将贴图归档到工程 tex」适用于已保存的工程。新建工程也可直接导入模型和材质，任务结果会提示已保留贴图引用并跳过归档。
+- 手动清理 Cinema 4D 导入缓存前，请使用 Cinema 4D 的「文件 → 保存工程（包含资源）」收集贴图，再关闭占用该缓存的 Cinema 4D。Nexus 会在清理前显示确认。
 - 发送 MAX 时可沿用工作区保存的读取方式，也可为本次导入选择读取方式。「Blender 直接解析」需要 Blender 4.2 或更新版本。「调用 3ds Max Batch」需要 Windows 上已安装并完成授权的 3ds Max Batch。
 - 更新 Cinema 4D 桥接并重开后，MAX 智能导入默认生成 Octane 材质。点发送按钮旁的「MAX 导入偏好」可修改工作区默认值，也可在导入对话框里为本次选择。「按场景使用 Octane 或标准材质」会读取当前工程的渲染器。当前实例未加载 Octane 时使用标准材质。
 - Windows 上可把 MAX 拖进 Blender 4.5 或更新版本的 3D 视口。桥接安装或更新后，重开 Blender 即可使用。

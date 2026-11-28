@@ -69,9 +69,10 @@ fn exclusive_lease(cache: &Path) -> Result<File, String> {
     // The bridge holds a shared lock starting at byte zero on Windows and uses flock on Unix.
     match file.try_lock() {
         Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => {
-            Err("Cinema 4D 正在使用此缓存，请关闭使用它的 Cinema 4D 后重试。".into())
-        }
+        Err(TryLockError::WouldBlock) => Err(
+            "Cinema 4D 正在使用此缓存。请先保存工程及其贴图，关闭使用此缓存的 Cinema 4D 后再试。"
+                .into(),
+        ),
         Err(TryLockError::Error(_)) => Err("无法锁定 Cinema 4D 缓存".into()),
     }
 }
