@@ -39,7 +39,10 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
     const online = Object.fromEntries(Object.keys(hosts).map(id => [id, sessions.filter(session => session.dcc === id).length]));
     const placementHosts = new Set(viewportPlacement
       ? sessions.filter(session => session.placement === true).map(session => session.dcc) : []);
-    const smartImport = sessions.some(session => session.dcc === 'c4d' && session.smartImport === true);
+    const smartC4dSessions = sessions.filter(session => session.dcc === 'c4d' && session.smartImport === true);
+    const restrictedFormats = [...new Set(smartC4dSessions.flatMap(session => session.smartImportFormats || []))].sort();
+    const smartImport = smartC4dSessions.some(session => !Array.isArray(session.smartImportFormats)) ? '智能导入'
+      : restrictedFormats.length ? '智能导入 · ' + restrictedFormats.join(' / ').toUpperCase() : '';
     const busy = Boolean(pending);
     const nextSignature = JSON.stringify([detection, busy, syncFailed, online, [...placementHosts], smartImport]);
     if (nextSignature === signature) return;
@@ -68,7 +71,7 @@ export function initDccConnections({hosts, native, viewportPlacement, api, getSe
       const onlineBadge = online[id] ? '<span class="dcc-online" title="宿主已连接">' + online[id] + ' 个在线</span>' : '';
       const placement = placementHosts.has(id);
       const placementBadge = placement ? '<span class="dcc-placement">视口放置</span>' : '';
-      const smartBadge = id === 'c4d' && smartImport ? '<span class="dcc-placement">智能导入</span>' : '';
+      const smartBadge = id === 'c4d' && smartImport ? '<span class="dcc-placement">' + escape(smartImport) + '</span>' : '';
       const placementHelp = placement ? '<p class="dcc-placement-help">拖入 3D 视口并松手，移动鼠标预览，点击放下，Esc 取消。</p>' : '';
       const settings = native && importSections[id] ? '<button type="button" class="button dcc-import-settings" data-import-settings="' + id +
         '" aria-haspopup="dialog" aria-controls="smart-import-dialog" aria-label="' + escape(host.name) + ' 导入设置">' + icon('sliders') + '导入设置</button>' : '';

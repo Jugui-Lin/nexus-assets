@@ -10,6 +10,7 @@ import {explorerPathFormats,formatExplorerPaths} from './local-explorer-path-for
 import {explorerShortcutAction,normalizeExplorerShortcuts} from './local-explorer-shortcuts.js';
 import {distinguishTabLabels} from './workspace-tab-labels.js';
 import {simplifyAssetQuery} from './asset-empty-search.js';
+import {groupExplorerRenderSequences,isExplorerRenderFrame} from './local-explorer-render-sequences.js';
 
 const dateFormat = new Intl.DateTimeFormat('zh-CN', {
   year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hourCycle:'h23',
@@ -39,7 +40,8 @@ let tabSequence = 0;
 const defaultPreferences = {startLocation:'computer',showFrequent:true,showHidden:false,showThumbnails:true,
   showStatus:true,showExtensions:true,showNavigation:true,openMode:'double',compact:false,
   startMode:'new',startupPaths:[],showToolbar:true,showBookmarks:true,openBookmarkInNewTab:false,
-  doubleClickUp:true,ctrlDoubleClickTab:true,doubleClickCloseTab:true,wheelSwitchTabs:false,quickPreview:true};
+  doubleClickUp:true,ctrlDoubleClickTab:true,doubleClickCloseTab:true,wheelSwitchTabs:false,quickPreview:true,
+  stackSequences:false,showUnindexed:false};
 
 const placeIcons = {
   home:'home', desktop:'explorer-computer', downloads:'download', documents:'notes',
@@ -159,6 +161,7 @@ function createTab() {
     history:[],index:-1,snapshot:null,request:null,selected:null,query:'',scrollTop:0,status:'',
     error:false,view:'details',driveView:'grid',iconSize:'medium',driveIconSize:'medium',
     sortBy:'name',descending:false,groupBy:'none',stalePaths:new Map(),collapsedDateGroups:new Set(),
+    expandedSequences:new Set(),
     selection:new Map(),selectionAnchor:null,selectionRevision:0,
   };
 }
@@ -536,6 +539,7 @@ export function initLocalExplorer({
   let listedDrives = [];
   let detailRunning = 0;
   let renderedBoundaries;
+  let sequenceGroups = new Map();
   let lastSelection;
   let loadingAssets = false;
   let assetDataRequested = false;
@@ -675,7 +679,7 @@ export function initLocalExplorer({
     const button = row.querySelector('.local-explorer-entry');
     let controls = row.querySelector('.local-explorer-row-asset-actions');
     let badge = button.querySelector('.local-explorer-asset-state');
-    const text = asset ? (asset.favorite ? '已收藏' : '已入库') : asset === null ? '未入库' : '';
+    const text = asset ? (asset.favorite ? '已收藏' : '已入库') : asset === null && prefs.showUnindexed ? '未入库' : '';
     const state = asset ? (asset.favorite ? 'favorite' : 'indexed') : 'unindexed';
     if (asset && (onOpenAssetDetails || onToggleFavorite) && !controls) {
       controls = element('span','local-explorer-row-asset-actions');
@@ -1503,8 +1507,12 @@ export function initLocalExplorer({
 
   function entryRows(entries,boundaries) {
     const fragment = owner.createDocumentFragment();
+    sequenceGroups = prefs.stackSequences ? groupExplorerRenderSequences(entries,treePathKey) : new Map();
+    const expanded = new Set();
     let currentGroup;
     for (const [index,entry] of entries.entries()) {
+      const sequence = sequenceGroups.get(index);
+      if (sequence && sequence.representativeIndex !== index) continue;
       const group = boundaries ? dateGroup(entry,boundaries) : null;
       const collapsed = group !== null && tab.collapsedDateGroups.has(group);
       if (group !== null && group !== currentGroup) {
@@ -1519,36 +1527,70 @@ export function initLocalExplorer({
         cell.append(toggle);
         fragment.append(heading);
       }
-      const row = element('tr');
-      row.dataset.entryIndex = index;
-      if (group !== null) row.dataset.explorerDateGroup = group;
-      row.hidden = collapsed;
-      if (entry.isDirectory) markDropTarget(row,entry.path,entry.name);
-      const button = element('button','local-explorer-entry');
-      button.tabIndex = -1;
-      button.title = entry.name;
-      const name = displayEntryName(entry);
-      button.setAttribute('aria-label',name + (entry.isDirectory ? '，文件夹' : ''));
-      button.toggleAttribute('data-directory',entry.isDirectory);
-      button.append(svg(entry.isDirectory ? 'folder' : 'notes'));
-      if (entry.isDirectory) {
-        const preview = element('span','local-explorer-folder-preview');
-        preview.setAttribute('aria-hidden','true');
-        button.append(preview);
+      if (!sequence) {
+        fragment.append(entryRow(entry,index,group,collapsed));
+        continue;
       }
-      button.append(element('span','local-explorer-entry-name',name));
-      const nameCell = element('td');
-      nameCell.append(button);
-      if (columnLayout) columnLayout.appendCells(row,entry,nameCell);
-      else {
-        row.append(nameCell);
-        row.insertCell().textContent = dateText(entry.modified);
-        row.insertCell().textContent = fileType(entry);
-        row.insertCell().textContent = sizeText(entry.size);
+      const open = tab.expandedSequences.has(sequence.key) ||
+        sequence.frames.some(frame => tab.selection.has(pathKey(frame.entry.path)));
+      fragment.append(sequenceRow(sequence,group,collapsed,open));
+      if (open) {
+        expanded.add(sequence.key);
+        const frames = [...sequence.frames].sort((a,b) => a.index - b.index);
+        for (const frame of frames) fragment.append(entryRow(frame.entry,frame.index,group,collapsed,true));
       }
-      fragment.append(row);
     }
+    tab.expandedSequences = expanded;
     return fragment;
+  }
+
+  function entryRow(entry,index,group,collapsed,inSequence = false) {
+    const row = element('tr',inSequence ? 'local-explorer-sequence-frame' : '');
+    row.dataset.entryIndex = index;
+    if (group !== null) row.dataset.explorerDateGroup = group;
+    row.hidden = collapsed;
+    if (entry.isDirectory) markDropTarget(row,entry.path,entry.name);
+    const button = element('button','local-explorer-entry');
+    button.tabIndex = -1;
+    button.title = entry.name;
+    const name = displayEntryName(entry);
+    button.setAttribute('aria-label',name + (entry.isDirectory ? '，文件夹' : ''));
+    button.toggleAttribute('data-directory',entry.isDirectory);
+    button.append(svg(entry.isDirectory ? 'folder' : 'notes'));
+    if (entry.isDirectory) {
+      const preview = element('span','local-explorer-folder-preview');
+      preview.setAttribute('aria-hidden','true');
+      button.append(preview);
+    }
+    button.append(element('span','local-explorer-entry-name',name));
+    const nameCell = element('td');
+    nameCell.append(button);
+    if (columnLayout) columnLayout.appendCells(row,entry,nameCell);
+    else {
+      row.append(nameCell);
+      row.insertCell().textContent = dateText(entry.modified);
+      row.insertCell().textContent = fileType(entry);
+      row.insertCell().textContent = sizeText(entry.size);
+    }
+    return row;
+  }
+
+  function sequenceRow(sequence,group,collapsed,open) {
+    const row = element('tr','local-explorer-sequence-stack');
+    if (group !== null) row.dataset.explorerDateGroup = group;
+    row.hidden = collapsed;
+    const cell = row.insertCell();
+    cell.colSpan = columnLayout?.columnCount || 4;
+    const button = element('button','local-explorer-sequence-toggle');
+    button.type = 'button';
+    button.dataset.explorerSequenceToggle = sequence.representativeIndex;
+    button.setAttribute('aria-expanded',String(open));
+    const number = frame => String(frame).padStart(sequence.padding,'0');
+    button.title = `${sequence.label} · ${number(sequence.first)}–${number(sequence.last)}`;
+    button.append(svg('chevron'),svg('stack'),element('span','',sequence.label),
+      element('span','local-explorer-sequence-count',displayNumber.format(sequence.frames.length) + ' 帧'));
+    cell.append(button);
+    return row;
   }
 
   function entryHost() {
@@ -1557,6 +1599,33 @@ export function initLocalExplorer({
 
   function entryItem(index) {
     return entryHost().querySelector('[data-entry-index="' + index + '"]:not([hidden])');
+  }
+
+  function visibleEntries() {
+    return [...entryHost().querySelectorAll('[data-entry-index]:not([hidden])')]
+      .map(row => tab.snapshot.entries[Number(row.dataset.entryIndex)]);
+  }
+
+  function toggleSequence(button) {
+    if (!tab.snapshot || tab.request || tab.fileAction) return;
+    const index = button.dataset.explorerSequenceToggle;
+    const sequence = sequenceGroups.get(Number(index));
+    if (!sequence) return;
+    if (tab.expandedSequences.delete(sequence.key)) {
+      for (const frame of sequence.frames) tab.selection.delete(pathKey(frame.entry.path));
+      tab.selected = tab.selection.get(pathKey(tab.selected?.path)) || tab.selection.values().next().value || null;
+      if (!tab.selection.has(tab.selectionAnchor)) tab.selectionAnchor = tab.selected ? pathKey(tab.selected.path) : null;
+      tab.selectionRevision++;
+    } else tab.expandedSequences.add(sequence.key);
+    const previousTop = button.getBoundingClientRect().top;
+    tbody.replaceChildren(entryRows(tab.snapshot.entries,tab.snapshot.dateGroups));
+    const next = tbody.querySelector('[data-explorer-sequence-toggle="' + index + '"]');
+    if (next) {
+      scroller.scrollTop += next.getBoundingClientRect().top - previousTop;
+      next.focus({preventScroll:true});
+    }
+    drawSelection();
+    updateView();
   }
 
   function showDateGroup(group,expanded) {
@@ -1617,7 +1686,7 @@ export function initLocalExplorer({
   }
 
   function selectEntry(entry,{toggle = false,range = false} = {}) {
-    const {selection,snapshot} = tab;
+    const {selection} = tab;
     tab.selectionRevision++;
     if (!entry) {
       if (!toggle) {
@@ -1626,14 +1695,14 @@ export function initLocalExplorer({
       }
     } else {
       const key = pathKey(entry.path);
-      const anchor = range ? snapshot.entries.findIndex(item => pathKey(item.path) === tab.selectionAnchor) : -1;
-      if (range && anchor >= 0) {
-        const end = snapshot.entries.indexOf(entry);
+      const entries = range ? visibleEntries() : [];
+      const anchor = range ? entries.findIndex(item => pathKey(item.path) === tab.selectionAnchor) : -1;
+      const end = range ? entries.indexOf(entry) : -1;
+      if (anchor >= 0 && end >= 0) {
         if (!toggle) selection.clear();
         for (let index = Math.min(anchor,end); index <= Math.max(anchor,end); index++) {
-          const item = snapshot.entries[index];
-          if (!snapshot.dateGroups || !tab.collapsedDateGroups.has(dateGroup(item,snapshot.dateGroups)))
-            selection.set(pathKey(item.path),item);
+          const item = entries[index];
+          selection.set(pathKey(item.path),item);
         }
       } else {
         if (!toggle) selection.clear();
@@ -1651,9 +1720,10 @@ export function initLocalExplorer({
     const item = tab;
     const current = item.snapshot;
     const revision = ++item.selectionRevision;
-    let entries = current.entries;
+    const stacked = sequenceGroups.size > 0 && !isDriveView(current);
+    let entries = stacked ? visibleEntries() : current.entries;
     try {
-      if (selectAllEntries && current.directory && !isDriveView(current) && current.total > entries.length) {
+      if (!stacked && selectAllEntries && current.directory && !isDriveView(current) && current.total > entries.length) {
         const listing = await selectAllEntries({address:current.directory,...(item.query && {query:item.query}),
           ...(current.projectFilter && {projectFilter:current.projectFilter}),
           ...(prefs.showHidden && {showHidden:true})});
@@ -1721,6 +1791,7 @@ export function initLocalExplorer({
     const term = searchText();
     if (search.value !== term && (!sameLocation || owner.activeElement !== search)) search.value = term;
     if (!snapshot) {
+      sequenceGroups.clear();
       tbody.replaceChildren();
       drivesHost.replaceChildren();
       pages.hidden = empty.hidden = true;
@@ -1741,8 +1812,13 @@ export function initLocalExplorer({
         return path === entry.path && name === entry.name && isDirectory === entry.isDirectory &&
           size === entry.size && modified === entry.modified && created === entry.created;
       });
-    if (driveView) renderDrives(snapshot.entries);
-    else if (!sameRows || revealGroup || String(boundaries) !== String(renderedBoundaries)) {
+    const revealSequence = sameRows && tab.selection.size &&
+      [...sequenceGroups].some(([index,sequence]) => !tab.expandedSequences.has(sequence.key) &&
+        tab.selection.has(pathKey(snapshot.entries[index].path)));
+    if (driveView) {
+      sequenceGroups.clear();
+      renderDrives(snapshot.entries);
+    } else if (!sameRows || revealGroup || revealSequence || String(boundaries) !== String(renderedBoundaries)) {
       const anchor = samePage && !snapshot.selectedPath ? visibleRowAnchor(previous.entries) : null;
       tbody.replaceChildren(entryRows(snapshot.entries,boundaries));
       if (anchor) restoreRowAnchor(anchor,snapshot.entries);
@@ -2624,13 +2700,27 @@ export function initLocalExplorer({
       if (isActive() && !startupPending) return navigate(tabPath(tab),{index:tab.index,offset:0,force:true});
       return;
     }
-    if (previous.showExtensions !== prefs.showExtensions && tab.snapshot && !isDriveView(tab.snapshot)) {
-      for (const row of tbody.querySelectorAll('[data-entry-index]')) {
-        const entry = tab.snapshot.entries[Number(row.dataset.entryIndex)];
-        const name = displayEntryName(entry);
-        row.querySelector('.local-explorer-entry-name').textContent = name;
-        const statusText = row.querySelector('.local-explorer-asset-state')?.textContent;
-        itemButton(row).setAttribute('aria-label',name + (entry.isDirectory ? '，文件夹' : statusText ? '，' + statusText : ''));
+    const snapshot = tab.snapshot;
+    if (snapshot && !isDriveView(snapshot)) {
+      if (previous.stackSequences !== prefs.stackSequences) {
+        finishMarquee(true);
+        const anchor = visibleRowAnchor(snapshot.entries);
+        if (!prefs.stackSequences) for (const item of tabs) item.expandedSequences.clear();
+        tbody.replaceChildren(entryRows(snapshot.entries,snapshot.dateGroups));
+        if (anchor) restoreRowAnchor(anchor,snapshot.entries);
+        drawSelection();
+      } else if (previous.showExtensions !== prefs.showExtensions || previous.showUnindexed !== prefs.showUnindexed) {
+        for (const row of tbody.querySelectorAll('[data-entry-index]')) {
+          const entry = snapshot.entries[Number(row.dataset.entryIndex)];
+          if (previous.showExtensions !== prefs.showExtensions) {
+            const name = displayEntryName(entry);
+            row.querySelector('.local-explorer-entry-name').textContent = name;
+            const statusText = row.querySelector('.local-explorer-asset-state')?.textContent;
+            itemButton(row).setAttribute('aria-label',name + (entry.isDirectory ? '，文件夹' : statusText ? '，' + statusText : ''));
+          }
+          if (previous.showUnindexed !== prefs.showUnindexed && assetDetails.get(entry.path) === null)
+            paintAssetDetails(row,entry,null);
+        }
       }
     }
     updateView();
@@ -3034,7 +3124,7 @@ export function initLocalExplorer({
           tools.push(row('move-indexed-files','移动原件并保留资产记录…'));
         if (entry && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
         if (file && onProjectDependencies && /\.gltf$/i.test(path)) tools.push(row('project-dependencies','检查与替换 glTF 依赖…'));
-        if (onInspectRenderSequence && (!file || /\d+\.(?:exr|png|jpe?g|tiff?|webp|bmp|hdr)$/i.test(entry.name)))
+        if (onInspectRenderSequence && (!file || isExplorerRenderFrame(entry.name)))
           tools.push(row('inspect-render-sequence','检查渲染序列…'));
         if (file && onCompareExrChannels && /\.exr$/i.test(entry.name))
           tools.push(row('compare-exr-channels','对比 OpenEXR 通道…'));
@@ -3734,6 +3824,12 @@ export function initLocalExplorer({
     if (catalogOnly() || catalogPane?.contains(event.target)) return;
     if (suppressMarqueeClick && event.detail > 0) { event.preventDefault(); return; }
     if (event.target.closest('thead')) return;
+    const sequence = event.target.closest('[data-explorer-sequence-toggle]');
+    if (sequence) {
+      if (event.detail < 2) toggleSequence(sequence);
+      return;
+    }
+    if (event.target.closest('.local-explorer-sequence-stack')) return;
     const assetAction = event.target.closest('[data-explorer-row-asset]');
     if (assetAction) {
       const entry = clickedEntry(assetAction);
@@ -3781,7 +3877,8 @@ export function initLocalExplorer({
   if (contextMenu) scroller.addEventListener('contextmenu',event => {
     event.preventDefault();
     event.stopPropagation();
-    if (catalogOnly() || catalogPane?.contains(event.target)) return;
+    if (catalogOnly() || catalogPane?.contains(event.target) ||
+        event.target.closest('.local-explorer-sequence-stack')) return;
     const position = {x:event.clientX,y:event.clientY};
     const group = event.target.closest('[data-explorer-group-toggle]');
     if (group) {
@@ -3855,8 +3952,9 @@ export function initLocalExplorer({
     const modified = event.ctrlKey || event.metaKey;
     const editing = event.target.closest?.('input,textarea,select,[contenteditable="true"]');
     const current = tab.snapshot;
+    const sequence = event.target.closest?.('[data-explorer-sequence-toggle]');
     const focused = scroller.contains(event.target) ? clickedEntry(event.target) : undefined;
-    const selected = focused || tab.selected;
+    const selected = focused || (sequence ? null : tab.selected);
     const multiple = tab.selection.size > 1;
     const physical = current && !isDriveView(current) && current.directory;
     const assetSearchResult = catalogOnly() || catalogPane?.contains(event.target);
@@ -3876,7 +3974,7 @@ export function initLocalExplorer({
       return;
     }
     if (!assetSearchResult && !editing && contextMenu && (key === 'contextmenu' || key === 'f10' && event.shiftKey)) {
-      if (event.target.closest?.('[data-explorer-tab-id]')) return;
+      if (sequence || event.target.closest?.('[data-explorer-tab-id]')) return;
       event.preventDefault();
       event.stopPropagation();
       const pin = event.target.closest('[data-explorer-pin-path]');

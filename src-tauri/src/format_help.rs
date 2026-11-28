@@ -1,4 +1,4 @@
-use crate::{mesh_preview, session_supports_asset, AppState};
+use crate::{mesh_preview, session_supports_asset, session_supports_smart_import, AppState};
 use nexus_core::{
     asset_raster_preview_limit, asset_thumbnail, c4d_smart_compatible, clean_path, compatible,
     kind, now, video_mime,
@@ -137,7 +137,7 @@ fn dcc_formats(extension: &str, sessions: &[Value], now: u64) -> Vec<DccCapabili
             }) {
                 online += 1;
                 direct += usize::from(session_supports_asset(session, extension));
-                smart += usize::from(smart_supported && session["smartImport"] == true);
+                smart += usize::from(session_supports_smart_import(session, extension));
             }
             let condition = match (host, extension) {
                 ("blender", "max") => Some("需要支持 MAX 导入的 Blender 桥接"),
@@ -258,13 +258,18 @@ mod tests {
             json!({"dcc":"blender","lastSeen":101,"maxImport":true}),
             json!({"dcc":"blender","lastSeen":85,"maxImport":true}),
             json!({"dcc":"c4d","lastSeen":101,"smartImport":true}),
+            json!({"dcc":"c4d","lastSeen":101,"smartImport":true,"smartImportFormats":["fbx","obj"]}),
+            json!({"dcc":"c4d","lastSeen":101,"smartImport":true,"smartImportFormats":["fbx","max","obj"]}),
             json!({"dcc":"c4d","lastSeen":101}),
         ];
         let hosts = dcc_formats("max", &sessions, 102);
         let blender = hosts.iter().find(|entry| entry.host == "blender").unwrap();
         assert_eq!((blender.online, blender.direct, blender.smart), (2, 1, 0));
         let c4d = hosts.iter().find(|entry| entry.host == "c4d").unwrap();
-        assert_eq!((c4d.online, c4d.direct, c4d.smart), (2, 0, 1));
+        assert_eq!((c4d.online, c4d.direct, c4d.smart), (4, 0, 2));
+        let fbx = dcc_formats("fbx", &sessions, 102);
+        let c4d = fbx.iter().find(|entry| entry.host == "c4d").unwrap();
+        assert_eq!((c4d.online, c4d.direct, c4d.smart), (4, 4, 3));
         assert_eq!(dcc_formats("sbsar", &sessions, 102)[0].smart, 1);
         assert_eq!(dcc_formats("gltf", &sessions, 102)[0].direct, 2);
     }

@@ -34,7 +34,8 @@ pub use windows_drag::*;
 mod windows_drag {
     use super::AppState;
     use crate::{
-        placement::PlacementFile, resolve_asset, session_supports_asset, team_desktop::Desktop,
+        placement::PlacementFile, resolve_asset, session_supports_asset,
+        session_supports_smart_import, team_desktop::Desktop,
     };
     use nexus_core::{clean_path, compatible, now, team::mapped_file};
     use serde::Serialize;
@@ -559,13 +560,18 @@ mod windows_drag {
             return None;
         }
         if let Some((session, _)) = eligible_target(state, pid, |item| {
-            item["dcc"] == "c4d" && item["smartImport"] == true
+            files.iter().any(|file| session_supports_smart_import(item, &file.ext))
         }) {
             return Some(Handoff::C4dImport(session));
         }
         let legacy = eligible_target(state, pid, |item| item["dcc"] == "c4d");
         if let (true, Some((session, _))) = (direct, &legacy) {
             return Some(Handoff::C4dImport(session.clone()));
+        }
+        if eligible_target(state, pid, |item| {
+            item["dcc"] == "c4d" && item["smartImportFormats"].is_array()
+        }).is_some() {
+            return Some(Handoff::Blocked("此格式无法通过智能导入发送到当前 Cinema 4D 实例。"));
         }
         if legacy.is_some() || is_named_process(pid, "Cinema 4D.exe") {
             return Some(Handoff::Blocked(
@@ -839,6 +845,28 @@ mod windows_drag {
             assert!(matches!(blocked, Handoff::Blocked(_)) && blocked.replaces_system_drop());
             assert!(matches!(c4d_scene_handoff(&state, pid, fbx_files),
                 Some(Handoff::C4dImport(id)) if id == "legacy"));
+
+            state.sessions.lock().unwrap().insert(
+                "restricted-instance".into(),
+                serde_json::json!({
+                    "dcc":"c4d", "pid":pid, "smartImport":true,
+                    "smartImportFormats":["fbx", "obj"], "lastSeen":now().saturating_sub(1),
+                }),
+            );
+            assert!(matches!(c4d_scene_handoff(&state, pid, fbx_files),
+                Some(Handoff::C4dImport(id)) if id == "restricted-instance"));
+            assert!(matches!(c4d_scene_handoff(&state, pid, max_files), Some(Handoff::Blocked(_))));
+
+            state.sessions.lock().unwrap().get_mut("restricted-instance").unwrap()["smartImportFormats"] =
+                serde_json::json!(["fbx", "max", "obj"]);
+            assert!(matches!(released_drop(&state, pid, max_files),
+                DropOutcome::C4dImport(id) if id == "restricted-instance"));
+            let blend = PlacementFile {
+                path: PathBuf::from(r"\\nas\assets\scene.blend"),
+                name: "scene".into(),
+                ext: "blend".into(),
+            };
+            assert!(matches!(c4d_scene_handoff(&state, pid, &[blend]), Some(Handoff::Blocked(_))));
 
             state.sessions.lock().unwrap().insert(
                 "target-instance".into(),

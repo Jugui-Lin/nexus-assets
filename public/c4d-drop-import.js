@@ -43,7 +43,7 @@ const statusMessages = {
   interrupted:'Cinema 4D 导入已中断',
 };
 
-export function initC4dDropImport({asset, assets, session, isUsable, supports, scope, defaultRenderer, queue, notify, showJobs, showConnections, openWeb}) {
+export function initC4dDropImport({asset, assets, session, isUsable, supports, canUseSmartImport, scope, defaultRenderer, queue, notify, showJobs, showConnections, openWeb}) {
   const get = id => document.getElementById(id);
   const dialog = get('c4d-drop-dialog');
   const form = get('c4d-drop-form');
@@ -60,6 +60,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
   const rendererOptions = Object.fromEntries([...renderer.options].map(option => [option.value, option]));
   const octanePreviewNote = get('c4d-drop-octane-preview-note');
   const bridgeNote = get('c4d-drop-bridge-note');
+  const restrictedNote = get('c4d-drop-restricted-note');
   const status = get('c4d-drop-status');
   const activity = get('c4d-drop-activity');
   const stage = get('c4d-drop-stage');
@@ -81,13 +82,15 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
   function renderFields() {
     const selected = picks().map(id => asset(id));
     const scene = selected.some(isC4dSceneAsset);
+    const restrictedSmart = draft.restricted && selected.some(source => canUseSmartImport(session(draft.sessionId), source));
     const fbxMaterials = selected.some(source => fbxSources.has(source?.ext));
-    conversion.hidden = !draft.custom || !selected.some(source => source?.ext === 'max');
+    conversion.hidden = !draft.maxOptions || !selected.some(source => source?.ext === 'max');
     blenderNote.hidden = conversion.hidden || mode.value !== 'direct';
     if (blenderNote.hidden) mode.removeAttribute('aria-describedby');
     else mode.setAttribute('aria-describedby', blenderNote.id);
     sceneFields.hidden = !draft.custom || !scene;
-    bridgeNote.hidden = draft.custom || !scene;
+    bridgeNote.hidden = draft.custom || !scene || restrictedSmart;
+    restrictedNote.hidden = !restrictedSmart;
     const importObjects = form.elements.objects.checked;
     normalsField.hidden = sceneFields.hidden || !fbxMaterials;
     normals.disabled = normalsField.hidden || !importObjects;
@@ -123,7 +126,11 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
     const list = ids.map(asset).filter(Boolean);
     const supported = list.filter(item => supports(item, target));
     if (!supported.length) throw Error('所选资产没有可导入 Cinema 4D 的格式');
-    draft = {scope:scope(), sessionId, validate, custom:target.smartImport === true && target.sceneImportOptions === true,
+    const restricted = Array.isArray(target.smartImportFormats);
+    const custom = !restricted && target.smartImport === true && target.sceneImportOptions === true;
+    const restrictedMax = restricted && target.smartImport === true && target.smartImportFormats.includes('max');
+    draft = {scope:scope(), sessionId, validate, restricted,
+      custom, maxOptions:custom || restrictedMax,
       archiveTextures:target.archiveTextures === true, entries:[]};
     for (const row of sources.querySelectorAll('label')) row.remove();
     for (const item of supported) {
@@ -138,14 +145,14 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
         const filename = assetLocation(source).filename || source.name;
         select.add(new Option(filename + (index ? ' · 可直接导入' : ' · 原文件'), source.id));
       }
-      if (alternatives.length) select.value = alternatives[0].id;
+      if (alternatives.length && !restrictedMax) select.value = alternatives[0].id;
       label.append(select);
       sources.append(label);
       draft.entries.push({select});
     }
     for (const input of checks) input.checked = true;
     storeTextures.checked = draft.archiveTextures;
-    mode.value = 'direct';
+    mode.value = restrictedMax ? '' : 'direct';
     renderer.value = defaultRenderer();
     get('c4d-drop-target').textContent = target.label || 'Cinema 4D';
     status.textContent = list.length !== supported.length ? '已跳过 ' + (list.length - supported.length) + ' 项不支持的资产' : '';
@@ -253,7 +260,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, s
               options.renderer = materialRenderer;
             }
           }
-          if (current.custom && source.ext === 'max' && method) options.max_mode = method;
+          if (current.maxOptions && source.ext === 'max' && method) options.max_mode = method;
           const job = await queue(source, current.sessionId, isScene, options);
           tracked.set(job.id, {assetId:id, sessionId:current.sessionId, ...job});
           submitted++;

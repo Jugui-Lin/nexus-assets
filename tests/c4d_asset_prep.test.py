@@ -73,6 +73,20 @@ class AssetPrepTests(unittest.TestCase):
         self.assertTrue(plan["maps"]["normal"].endswith("Rock_2K_Normal_LOD2.png"))
         self.assertNotIn("roughness", plan["maps"])
 
+    def test_legacy_scene_can_match_separate_material_names_without_replacing_source(self):
+        self.files("Scene.fbx", "Scene.obj", "textures/Wood_Normal.png", "textures/Wood_Albedo.png",
+                   "textures/Metal_Roughness.png", "a/Fabric_Color.png", "b/Fabric_Color.png")
+        for extension in ("fbx", "obj"):
+            source = self.source / ("Scene." + extension)
+            plan = prep.prepare(None, source, {"kind": "scene"}, self.cache, match_material_names=True)
+            self.assertEqual(plan["path"], str(source))
+            self.assertEqual(plan["maps"], {})
+            self.assertEqual(plan["named_material_maps"], {
+                ("wood",): {"base_color": str(self.source / "textures/Wood_Albedo.png"),
+                            "normal": str(self.source / "textures/Wood_Normal.png")},
+                ("metal",): {"roughness": str(self.source / "textures/Metal_Roughness.png")},
+            })
+
     def test_single_texture_ies_and_hdri(self):
         self.files("Lambert.png", "Photometry.ies", "Dome.exr")
         for name, expected in [("Lambert.png", "texture"), ("Photometry.ies", "ies"), ("Dome.exr", "hdri")]:

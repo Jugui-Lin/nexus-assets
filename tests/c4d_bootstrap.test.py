@@ -1,4 +1,4 @@
-"""Verify legacy auto-bridge startup and import against the documented SDK surface."""
+"""Verify auto-bridge startup and import capabilities on each supported host profile."""
 
 import ast
 import builtins
@@ -26,7 +26,7 @@ class BootstrapTests(TestCase):
         for path in (BOOTSTRAP, RUNTIME, ROOT / "install" / "runtime_config.py"):
             ast.parse(path.read_text(encoding="utf8"), filename=str(path), feature_version=(3, 9))
 
-    def check_host(self, version, advanced, headless=False):
+    def check_host(self, version, mode, headless=False, fail_smart_load=False):
         registered = []
         document = SimpleNamespace(GetDocumentName=lambda: "Fixture")
         merge = Mock(return_value=True)
@@ -42,14 +42,23 @@ class BootstrapTests(TestCase):
             SCENEFILTER_OBJECTS=1, SCENEFILTER_MATERIALS=2, SCENEFILTER_MERGESCENE=4, EventAdd=event_add,
         )
         placement = Mock()
-        smart = Mock()
-        smart.poll.return_value = None
-        smart.import_progress = Queue()
+        advanced = mode == "advanced"
+        restricted = mode == "restricted"
+        formats = ("fbx", "obj", "max") if restricted else None
+        smart = SimpleNamespace(
+            scene_formats=formats, scene_import_options=advanced,
+            import_progress=Queue(), poll=Mock(return_value=None), submit=Mock(), cancel=Mock(),
+            project_export=advanced, max_texture_bindings=advanced or restricted, archive_textures=advanced,
+            pbr_material_sets=advanced, scoped_preferences=advanced or restricted,
+        )
+        importer = Mock(return_value=smart)
+        if fail_smart_load:
+            importer.side_effect = ImportError("Smart importer unavailable")
         runtime = runpy.run_path(str(RUNTIME))
         modules = {
             "_nexus_c4d_runtime": {"Bridge": runtime["Bridge"], "read_config": lambda dcc: {"dcc": dcc}},
             "_nexus_c4d_placement": {"register": lambda: placement},
-            "_nexus_c4d_smart_import": {"SmartImporter": lambda *args: smart},
+            "_nexus_c4d_smart_import": {"SmartImporter": importer},
         }
         imports = []
 
@@ -72,9 +81,15 @@ class BootstrapTests(TestCase):
             messages.CoreMessage(sdk.MSG_TIMER, None)
             bridge = messages.bridge
             self.assertIs(getattr(builtins, BRIDGE_KEY), bridge)
-            self.assertEqual(imports, (["_nexus_c4d_placement", "_nexus_c4d_runtime", "_nexus_c4d_smart_import"]
-                                       if advanced else ["_nexus_c4d_runtime"]))
-            self.assertIs(bridge.smart_import, smart if advanced else None)
+            expected_imports = ["_nexus_c4d_runtime"]
+            if advanced:
+                expected_imports.insert(0, "_nexus_c4d_placement")
+            if advanced or restricted:
+                expected_imports.append("_nexus_c4d_smart_import")
+                importer.assert_called_once_with(sdk, Path(RUNTIME).parent.parent, scene_formats=formats)
+            self.assertEqual(imports, expected_imports)
+            smart_enabled = (advanced or restricted) and not fail_smart_load
+            self.assertIs(bridge.smart_import, smart if smart_enabled else None)
 
             advertised = []
 
@@ -93,26 +108,45 @@ class BootstrapTests(TestCase):
                 bridge.request = request
                 bridge.network_loop()
                 self.assertEqual(bridge.session, "fixture-session")
-                for capability in ("placement", "smartImport", "projectExport", "sceneImportOptions", "pbrMaterialSets"):
+                for capability in ("placement", "projectExport", "sceneImportOptions", "pbrMaterialSets",
+                                   "archiveTextures"):
                     self.assertEqual(advertised[0][capability], advanced)
+                for capability in ("maxTextureBindings", "scopedC4dPreferences"):
+                    self.assertEqual(advertised[0][capability], smart_enabled)
+                self.assertEqual(advertised[0]["smartImport"], smart_enabled)
+                self.assertEqual(advertised[0].get("smartImportFormats"),
+                                 list(formats) if restricted and smart_enabled else None)
                 bridge.running = True
                 messages.CoreMessage(sdk.MSG_TIMER, None)
                 merge.assert_called_once_with(document, str(original), 7, None)
                 event_add.assert_called_once_with()
                 self.assertEqual(bridge.receipts.get_nowait(), {"jobId": "fixture", "ok": True})
+                if smart_enabled:
+                    smart_source = original.with_suffix(".max") if restricted else original
+                    smart_source.touch()
+                    job = {"id": "smart-fixture", "path": str(smart_source), "mode": "smart"}
+                    bridge.pending.put_nowait(job)
+                    messages.CoreMessage(sdk.MSG_TIMER, None)
+                    smart.submit.assert_called_once_with(job)
             namespace["PluginMessage"](sdk.C4DPL_ENDACTIVITY, None)
             self.assertFalse(bridge.running)
 
-    def test_legacy_gui_uses_base_bridge(self):
-        for version in (2023000, 2023100, 2023200, 2024000, 2024500):
+    def test_2023_gui_registers_restricted_smart_import(self):
+        for version in (2023000, 2023100, 2023200):
             with self.subTest(version=version):
-                self.check_host(version, advanced=False)
+                self.check_host(version, mode="restricted")
+
+    def test_2024_gui_uses_base_bridge(self):
+        self.check_host(2024500, mode="basic")
+
+    def test_2023_keeps_base_import_when_smart_importer_fails_to_load(self):
+        self.check_host(2023200, mode="restricted", fail_smart_load=True)
 
     def test_2025_keeps_optional_advanced_plugins(self):
-        self.check_host(2025000, advanced=True)
+        self.check_host(2025000, mode="advanced")
 
     def test_headless_legacy_host_does_not_register(self):
-        self.check_host(2023200, advanced=False, headless=True)
+        self.check_host(2023200, mode="restricted", headless=True)
 
 
 if __name__ == "__main__":

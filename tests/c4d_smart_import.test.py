@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 from queue import Queue
+from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase, main
@@ -185,6 +186,169 @@ class SmartImportTests(TestCase):
         self.assertEqual(self.filter_arguments[0][2], dict(self.previous_settings, normals=1, cameras=True, lights=True))
         self.assertEqual(self.settings, self.previous_settings)
 
+    def test_legacy_importers_enable_classic_fbx_and_obj_materials_then_restore(self):
+        c4d = self.importer.c4d
+        del c4d.FBXIMPORT_MATERIALS
+        c4d.FBXIMPORT_MATERIALMODE = "material_mode"
+        c4d.FBXIMPORT_SUBSTANCES = "substances"
+        c4d.DESCFLAGS_DESC_NONE = 0
+        c4d.DESC_CYCLE = "cycle"
+        c4d.FORMAT_OBJ2IMPORT = 2
+        c4d.OBJIMPORTOPTIONS_MATERIAL = "material_mode"
+        c4d.OBJIMPORTOPTIONS_MATERIAL_MTLFILE = 2
+
+        class LegacyFbxImporter(dict):
+            def GetDescription(self, _flags):
+                return [({"cycle": [(10, "None"), (20, "Standard"), (30, "Nodes")]},
+                         [SimpleNamespace(id="material_mode")], None)]
+
+        fbx = LegacyFbxImporter(self.previous_settings, material_mode=30, substances=True)
+        obj = {"material_mode": 0}
+        adapters = {c4d.FORMAT_FBX_IMPORT: fbx, c4d.FORMAT_OBJ2IMPORT: obj}
+        c4d.plugins.FindPlugin = lambda plugin_id, _: SimpleNamespace(
+            Message=lambda _, values: values.update(imexporter=adapters[plugin_id]) or True,
+        )
+        previous = fbx.copy()
+        with BRIDGE._fbx_import_settings(c4d, "Fixture.fbx", None, standard_scene=True):
+            self.assertTrue(fbx["geometry"])
+            self.assertEqual(fbx["material_mode"], 20)
+            self.assertFalse(fbx["substances"])
+        self.assertEqual(fbx, previous)
+        with self.assertRaisesRegex(RuntimeError, "merge failure"):
+            with BRIDGE._obj_material_settings(c4d):
+                self.assertEqual(obj["material_mode"], 2)
+                raise RuntimeError("merge failure")
+        self.assertEqual(obj["material_mode"], 0)
+
+    def test_legacy_input_uses_only_the_requested_scene_and_safe_options(self):
+        self.importer.scene_formats = ("fbx", "obj")
+        with TemporaryDirectory() as directory:
+            for extension in ("FBX", "OBJ", "max"):
+                path = Path(directory) / ("Asset." + extension)
+                path.touch()
+            job = {
+                "id": "legacy-job", "path": str(Path(directory) / "Asset.FBX"),
+                "options": {"renderer": "redshift", "lod": 2, "scene_import": {"storeTextures": True}},
+                "c4dPreferences": {"maxMode": "direct"},
+            }
+            for extension in ("FBX", "OBJ"):
+                source = str((Path(directory) / ("Asset." + extension)).resolve())
+                self.assertEqual(self.importer._standard_scene_job(dict(job, path=source)), {
+                    "id": "legacy-job", "path": source, "options": {"kind": "scene", "renderer": "standard"},
+                })
+            with self.assertRaises(ValueError):
+                self.importer._standard_scene_job(dict(job, path=str(Path(directory) / "Asset.max")))
+            with self.assertRaises(ValueError):
+                self.importer._standard_scene_job(dict(job, projectExport={"destination": directory}))
+
+    def test_legacy_scene_preparation_and_merge_keep_native_material_assignments(self):
+        importer = self.importer
+        importer.scene_formats = ("fbx", "obj")
+        importer.results = Queue()
+        importer.import_progress = Queue()
+        spec = importlib.util.spec_from_file_location("test_legacy_asset_prep", SCRIPT.with_name("c4d_asset_prep.py"))
+        importer.preparation = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(importer.preparation)
+        linked = []
+        importer.materials.link_standard_scene_textures = lambda *args: linked.append(args)
+        existing_material = Node("material", self.doc.materials)
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            importer._job_runtime = lambda _job: (root / "cache", None, {})
+            texture = root / "Fixture_BaseColor.png"
+            texture.touch()
+            for extension in ("fbx", "obj"):
+                source = root / ("Fixture." + extension)
+                source.touch()
+                job = importer._standard_scene_job({"id": "legacy", "path": str(source)})
+                importer._prepare(job, 1)
+                _generation, _job_id, plan, error = importer.results.get_nowait()
+                self.assertIsNone(error)
+                self.assertEqual(plan["renderer"], "standard")
+                self.assertEqual(plan["maps"], {"base_color": str(texture)})
+                importer._apply(self.doc, plan)
+                self.assertEqual(linked[-1][2], self.doc.materials[-1:])
+                self.assertNotIn(existing_material, linked[-1][2])
+        self.assertEqual(self.applied, [])
+        self.assertEqual(self.converted, [])
+
+    def test_legacy_max_converts_to_fbx_with_scoped_converter_and_standard_materials(self):
+        importer = self.importer
+        importer.scene_formats = ("fbx", "obj", "max")
+        importer.results = Queue()
+        importer.import_progress = Queue()
+        converter_calls = []
+        linked = []
+        importer.materials.link_standard_scene_textures = lambda *args: linked.append(args)
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "Fixture.Max"
+            source.touch()
+            output = str(root / "converted" / "Fixture.fbx")
+            bindings = {"Surface": {"base_color": str(root / "diffuse.png")}}
+            baked = {"c0001": {"normal": str(root / "normal.png")}}
+            importer.preparation = SimpleNamespace(
+                prepare=lambda _c4d, path, _options, _cache, **_kwargs: {"kind": "scene", "path": path},
+                collect_baked_scene_maps=lambda *_: baked,
+                _family_tokens=lambda name: (name.casefold(),),
+            )
+
+            def convert(kind, filename, cache, executable, cancel):
+                converter_calls.append((kind, filename, cache, executable, cancel))
+                return output
+
+            importer.max_decode = SimpleNamespace(
+                convert=lambda filename, cache, blender_executable, cancel: convert(
+                    "direct", filename, cache, blender_executable, cancel,
+                ),
+                texture_warning=lambda _output: "",
+                scene_object_warning=lambda *_: "",
+                texture_bindings=lambda filename, original: bindings if (filename, original) == (output, str(source)) else {},
+            )
+            importer.conversion = SimpleNamespace(
+                convert=lambda filename, cache, executable_path, cancel: convert(
+                    "application", filename, cache, executable_path, cancel,
+                ),
+                max_export_warning=lambda _output: "",
+            )
+            preferences = {"maxMode": "application", "blenderExecutable": "blender", "maxBatchExecutable": "3dsmaxbatch"}
+            snapshot = {"workspaceKey": None, "settings": preferences}
+            importer._job_runtime = lambda job: (root, None, job["c4dPreferences"]["settings"])
+            keep = Node("material", self.doc.materials)
+            for mode, expected, executable in ((None, "application", "3dsmaxbatch"), ("direct", "direct", "blender")):
+                with self.subTest(mode=mode):
+                    options = {"renderer": "octane", "lod": 3, "scene_import": {"storeTextures": True}}
+                    if mode is not None:
+                        options["max_mode"] = mode
+                    job = importer._standard_scene_job({
+                        "id": "legacy-max", "path": str(source), "options": options, "c4dPreferences": snapshot,
+                    })
+                    expected_options = {"kind": "scene", "renderer": "standard"}
+                    if mode is not None:
+                        expected_options["max_mode"] = mode
+                    self.assertEqual(job["options"], expected_options)
+                    cancel = Event()
+                    importer._prepare(job, 1, cancel)
+                    self.assertEqual(converter_calls[-1], (expected, str(source), root / "converted", executable, cancel))
+                    self.assertEqual(importer.import_progress.get_nowait()["stage"], "preparing")
+                    self.assertEqual(importer.import_progress.get_nowait()["stage"], expected + "-max")
+                    _generation, _job_id, plan, error = importer.results.get_nowait()
+                    self.assertIsNone(error)
+                    self.assertTrue(plan["standard_scene"])
+                    self.assertEqual(plan["renderer"], "standard")
+                    self.assertEqual(plan["source_path"], str(source))
+                    self.assertEqual(plan["path"], output)
+                    if expected == "direct":
+                        self.assertEqual(plan["scene_material_maps"], bindings)
+                        self.assertEqual(plan["baked_material_maps"], baked)
+                    importer._apply(self.doc, plan)
+                    self.assertEqual(linked[-1][2], self.doc.materials[-1:])
+                    self.assertNotIn(keep, linked[-1][2])
+                    self.assertEqual(self.filter_arguments[-1][0], output)
+            with self.assertRaisesRegex(ValueError, "MAX 转换模式无效"):
+                importer._standard_scene_job({"id": "invalid", "path": str(source), "options": {"max_mode": "burn"}})
+        self.assertEqual(self.converted, [])
+
     def test_map_linking_is_limited_to_new_unassigned_geometry(self):
         self.initial_material = False
         self.apply("project.c4d", textures=False)
@@ -263,7 +427,7 @@ class SmartImportTests(TestCase):
             self.assertNotIn(existing, materials)
             return "标准材质已补接 1 个贴图通道"
 
-        self.importer.materials.restore_standard_textures = restore
+        self.importer.materials.link_standard_scene_textures = restore
         plan = {"path": "scene.fbx", "kind": "scene", "source_path": "scene.max", "restore_scene_textures": True,
                 "scene_material_maps": {"material": {"base_color": "map.png"}}}
         self.assertIn("标准材质已补接 1 个贴图通道", self.importer._apply(self.doc, plan))

@@ -102,6 +102,64 @@ class TextureTests(unittest.TestCase):
         self.assertIsNone(resolve("same.png"))
         self.assertIsNone(MATERIALS._texture_resolver(self.export, None)("albedo.jpg"))
 
+    def test_legacy_standard_materials_keep_valid_slots_and_recover_nearby_maps(self):
+        authored = self.image(self.export.parent / "native.png")
+        recovered = self.image(self.export.parent / "tex" / "wood.png")
+        new_color = self.image(self.export.parent / "tex" / "metal_color.png")
+        normal = self.image(self.export.parent / "tex" / "wood_normal_dx.png")
+        unrelated = self.image(self.export.parent / "tex" / "scene_color.png")
+        emission = self.image(self.source.parent / "maps" / "wood_emission.png")
+        baked_normal = self.image(self.source.parent / "maps_baked" / "mat_unmatched_normal.png")
+        wood = Node("Mmaterial", "Wood", MATERIAL_USE_COLOR=True)
+        wood_color = Node("Xbitmap", BITMAPSHADER_FILENAME="wood.png")
+        wood["MATERIAL_COLOR_SHADER"] = wood_color
+        wood.InsertShader(wood_color)
+        metal = Node("Mmaterial", "Metal")
+        metal_color = Node("Xbitmap", BITMAPSHADER_FILENAME=authored)
+        metal["MATERIAL_COLOR_SHADER"] = metal_color
+        metal.InsertShader(metal_color)
+        unnamed = Node("Mmaterial", "Unmatched")
+        for material in (wood, metal, unnamed):
+            material.Message = lambda *_: None
+        constants = ("Xbitmap BITMAPSHADER_FILENAME BITMAPSHADER_COLORPROFILE BITMAPSHADER_COLORPROFILE_LINEAR "
+                     "BITMAPSHADER_COLORPROFILE_SRGB Mmaterial MSG_UPDATE MATERIAL_USE_COLOR MATERIAL_COLOR_SHADER "
+                     "MATERIAL_USE_DIFFUSION MATERIAL_DIFFUSION_SHADER MATERIAL_USE_BUMP MATERIAL_BUMP_SHADER "
+                     "MATERIAL_USE_NORMAL MATERIAL_NORMAL_SHADER MATERIAL_NORMAL_REVERSEY MATERIAL_USE_ALPHA "
+                     "MATERIAL_ALPHA_SHADER MATERIAL_USE_LUMINANCE MATERIAL_LUMINANCE_SHADER "
+                     "MATERIAL_USE_DISPLACEMENT MATERIAL_DISPLACEMENT_SHADER REFLECTION_LAYER_MAIN_SHADER_ROUGHNESS "
+                     "REFLECTION_LAYER_MAIN_SHADER_SPECULAR REFLECTION_LAYER_MAIN_SHADER_REFLECTION")
+        c4d = SimpleNamespace(**{key: key for key in constants.split()}, BaseShader=Node)
+        doc = SimpleNamespace(GetDocumentPath=lambda: str(self.project))
+        report = MATERIALS.link_standard_scene_textures(
+            c4d, doc, [wood, metal, unnamed], {
+                "path": str(self.export),
+                "source_path": str(self.source),
+                "maps": {"base_color": unrelated},
+                "named_material_maps": {("wood",): {"normal": normal}, ("metal",): {"base_color": new_color}},
+                "scene_material_maps": {
+                    "Wood": {"emission": emission, "normal": str(self.source.parent / "missing.png")},
+                    "Metal": {"base_color": new_color},
+                },
+                "baked_material_maps": {"unmatched": {"normal": baked_normal}},
+            }, lambda name: (name.casefold(),),
+        )
+        self.assertIn("关联 4 项贴图", report)
+        self.assertEqual(wood_color["BITMAPSHADER_FILENAME"], recovered)
+        self.assertEqual(wood["MATERIAL_NORMAL_SHADER"]["BITMAPSHADER_FILENAME"], normal)
+        self.assertTrue(wood["MATERIAL_NORMAL_REVERSEY"])
+        self.assertEqual(wood["MATERIAL_LUMINANCE_SHADER"]["BITMAPSHADER_FILENAME"], emission)
+        self.assertEqual(metal_color["BITMAPSHADER_FILENAME"], authored)
+        self.assertIsNone(unnamed["MATERIAL_COLOR_SHADER"])
+        self.assertEqual(unnamed["MATERIAL_NORMAL_SHADER"]["BITMAPSHADER_FILENAME"], baked_normal)
+        duplicate_wood = Node("Mmaterial", "Wood")
+        duplicate_report = MATERIALS.link_standard_scene_textures(c4d, doc, [wood, duplicate_wood], {
+            "path": str(self.export),
+            "source_path": str(self.source),
+            "scene_material_maps": {"Wood": {"emission": emission}},
+        })
+        self.assertEqual(duplicate_report, "")
+        self.assertIsNone(duplicate_wood["MATERIAL_LUMINANCE_SHADER"])
+
     def test_baked_map_ids_are_unique_within_the_source_material_family(self):
         plan = {
             "source_path": "现代别墅C-TX.max",

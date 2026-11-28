@@ -492,7 +492,8 @@ const smartFields = {kind: '#smart-kind', renderer: '#smart-renderer', lod: '#sm
 const smartKey = 'nexus-smart-import-v1';
 
 function canUseSmartImport(session, asset) {
-  return session?.dcc === 'c4d' && session.smartImport === true && smartFormats.has(asset?.ext);
+  return session?.dcc === 'c4d' && session.smartImport === true && smartFormats.has(asset?.ext) &&
+    (!Array.isArray(session.smartImportFormats) || session.smartImportFormats.includes(asset.ext));
 }
 
 function sessionSupportsAsset(session, asset) {
@@ -523,9 +524,16 @@ function smartOptions() {
     ...(mapKeywords ? {map_keywords:mapKeywords} : {})};
 }
 
-function queueAsset(asset, session) {
+function queueAsset(asset, session, scene = false, overrides = {}) {
+  let options = canUseSmartImport(session, asset) ? smartOptions() : null;
+  if (options && Array.isArray(session.smartImportFormats)) {
+    options = {kind:'scene', renderer:'standard', lod:null, texture_resolution:null};
+    if (asset.ext === 'max' && overrides.max_mode) options.max_mode = overrides.max_mode;
+  } else if (options && scene) {
+    Object.assign(options, {kind:'scene', lod:null}, overrides);
+  }
   return api('queue_import', {assetId: asset.id, sessionId: session.id, workspace:libraryScope(),
-    smartOptions: canUseSmartImport(session, asset) ? smartOptions() : null});
+    smartOptions:options});
 }
 
 async function queueC4dProject(assetId, mode) {
@@ -2015,21 +2023,25 @@ function updateSend() {
   const unmapped = isTeamAsset(asset) && !asset.teamMounted;
   const fileState = fileStates.get(asset?.id);
   const smart = canUseSmartImport(session, asset);
+  const restricted = Array.isArray(session?.smartImportFormats);
   const ok = Boolean(asset && session && !unmapped && !fileState && (smart || sessionSupportsAsset(session, asset)));
   const updateBlender = needsBlenderMaxBridge(session, asset);
   const connect = native && asset && !unmapped && !fileState && (updateBlender || (!session &&
     (smartFormats.has(asset.ext) || Object.values(compat).some(formats => formats.includes(asset.ext)))));
   $('#send-asset').disabled = !ok && !connect;
   $('#send-asset-label').textContent = connect ? '打开 DCC 连接中心'
+    : smart && restricted ? '智能导入到场景'
     : usesC4dSceneDialog(session, asset) ? '选择导入选项'
     : smart ? '智能导入到场景' : '导入到当前场景';
-  $('#smart-import-settings').classList.toggle('hidden', !smart);
+  $('#smart-import-settings').classList.toggle('hidden', !smart || restricted);
   $('#send-hint').textContent = fileState === 'missing' ? '右键卡片以重新关联文件'
     : fileState ? '请检查磁盘和 NAS 是否可用'
     : unmapped ? '请先链接团队共享文件夹'
     : updateBlender ? '请查看 Blender 桥接状态，重开 Blender 后即可导入 MAX'
     : connect ? '连接创作软件后即可导入'
     : !session ? '启动创作软件以连接 Nexus'
+    : !ok && restricted && smartFormats.has(asset?.ext)
+      ? '当前实例支持 ' + session.smartImportFormats.map(ext => ext.toUpperCase()).join(' / ') + ' 智能导入'
     : !ok && session.dcc === 'c4d' && smartFormats.has(asset?.ext) ? '请查看 Cinema 4D 的桥接状态'
     : !ok ? (asset ? '.' + asset.ext + ' 需要先转换为目标软件支持的格式' : '先选择一项资产')
     : '导入 ' + dccs[session.dcc]?.name + ' 当前场景';
@@ -5530,14 +5542,13 @@ const c4dDropImport = initC4dDropImport({
   session: id => state.sessions.find(item => item.id === id),
   isUsable: asset => !fileStates.has(asset.id) && (!isTeamAsset(asset) || asset.teamMounted),
   supports: (asset, target) => canUseSmartImport(target, asset) || compat.c4d.includes(asset.ext),
+  canUseSmartImport,
   scope: collectionScope,
   defaultRenderer: () => smartOptions().renderer,
   async queue(asset, sessionId, scene, options) {
     const session = state.sessions.find(item => item.id === sessionId);
     if (!session) throw Error('目标 Cinema 4D 已离线');
-    const saved = smartOptions();
-    const job = await api('queue_import', {assetId:asset.id, sessionId, workspace:libraryScope(),
-      smartOptions:canUseSmartImport(session, asset) ? (scene ? {...saved, kind:'scene', lod:null, ...options} : saved) : null});
+    const job = await queueAsset(asset, session, scene, options);
     if (!state.jobs.some(item => item.id === job.id)) state.jobs.unshift(job);
     renderJobCount();
     if (state.view === 'jobs') renderJobs();
@@ -7618,7 +7629,7 @@ if (native) window.__TAURI__.event.listen('scan-progress', ({payload}) => {
 let activityBusy = false;
 const connectionSnapshot = sessions => JSON.stringify(sessions.map(session =>
   [session.id, session.dcc, session.label, session.placement, session.maxImport, session.smartImport, session.sceneImportOptions,
-    session.projectExport]).sort((a, b) => a[0].localeCompare(b[0])));
+    session.smartImportFormats, session.projectExport]).sort((a, b) => a[0].localeCompare(b[0])));
 const jobSnapshot = jobs => JSON.stringify(jobs.map(job =>
   [job.id, job.status, job.progress, job.progressStage, job.error, job.message, job.projectPath]));
 setInterval(async () => {

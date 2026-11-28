@@ -84,6 +84,7 @@ mod youtube_player;
 use team_desktop::Desktop;
 
 const DCC_JOB_QUEUE_TIMEOUT: u64 = 120;
+const C4D_RESTRICTED_SMART_FORMATS: &[&str] = &["fbx", "max", "obj"];
 
 #[derive(Clone)]
 struct AppState {
@@ -636,7 +637,7 @@ impl SmartImportOptions {
 
     fn direct_max_textures(&self, extension: &str, saved_mode: Option<&str>) -> bool {
         use c4d_import_preferences::MaxMode;
-        extension == "max"
+        extension.eq_ignore_ascii_case("max")
             && matches!(self.kind.as_str(), "auto" | "scene")
             && self.scene_import.as_ref().is_none_or(|scene| scene.materials && scene.textures)
             && match self.max_mode {
@@ -730,19 +731,32 @@ async fn queue_import(
     }
     let a = resolve_asset(&state, &app, &asset_id)?;
     let host = session["dcc"].as_str().unwrap_or("");
-    if let Some(options) = &smart_options {
+    let restricted_smart_import = session["smartImportFormats"].is_array();
+    let restricted_max_import = restricted_smart_import
+        && a.ext.eq_ignore_ascii_case("max")
+        && session_supports_smart_import(&session, &a.ext);
+    let mut smart_options = smart_options;
+    if let Some(options) = &mut smart_options {
         options.validate()?;
         if options.pbr_material_set.is_some() && (options.kind != "pbr"
             || host != "c4d" || session["pbrMaterialSets"] != true || project_export.is_some())
         {
             return Err("请更新 Cinema 4D 桥接并重新连接，再发送材质套图。".into());
         }
-        if options.scene_overrides() && session["sceneImportOptions"] != true {
+        if session["sceneImportOptions"] != true
+            && (options.scene_import.is_some() || (options.max_mode.is_some() && !restricted_max_import))
+        {
             return Err("请在 DCC 连接中心查看同步状态，重开 Cinema 4D 后使用模型导入选项。".into());
         }
         if options.scene_import.as_ref().is_some_and(|scene| scene.store_textures == Some(true)) &&
             (host != "c4d" || session["archiveTextures"] != true || project_export.is_some()) {
             return Err("请更新并重启 Cinema 4D 插件，再归档到当前工程。".into());
+        }
+        if restricted_smart_import {
+            options.kind = "scene".into();
+            options.renderer = "standard".into();
+            options.lod = None;
+            options.texture_resolution = None;
         }
     }
     let mut project_export = project_export;
@@ -755,8 +769,8 @@ async fn queue_import(
         if host != "c4d" || session["smartImport"] != true {
             return Err("请从 DCC 连接中心更新 Cinema 4D 插件并重启。".into());
         }
-        if !c4d_smart_compatible(&a.ext) {
-            return Err(format!("Cinema 4D 智能导入无法处理 .{}。", a.ext));
+        if !session_supports_smart_import(&session, &a.ext) {
+            return Err(format!("当前 Cinema 4D 实例的智能导入无法处理 .{}。", a.ext));
         }
     } else if !session_supports_asset(&session, &a.ext) {
         if host == "blender" && a.ext.eq_ignore_ascii_case("max") {
@@ -786,13 +800,13 @@ async fn queue_import(
     }
     if j["mode"] == "smart" {
         if let Some(workspace) = workspace.as_deref() {
-            if session["scopedC4dPreferences"] == true {
+            if session["scopedC4dPreferences"] == true && (!restricted_smart_import || restricted_max_import) {
                 j["c4dPreferences"] = c4d_import_preferences::job_preferences(&state.root, workspace)?;
                 let converter = match a.ext.as_str() {
                     "blend" => Some(("blender", "blenderExecutable")),
-                    "max" => {
+                    ext if ext.eq_ignore_ascii_case("max") => {
                         let mode = j["projectExport"]["mode"].as_str()
-                            .or_else(|| j["options"]["maxMode"].as_str())
+                            .or_else(|| j["options"]["max_mode"].as_str())
                             .or_else(|| j["c4dPreferences"]["settings"]["maxMode"].as_str());
                         if mode == Some("direct") {
                             Some(("blender", "blenderExecutable"))
@@ -810,7 +824,7 @@ async fn queue_import(
                         }
                     }
                 }
-            } else if workspace != "personal:personal" {
+            } else if workspace != "personal:personal" && !restricted_smart_import {
                 return Err("请在 DCC 连接中心查看同步状态，重开 Cinema 4D 后使用当前资产库的导入设置。".into());
             }
         }
@@ -850,16 +864,59 @@ async fn register(
         return Err(api_error(StatusCode::BAD_REQUEST, "Unknown DCC"));
     }
     let id = Uuid::new_v4().to_string();
-    let placement = matches!(dcc, "blender" | "c4d") && v["placement"] == true;
     let smart_import = dcc == "c4d" && v["smartImport"] == true;
-    let project_export = smart_import && v["projectExport"] == true;
-    let scene_import = smart_import && v["sceneImportOptions"] == true;
-    let scoped_c4d_preferences = smart_import && v["scopedC4dPreferences"] == true;
-    let max_texture_bindings = smart_import && v["maxTextureBindings"] == true;
+    let smart_formats = if smart_import && !v["smartImportFormats"].is_null() {
+        let invalid_formats = || api_error(StatusCode::BAD_REQUEST, "Invalid smart import formats");
+        let requested = v["smartImportFormats"].as_array().ok_or_else(invalid_formats)?;
+        if requested.is_empty() {
+            return Err(invalid_formats());
+        }
+        let mut formats = Vec::new();
+        for value in requested {
+            let extension = value.as_str().ok_or_else(invalid_formats)?;
+            let format = C4D_RESTRICTED_SMART_FORMATS
+                .iter()
+                .copied()
+                .find(|format| format.eq_ignore_ascii_case(extension))
+                .ok_or_else(invalid_formats)?;
+            if !formats.contains(&format) {
+                formats.push(format);
+            }
+        }
+        formats.sort_unstable();
+        Some(formats)
+    } else {
+        None
+    };
+    let full_smart_import = smart_import && smart_formats.is_none();
+    let placement = matches!(dcc, "blender" | "c4d")
+        && v["placement"] == true
+        && smart_formats.is_none();
+    let project_export = full_smart_import && v["projectExport"] == true;
+    let scene_import = full_smart_import && v["sceneImportOptions"] == true;
+    let max_smart_import = full_smart_import || smart_formats.as_ref().is_some_and(|formats| formats.contains(&"max"));
+    let scoped_c4d_preferences = max_smart_import && v["scopedC4dPreferences"] == true;
+    let max_texture_bindings = max_smart_import && v["maxTextureBindings"] == true;
     let max_import = dcc == "blender" && v["maxImport"] == true;
     let archive_textures = scene_import && v["archiveTextures"] == true;
-    let pbr_material_sets = smart_import && v["pbrMaterialSets"] == true;
-    let session = json!({"id":id,"dcc":dcc,"pid":v["pid"],"placement":placement,"maxImport":max_import,"smartImport":smart_import,"projectExport":project_export,"sceneImportOptions":scene_import,"scopedC4dPreferences":scoped_c4d_preferences,"maxTextureBindings":max_texture_bindings,"archiveTextures":archive_textures,"pbrMaterialSets":pbr_material_sets,"label":v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),"lastSeen":now()});
+    let pbr_material_sets = full_smart_import && v["pbrMaterialSets"] == true;
+    let session = json!({
+        "id": id,
+        "dcc": dcc,
+        "pid": v["pid"],
+        "placement": placement,
+        "maxImport": max_import,
+        "smartImport": smart_import,
+        "smartImportFormats": smart_formats,
+        "projectExport": project_export,
+        "sceneImportOptions": scene_import,
+        "scopedC4dPreferences": scoped_c4d_preferences,
+        "maxTextureBindings": max_texture_bindings,
+        "archiveTextures": archive_textures,
+        "pbrMaterialSets": pbr_material_sets,
+        "label": v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),
+        "lastSeen": now(),
+    });
     s.sessions.lock().unwrap().insert(id.clone(), session);
     Ok(Json(json!({"id":id})))
 }
@@ -872,6 +929,18 @@ fn session_supports_asset(session: &Value, ext: &str) -> bool {
         ext
     };
     compatible(dcc, ext) && (dcc != "blender" || ext != "max" || session["maxImport"] == true)
+}
+
+fn session_supports_smart_import(session: &Value, ext: &str) -> bool {
+    session["dcc"] == "c4d"
+        && session["smartImport"] == true
+        && c4d_smart_compatible(&ext.to_ascii_lowercase())
+        && (session["smartImportFormats"].is_null()
+            || session["smartImportFormats"].as_array().is_some_and(|formats| {
+                formats.iter().any(|format| {
+                    format.as_str().is_some_and(|format| format.eq_ignore_ascii_case(ext))
+                })
+            }))
 }
 
 async fn heartbeat(
@@ -992,18 +1061,27 @@ async fn bridge_import_progress(
 ) -> ApiResult {
     auth(&s, &headers)?;
     let session = v["sessionId"].as_str().unwrap_or("");
-    if !s.sessions.lock().unwrap().get(session).is_some_and(|item| item["sceneImportOptions"] == true) {
+    let import_capabilities = s.sessions.lock().unwrap().get(session).and_then(|item| {
+        if item["sceneImportOptions"] == true {
+            Some((false, true))
+        } else if item["smartImport"] == true && item["smartImportFormats"].is_array() {
+            Some((true, session_supports_smart_import(item, "max")))
+        } else {
+            None
+        }
+    });
+    let Some((restricted, supports_max)) = import_capabilities else {
         return Err(api_error(StatusCode::NOT_FOUND, "Session expired"));
-    }
+    };
     let id = v["jobId"].as_str().unwrap_or("");
     let stage_key = v["stage"].as_str();
     let stage = match stage_key {
         Some("preparing") => "正在检查模型与贴图",
-        Some("direct-max") => "正在使用 Blender 直接解析 MAX",
-        Some("application-max") => "正在调用 3ds Max Batch 转换 MAX",
-        Some("blender") => "正在调用 Blender 转换工程",
+        Some("direct-max") if supports_max => "正在使用 Blender 直接解析 MAX",
+        Some("application-max") if supports_max => "正在调用 3ds Max Batch 转换 MAX",
+        Some("blender") if !restricted => "正在调用 Blender 转换工程",
         Some("importing") => "正在将模型合并到 Cinema 4D 工程",
-        Some("exporting") => "正在保存 Cinema 4D 工程与贴图",
+        Some("exporting") if !restricted => "正在保存 Cinema 4D 工程与贴图",
         _ => return Err(api_error(StatusCode::BAD_REQUEST, "Unknown import stage")),
     };
     let catalog = lock_db(&s).map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
@@ -1011,6 +1089,12 @@ async fn bridge_import_progress(
         .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?
         .filter(|job| job["status"] == "running" && job["mode"] == "smart")
     {
+        if restricted && matches!(stage_key, Some("direct-max" | "application-max"))
+            && !job["path"].as_str().and_then(|path| Path::new(path).extension())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("max"))
+        {
+            return Err(api_error(StatusCode::BAD_REQUEST, "MAX conversion requires a MAX job"));
+        }
         job["progress"] = json!(stage);
         job["progressStage"] = json!(stage_key);
         catalog.put_job(&job).map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
@@ -1510,6 +1594,103 @@ mod bridge_tests {
                 assert!(session_supports_asset(blender, "obj"));
                 assert_eq!(session_supports_asset(blender, "MAX"), max_ready);
             }
+        });
+    }
+    #[test]
+    fn restricted_cinema_import_registers_only_its_advertised_formats() {
+        tauri::async_runtime::block_on(async {
+            let (_dir, state, headers) = setup();
+            let mut bridge = json!({
+                "dcc":"c4d", "pid":2, "smartImport":true, "smartImportFormats":["OBJ","FBX","obj"],
+                "placement":true, "projectExport":true, "sceneImportOptions":true,
+                "maxTextureBindings":true, "archiveTextures":true, "pbrMaterialSets":true,
+            });
+            let registered = register(
+                HttpState(state.clone()),
+                headers.clone(),
+                Json(bridge.clone()),
+            )
+            .await
+            .unwrap()
+            .0;
+            let session_id = registered["id"].as_str().unwrap();
+            {
+                let sessions = state.sessions.lock().unwrap();
+                let session = &sessions[session_id];
+                assert_eq!(session["smartImportFormats"], json!(["fbx", "obj"]));
+                for format in ["FBX", "obj"] {
+                    assert!(session_supports_smart_import(session, format));
+                }
+                assert!(!session_supports_smart_import(session, "max"));
+                for format in ["c4d", "abc", "stl"] {
+                    assert!(session_supports_asset(session, format));
+                    assert!(!session_supports_smart_import(session, format));
+                }
+                for capability in [
+                    "placement", "projectExport", "sceneImportOptions", "maxTextureBindings",
+                    "archiveTextures", "pbrMaterialSets",
+                ] {
+                    assert_eq!(session[capability], false);
+                }
+            }
+
+            let job = json!({"id":"restricted-progress", "sessionId":session_id, "mode":"smart", "status":"running"});
+            state.db.lock().unwrap().put_job(&job).unwrap();
+            let update = json!({"sessionId":session_id, "jobId":job["id"], "stage":"preparing"});
+            assert!(bridge_import_progress(HttpState(state.clone()), headers.clone(), Json(update))
+                .await.is_ok());
+            let updated = state.db.lock().unwrap()
+                .session_job(session_id, "restricted-progress").unwrap().unwrap();
+            assert_eq!(updated["progressStage"], "preparing");
+
+            bridge["smartImportFormats"] = json!(["Max", "OBJ", "FBX"]);
+            bridge["scopedC4dPreferences"] = json!(true);
+            let with_max = register(HttpState(state.clone()), headers.clone(), Json(bridge.clone()))
+                .await.unwrap().0;
+            let max_session_id = with_max["id"].as_str().unwrap();
+            {
+                let sessions = state.sessions.lock().unwrap();
+                let session = &sessions[max_session_id];
+                assert_eq!(session["smartImportFormats"], json!(["fbx", "max", "obj"]));
+                assert_eq!(session["maxTextureBindings"], true);
+                assert_eq!(session["scopedC4dPreferences"], true);
+                assert_eq!(session["sceneImportOptions"], false);
+                assert!(session_supports_smart_import(session, "MAX"));
+                assert!(!session_supports_asset(session, "max"));
+                assert!(!session_supports_smart_import(session, "blend"));
+            }
+            for (id, path) in [("restricted-max-progress", "scene.MAX"), ("restricted-fbx-progress", "scene.fbx")] {
+                let job = json!({"id":id, "sessionId":max_session_id, "mode":"smart", "status":"running", "path":path});
+                state.db.lock().unwrap().put_job(&job).unwrap();
+            }
+            for stage in ["direct-max", "application-max"] {
+                let update = json!({"sessionId":max_session_id, "jobId":"restricted-max-progress", "stage":stage});
+                let Json(result) = bridge_import_progress(HttpState(state.clone()), headers.clone(), Json(update))
+                    .await.unwrap();
+                assert_eq!(result["ok"], true);
+                let progress = state.db.lock().unwrap()
+                    .session_job(max_session_id, "restricted-max-progress").unwrap().unwrap();
+                assert_eq!(progress["progressStage"], stage);
+            }
+            let wrong_file = json!({"sessionId":max_session_id, "jobId":"restricted-fbx-progress", "stage":"direct-max"});
+            let (status, _) = bridge_import_progress(HttpState(state.clone()), headers.clone(), Json(wrong_file))
+                .await.unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            for invalid_formats in [json!(["blend"]), json!([])] {
+                bridge["smartImportFormats"] = invalid_formats;
+                let (status, _) = register(
+                    HttpState(state.clone()), headers.clone(), Json(bridge.clone()),
+                ).await.unwrap_err();
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+            }
+            bridge["smartImportFormats"] = Value::Null;
+            let full = register(HttpState(state.clone()), headers, Json(bridge)).await.unwrap().0;
+            let sessions = state.sessions.lock().unwrap();
+            let full = &sessions[full["id"].as_str().unwrap()];
+            assert_eq!(full["sceneImportOptions"], true);
+            assert_eq!(full["archiveTextures"], true);
+            assert!(session_supports_smart_import(full, "max"));
         });
     }
     #[test]

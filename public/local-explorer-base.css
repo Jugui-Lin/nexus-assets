@@ -185,3 +185,97 @@ button.local-explorer-location:hover { background: var(--accent-dark); }
 }
 .local-explorer-grid .local-explorer-entry svg { width: 27px; height: 27px; }
 .local-explorer-grid .local-explorer-entry span { max-inline-size: 100%; }
+
+#file-workspace .local-explorer-sequence-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  inline-size: 100%;
+  min-block-size: 29px;
+  padding: 2px 5px;
+  text-align: start;
+}
+
+#file-workspace .local-explorer-sequence-toggle > svg {
+  flex: none;
+  inline-size: 16px;
+  block-size: 16px;
+  color: var(--accent);
+}
+
+.local-explorer-sequence-toggle > svg:has(> use[href="#i-stack"]) {
+  display: none;
+}
+
+.local-explorer-sequence-toggle[aria-expanded="true"] > svg:has(> use[href="#i-chevron"]) {
+  transform: rotate(90deg);
+}
+
+.local-explorer-sequence-toggle > span:not(.local-explorer-sequence-count) {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-explorer-sequence-count {
+  flex: none;
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: .85em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+#file-workspace [data-explorer-compact] table:not(.local-explorer-grid) .local-explorer-sequence-stack td {
+  padding-block: 0;
+}
+
+#file-workspace [data-explorer-compact] table:not(.local-explorer-grid) .local-explorer-sequence-toggle {
+  min-block-size: 23px;
+}
+
+.local-explorer-sequence-frame td:first-child {
+  box-shadow: inset 2px 0 var(--line);
+}
+
+#file-workspace .local-explorer-grid .local-explorer-sequence-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--explorer-thumbnail-height, 52px) auto;
+  align-content: start;
+  gap: 6px;
+  min-block-size: calc(var(--explorer-thumbnail-height, 52px) + var(--explorer-name-lines, 2) * 1.3em + 18px);
+  padding: 7px 6px 5px;
+  text-align: center;
+}
+
+#file-workspace .local-explorer-grid .local-explorer-sequence-toggle > svg {
+  grid-area: 1 / 1;
+  place-self: center;
+  inline-size: var(--explorer-tile-icon, 27px);
+  block-size: var(--explorer-tile-icon, 27px);
+}
+
+#file-workspace .local-explorer-grid .local-explorer-sequence-toggle > svg:has(> use[href="#i-stack"]) {
+  display: block;
+}
+
+#file-workspace .local-explorer-grid .local-explorer-sequence-toggle > svg:has(> use[href="#i-chevron"]) {
+  place-self: start;
+  inline-size: 14px;
+  block-size: 14px;
+  color: var(--muted);
+}
+
+.local-explorer-grid .local-explorer-sequence-toggle > span:not(.local-explorer-sequence-count) {
+  grid-area: 2 / 1;
+}
+
+.local-explorer-grid .local-explorer-sequence-count {
+  grid-area: 1 / 1;
+  place-self: end;
+}

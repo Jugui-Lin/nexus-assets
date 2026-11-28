@@ -554,6 +554,8 @@
             <button type="button" data-file-view-option="status" aria-pressed="true"><svg aria-hidden="true"><use href="#i-check"/></svg>状态栏</button>
             <button type="button" data-file-view-option="extensions" aria-pressed="true"><svg aria-hidden="true"><use href="#i-check"/></svg>文件扩展名</button>
             <button type="button" data-file-view-option="hidden" aria-pressed="false"><svg aria-hidden="true"><use href="#i-check"/></svg>隐藏的项目</button>
+            <button type="button" data-file-view-option="sequences" aria-pressed="false"><svg aria-hidden="true"><use href="#i-check"/></svg>堆叠序列帧</button>
+            <button type="button" data-file-view-option="unindexed" aria-pressed="false"><svg aria-hidden="true"><use href="#i-check"/></svg>未入库标记</button>
             <button type="button" data-explorer-asset-action="load" hidden><svg aria-hidden="true"><use href="#i-stack"/></svg>显示资产状态</button>
           </div>
         </div>
@@ -848,6 +850,8 @@
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-status" checked>显示状态栏</label>
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-extensions" checked>显示文件扩展名</label>
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-hidden">显示隐藏的项目</label>
+      <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-stack-sequences">堆叠序列帧</label>
+      <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-unindexed">显示未入库标记</label>
     </section>
     <section id="file-preferences-shortcuts" class="folder-preferences-panel" data-file-preferences-panel="shortcuts" role="tabpanel" aria-labelledby="file-preferences-shortcuts-tab" hidden>
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-quick-preview" checked>按空格键快速预览选中的文件</label>
@@ -1445,6 +1449,7 @@
       </label>
       <p id="c4d-drop-octane-preview-note" class="modal-description" hidden></p>
     </fieldset>
+    <p id="c4d-drop-restricted-note" class="modal-description" hidden>智能导入会自动查找模型附近的贴图，并生成标准材质。</p>
     <div id="c4d-drop-bridge-note" class="c4d-drop-bridge-note" hidden>
       <p>当前 Cinema 4D 实例会按默认设置导入对象和材质。</p>
       <button id="c4d-drop-bridge-update" type="button" class="button subtle">打开 DCC 连接中心</button>

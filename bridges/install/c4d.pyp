@@ -12,6 +12,7 @@ _RUNTIME_PATH = __NEXUS_RUNTIME_PATH__
 _BRIDGE_KEY = "_nexus_bridge_c4d"
 _CONFIG_REFRESH_SECONDS = 2
 _ADVANCED_MIN_C4D_VERSION = 2025000
+_C4D_2023_SMART_FORMATS = ("fbx", "obj", "max")
 
 
 def _load_runtime():
@@ -33,7 +34,7 @@ def _load_placement():
     return module.register()
 
 
-def _load_smart_import():
+def _load_smart_import(scene_formats):
     path = Path(__file__).with_name("nexus_c4d_smart_import.py")
     spec = importlib.util.spec_from_file_location("_nexus_c4d_smart_import", path)
     if spec is None or spec.loader is None:
@@ -41,14 +42,14 @@ def _load_smart_import():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     app_root = Path(_RUNTIME_PATH).parent.parent
-    return module.SmartImporter(c4d, app_root)
+    return module.SmartImporter(c4d, app_root, scene_formats=scene_formats)
 
 
 class _BridgeMessages(c4d.plugins.MessageData):
-    def __init__(self, placement, advanced):
+    def __init__(self, placement, host_version):
         super().__init__()
         self.placement = placement
-        self.advanced = advanced
+        self.host_version = host_version
         self.bridge = None
         self.runtime = None
         self.check_at = 0.0
@@ -92,10 +93,12 @@ class _BridgeMessages(c4d.plugins.MessageData):
             config = self.runtime.read_config("c4d")
             if self.placement is not None:
                 config["placement"] = True
-            if self.advanced and not self.smart_load_attempted:
+            legacy = 2023000 <= self.host_version < 2024000
+            if (legacy or self.host_version >= _ADVANCED_MIN_C4D_VERSION) and not self.smart_load_attempted:
                 self.smart_load_attempted = True
                 try:
-                    self.smart_import = _load_smart_import()
+                    scene_formats = _C4D_2023_SMART_FORMATS if legacy else None
+                    self.smart_import = _load_smart_import(scene_formats)
                 except Exception as error:
                     print("Nexus Assets smart import:", error)
             if self.smart_import is not None:
@@ -134,10 +137,9 @@ def _register():
     if (c4d.GeGetVersionType() != c4d.VERSIONTYPE_CINEMA4D
             or c4d.GeGetCinemaInfo(c4d.CINEMAINFO_FORBID_GUI)):
         return None
-    # Cinema 4D 2023 and 2024 use the basic bridge without the optional import and placement plug-ins.
-    advanced = c4d.GetC4DVersion() >= _ADVANCED_MIN_C4D_VERSION
+    host_version = c4d.GetC4DVersion()
     placement = None
-    if advanced:
+    if host_version >= _ADVANCED_MIN_C4D_VERSION:
         try:
             placement = _load_placement()
         except Exception as error:
@@ -146,7 +148,7 @@ def _register():
     for plugin_id in range(1000010, 1000000, -1):
         if c4d.plugins.FindPlugin(plugin_id, c4d.PLUGINTYPE_ANY) is not None:
             continue
-        messages = _BridgeMessages(placement, advanced)
+        messages = _BridgeMessages(placement, host_version)
         if c4d.plugins.RegisterMessagePlugin(
                 id=plugin_id, str="Nexus Assets Bridge", info=0, dat=messages):
             return messages

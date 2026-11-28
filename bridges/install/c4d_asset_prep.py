@@ -12,7 +12,12 @@ import subprocess
 import tempfile
 import time
 import zipfile
-from re import _parser as _regex_parser
+
+try:
+    from re import _parser as _regex_parser
+except ImportError:
+    # Cinema 4D 2023 embeds Python 3.9 or 3.10.
+    import sre_parse as _regex_parser
 
 
 _SCENE_TYPES = (".c4d", ".fbx", ".obj", ".abc", ".usd", ".usdc", ".usda", ".usdz",
@@ -130,7 +135,9 @@ def _family_tokens(text):
 
 _REGEX_ATOMS = {_regex_parser.LITERAL, _regex_parser.NOT_LITERAL, _regex_parser.ANY,
                 _regex_parser.IN, _regex_parser.CATEGORY}
-_REGEX_REPEATS = {_regex_parser.MAX_REPEAT, _regex_parser.MIN_REPEAT, _regex_parser.POSSESSIVE_REPEAT}
+_REGEX_REPEATS = {_regex_parser.MAX_REPEAT, _regex_parser.MIN_REPEAT}
+if hasattr(_regex_parser, "POSSESSIVE_REPEAT"):
+    _REGEX_REPEATS.add(_regex_parser.POSSESSIVE_REPEAT)
 
 
 def _regex_choices(expression, repeated=False):
@@ -709,7 +716,35 @@ def _exact_material_maps(path, maps, name):
     return resolved
 
 
-def prepare(c4d, path, options, cache_root):
+def _selected_maps(maps, actual_lod, resolution, warnings):
+    resolved = {}
+    for channel, variants in maps.items():
+        def rank(item):
+            lod = _lod_in_path(item)
+            mesh_match = 0 if lod == actual_lod else 1 if lod is None else 2
+            is_directx = bool({"dx", "directx", "normaldx"} & set(_tokens(item.stem)))
+            return mesh_match, _texture_rank(item, resolution), is_directx
+
+        best = min(variants, key=rank)
+        lod = _lod_in_path(best)
+        if channel == "normal" and actual_lod is not None and lod not in (None, actual_lod):
+            warnings.add("没有与模型 LOD 匹配的法线贴图。")
+            continue
+        resolved[channel] = best
+    return resolved
+
+
+def _named_material_maps(groups, actual_lod):
+    families = {}
+    for (_, family), maps in groups.items():
+        if family:
+            families.setdefault(family, []).append(maps)
+    return {family: {channel: str(path) for channel, path in
+                     _selected_maps(matches[0], actual_lod, None, set()).items()}
+            for family, matches in families.items() if len(matches) == 1}
+
+
+def prepare(c4d, path, options, cache_root, *, match_material_names=False):
     """Return a resolved import plan with permanent operative file paths."""
     options = options or {}
     requested = options.get("kind") or "auto"
@@ -785,22 +820,14 @@ def prepare(c4d, path, options, cache_root):
                      (f"LOD{actual_lod}。" if actual_lod is not None else "原始模型。"))
     resolved = {}
     if kind in ("pbr", "scene"):
-        for channel, variants in maps.items():
-            def rank(item):
-                lod = _lod_in_path(item)
-                mesh_match = 0 if lod == actual_lod else 1 if lod is None else 2
-                is_directx = bool({"dx", "directx", "normaldx"} & set(_tokens(item.stem)))
-                return mesh_match, _texture_rank(item, resolution), is_directx
-
-            best = min(variants, key=rank)
-            lod = _lod_in_path(best)
-            if channel == "normal" and actual_lod is not None and lod not in (None, actual_lod):
-                warnings.add("没有与模型 LOD 匹配的法线贴图。")
-                continue
-            resolved[channel] = str(_downscale(best, cache, resolution, warnings))
+        for channel, map_path in _selected_maps(maps, actual_lod, resolution, warnings).items():
+            resolved[channel] = str(_downscale(map_path, cache, resolution, warnings))
     if kind == "pbr" and selected is None:
         selected = Path(resolved.get("base_color") or next(iter(resolved.values())))
     if kind == "texture":
         selected = _downscale(selected, cache, resolution, warnings)
-    return {"kind": kind, "path": str(selected), "maps": resolved, "name": name,
+    plan = {"kind": kind, "path": str(selected), "maps": resolved, "name": name,
             "lod": actual_lod, "warnings": sorted(warnings)}
+    if match_material_names:
+        plan["named_material_maps"] = _named_material_maps(groups, actual_lod)
+    return plan

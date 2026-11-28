@@ -16,17 +16,46 @@ _STATUS = {
 }
 
 
+def _scene_loader_settings(c4d, plugin_id):
+    plugin = c4d.plugins.FindPlugin(plugin_id, c4d.PLUGINTYPE_SCENELOADER)
+    data = {}
+    if plugin is not None and plugin.Message(c4d.MSG_RETRIEVEPRIVATEDATA, data):
+        return data.get("imexporter")
+    return None
+
+
 @contextmanager
-def _fbx_import_settings(c4d, path, options):
+def _temporary_import_settings(importer, settings):
+    previous = {key: importer[key] for key in settings}
+    try:
+        for key, value in settings.items():
+            importer[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            importer[key] = value
+
+
+def _fbx_standard_material_mode(c4d, importer, parameter):
+    try:
+        for properties, desc_id, _ in importer.GetDescription(c4d.DESCFLAGS_DESC_NONE):
+            if desc_id[0].id == parameter:
+                # In the 2023 importer the cycle is None, Standard, Node Material.
+                values = list(properties[c4d.DESC_CYCLE])
+                if len(values) == 3:
+                    return values[1][0]
+                break
+    except (AttributeError, IndexError, KeyError, RuntimeError, TypeError):
+        pass
+    return None
+
+
+@contextmanager
+def _fbx_import_settings(c4d, path, options, *, standard_scene=False):
     if Path(path).suffix.lower() != ".fbx":
         yield
         return
-    plugin = c4d.plugins.FindPlugin(c4d.FORMAT_FBX_IMPORT, c4d.PLUGINTYPE_SCENELOADER)
-    data = {}
-    if plugin is None or not plugin.Message(c4d.MSG_RETRIEVEPRIVATEDATA, data):
-        yield
-        return
-    importer = data.get("imexporter")
+    importer = _scene_loader_settings(c4d, c4d.FORMAT_FBX_IMPORT)
     if importer is None:
         yield
         return
@@ -44,14 +73,35 @@ def _fbx_import_settings(c4d, path, options):
             c4d.FBXIMPORT_TRACKS: objects and options["animation"],
             c4d.FBXIMPORT_MATERIALS: options["materials"],
         })
-    previous = {key: importer[key] for key in settings}
-    try:
-        for key, value in settings.items():
-            importer[key] = value
+    elif standard_scene:
+        settings[c4d.FBXIMPORT_GEOMETRY] = True
+        materials = getattr(c4d, "FBXIMPORT_MATERIALS", None)
+        if materials is not None:
+            settings[materials] = True
+        material_mode = getattr(c4d, "FBXIMPORT_MATERIALMODE", None)
+        if material_mode is not None:
+            standard = _fbx_standard_material_mode(c4d, importer, material_mode)
+            if standard is not None:
+                settings[material_mode] = standard
+        substances = getattr(c4d, "FBXIMPORT_SUBSTANCES", None)
+        if substances is not None:
+            settings[substances] = False
+    with _temporary_import_settings(importer, settings):
         yield
-    finally:
-        for key, value in previous.items():
-            importer[key] = value
+
+
+@contextmanager
+def _obj_material_settings(c4d):
+    plugin_id = getattr(c4d, "FORMAT_OBJ2IMPORT", None)
+    parameter = getattr(c4d, "OBJIMPORTOPTIONS_MATERIAL", None)
+    mtl_file = getattr(c4d, "OBJIMPORTOPTIONS_MATERIAL_MTLFILE", None)
+    if None not in (plugin_id, parameter, mtl_file):
+        importer = _scene_loader_settings(c4d, plugin_id)
+        if importer is not None:
+            with _temporary_import_settings(importer, {parameter: mtl_file}):
+                yield
+            return
+    yield
 
 
 def load_module(name):
@@ -65,14 +115,17 @@ def load_module(name):
 
 
 class SmartImporter:
+    scene_formats = None
+    scene_import_options = True
     scoped_preferences = True
     max_texture_bindings = True
     archive_textures = True
     pbr_material_sets = True
 
-    def __init__(self, c4d, app_root):
+    def __init__(self, c4d, app_root, *, scene_formats=None):
         self.c4d = c4d
         self.app_root = Path(app_root)
+        self.scene_formats = scene_formats
         self.cache_settings = load_module("c4d_cache")
         preferences = self.cache_settings.read_preferences(self.app_root)
         self.cache, self.cache_lease, self.cache_warning = self.cache_settings.open_cache(
@@ -81,11 +134,21 @@ class SmartImporter:
         self.caches = {(None, preferences.get("directory")): (self.cache, self.cache_lease, self.cache_warning)}
         self.cache_lock = threading.Lock()
         self.preparation = load_module("c4d_asset_prep")
-        self.conversion = load_module("c4d_conversion")
         self.materials = load_module("c4d_materials")
-        self.max_decode = load_module("c4d_max_decode")
-        self.project_export = load_module("c4d_project_export")
-        self.texture_archive = load_module("c4d_texture_archive")
+        supports_max = scene_formats is None or "max" in scene_formats
+        if supports_max:
+            self.conversion = load_module("c4d_conversion")
+            self.max_decode = load_module("c4d_max_decode")
+        if scene_formats is None:
+            self.project_export = load_module("c4d_project_export")
+            self.texture_archive = load_module("c4d_texture_archive")
+        else:
+            self.scene_import_options = False
+            self.scoped_preferences = supports_max
+            self.max_texture_bindings = supports_max
+            self.archive_textures = False
+            self.pbr_material_sets = False
+            self.project_export = None
         self.archive_target = None
         self.document = None
         self.generation = 0
@@ -97,6 +160,8 @@ class SmartImporter:
         self.cancel_event = None
 
     def submit(self, job):
+        if self.scene_formats is not None:
+            job = self._standard_scene_job(job)
         self.document = self.c4d.documents.GetActiveDocument()
         if self.document is None and not job.get("projectExport"):
             raise RuntimeError("请先打开一个 Cinema 4D 工程。")
@@ -114,6 +179,27 @@ class SmartImporter:
         except RuntimeError:
             self.cancel()
             raise
+
+    def _standard_scene_job(self, job):
+        if job.get("projectExport"):
+            raise ValueError("请将素材导入当前 Cinema 4D 场景。")
+        original = Path(job["path"])
+        source = original.resolve()
+        if (not source.is_file() or original.suffix.lower()[1:] not in self.scene_formats
+                or source.suffix.lower()[1:] not in self.scene_formats):
+            formats = " / ".join(extension.upper() for extension in self.scene_formats)
+            raise ValueError(f"请选择可读取的 {formats} 文件。")
+        options = {"kind": "scene", "renderer": "standard"}
+        scene_job = {"id": job["id"], "path": str(source), "options": options}
+        if source.suffix.lower() == ".max":
+            mode = (job.get("options") or {}).get("max_mode")
+            if mode is not None:
+                if mode not in ("direct", "application"):
+                    raise ValueError("MAX 转换模式无效。")
+                options["max_mode"] = mode
+            if job.get("c4dPreferences") is not None:
+                scene_job["c4dPreferences"] = job["c4dPreferences"]
+        return scene_job
 
     def cancel(self):
         self.generation += 1
@@ -136,7 +222,11 @@ class SmartImporter:
             if export:
                 options = dict(options, kind="scene", lod=None)
             cache, cache_warning, preferences = self._job_runtime(job)
-            plan = self.preparation.prepare(None, job["path"], options, cache)
+            if self.scene_formats is None:
+                plan = self.preparation.prepare(None, job["path"], options, cache)
+            else:
+                plan = self.preparation.prepare(None, job["path"], options, cache, match_material_names=True)
+                plan["standard_scene"] = True
             if cancel is not None and cancel.is_set():
                 return
             plan["renderer"] = options.get("renderer", "auto")
@@ -151,7 +241,8 @@ class SmartImporter:
                     self._stage(job["id"], "direct-max" if mode == "direct" else "application-max")
                 elif extension == ".blend":
                     self._stage(job["id"], "blender")
-                plan["path"] = self._convert(source, mode, preferences, cache, cancel)
+                if self.scene_formats is None or extension == ".max":
+                    plan["path"] = self._convert(source, mode, preferences, cache, cancel)
                 if extension == ".max":
                     warning = (self.max_decode.texture_warning(plan["path"]) if mode == "direct"
                                else self.conversion.max_export_warning(plan["path"]))
@@ -161,11 +252,12 @@ class SmartImporter:
                         scene_warning = self.max_decode.scene_object_warning(plan["path"], scene_import)
                         if scene_warning:
                             plan["warnings"] = [*plan.get("warnings", []), scene_warning]
-                        scene_settings = self.max_decode.render_settings(plan["path"])
-                        if scene_settings.get("materials"):
-                            plan["max_material_settings"] = scene_settings["materials"]
-                        if scene_settings.get("lights"):
-                            plan["max_light_settings"] = scene_settings["lights"]
+                        if self.scene_formats is None:
+                            scene_settings = self.max_decode.render_settings(plan["path"])
+                            if scene_settings.get("materials"):
+                                plan["max_material_settings"] = scene_settings["materials"]
+                            if scene_settings.get("lights"):
+                                plan["max_light_settings"] = scene_settings["lights"]
                     restore = scene_import is None or scene_import["materials"] and scene_import["textures"]
                     if mode == "direct" and not export and restore:
                         plan["restore_scene_textures"] = True
@@ -298,7 +390,7 @@ class SmartImporter:
                                  and self.materials.wants_octane(c4d, doc, plan.get("renderer", "auto")))
             if options is not None:
                 link_maps = link_maps and options["materials"] and options["textures"] and options["objects"]
-            if options is not None or convert_materials or plan.get("restore_scene_textures"):
+            if options is not None or convert_materials or plan.get("restore_scene_textures") or plan.get("standard_scene"):
                 imported, details = self._merge_filtered(doc, path, options, plan, convert_materials)
             else:
                 link_maps = link_maps and Path(path).suffix.lower() != ".c4d"
@@ -342,9 +434,11 @@ class SmartImporter:
             details = self.materials.apply(c4d, doc, plan) or "已导入"
         return " · ".join([details] + warnings)
 
-    def _merge_document(self, doc, path, flags, options=None):
+    def _merge_document(self, doc, path, flags, options=None, *, standard_scene=False):
         flags |= getattr(self.c4d, "SCENEFILTER_PROGRESSALLOWED", 0)
-        with _fbx_import_settings(self.c4d, path, options):
+        settings = (_obj_material_settings(self.c4d) if standard_scene and Path(path).suffix.lower() == ".obj"
+                    else _fbx_import_settings(self.c4d, path, options, standard_scene=standard_scene))
+        with settings:
             if not self.c4d.documents.MergeDocument(doc, path, flags, None):
                 raise RuntimeError("Cinema 4D 无法读取这个模型或工程，请检查对应导入器。")
 
@@ -365,7 +459,7 @@ class SmartImporter:
                     [material for material in doc.GetMaterials() if material not in previous_materials])
 
         try:
-            self._merge_document(doc, path, flags, options)
+            self._merge_document(doc, path, flags, options, standard_scene=plan.get("standard_scene", False))
             roots, materials = added()
             if options is not None:
                 restrictive_objects = any(not options[key] for key in (
@@ -384,7 +478,15 @@ class SmartImporter:
             if not imported and not materials:
                 raise RuntimeError("导入器没有载入符合选项的对象或材质，请检查源文件和导入选项。")
             conversions = []
-            if convert_materials:
+            if materials and plan.get("standard_scene"):
+                try:
+                    conversion = self.materials.link_standard_scene_textures(
+                        c4d, doc, materials, plan, self.preparation._family_tokens,
+                    )
+                except Exception as error:
+                    conversion = "标准材质贴图未能关联：" + (str(error) or type(error).__name__)
+                conversions.append(conversion)
+            elif convert_materials:
                 if materials:
                     try:
                         conversions.append(self.materials.convert_octane(c4d, doc, materials, imported, plan))
@@ -398,7 +500,7 @@ class SmartImporter:
                         conversions.append("Octane 灯光转换失败：" + (str(error) or type(error).__name__))
             elif materials and plan.get("restore_scene_textures"):
                 try:
-                    conversion = self.materials.restore_standard_textures(c4d, doc, materials, plan)
+                    conversion = self.materials.link_standard_scene_textures(c4d, doc, materials, plan)
                 except Exception as error:
                     conversion = "标准材质贴图恢复失败：" + (str(error) or type(error).__name__)
                 conversions.append(conversion)

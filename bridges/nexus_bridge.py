@@ -123,18 +123,24 @@ class Bridge:
         while self.running:
             try:
                 if self.session is None:
-                    result = self.request("/bridge/register", {
+                    importer = self.smart_import
+                    formats = getattr(importer, "scene_formats", None)
+                    registration = {
                         "dcc": self.config["dcc"], "pid": os.getpid(), "label": self.label,
                         "placement": self.config.get("placement", False),
                         "maxImport": self.config["dcc"] == "blender" and blender_max_import is not None,
-                        "smartImport": self.smart_import is not None,
-                        "projectExport": bool(getattr(self.smart_import, "project_export", None)),
-                        "sceneImportOptions": bool(getattr(self.smart_import, "import_progress", None)),
-                        "scopedC4dPreferences": bool(getattr(self.smart_import, "scoped_preferences", False)),
-                        "maxTextureBindings": bool(getattr(self.smart_import, "max_texture_bindings", False)),
-                        "archiveTextures": bool(getattr(self.smart_import, "archive_textures", False)),
-                        "pbrMaterialSets": bool(getattr(self.smart_import, "pbr_material_sets", False)),
-                    })
+                        "smartImport": importer is not None,
+                        "projectExport": bool(getattr(importer, "project_export", None)),
+                        "sceneImportOptions": bool(getattr(importer, "scene_import_options",
+                                                          getattr(importer, "import_progress", None))),
+                        "scopedC4dPreferences": bool(getattr(importer, "scoped_preferences", False)),
+                        "maxTextureBindings": bool(getattr(importer, "max_texture_bindings", False)),
+                        "archiveTextures": bool(getattr(importer, "archive_textures", False)),
+                        "pbrMaterialSets": bool(getattr(importer, "pbr_material_sets", False)),
+                    }
+                    if formats is not None:
+                        registration["smartImportFormats"] = list(formats)
+                    result = self.request("/bridge/register", registration)
                     self.session = result["id"]
                 self.request("/bridge/heartbeat", {"sessionId": self.session, "label": self.label})
                 if self.smart_import is not None:

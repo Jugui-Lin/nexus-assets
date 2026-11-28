@@ -4,7 +4,7 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 [下载 Windows x64 最新版](https://github.com/Jugui-Lin/nexus-assets/releases/latest) · [团队部署与使用](团队版部署与使用.md) · [NAS 镜像更新](nas/README.md#github-镜像自动更新)
 
-本页对应 Windows 客户端 v0.10.55。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.55)
+本页对应 Windows 客户端 v0.10.56。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.56)
 
 ![Nexus 资产库演示，左侧文件夹树，中间是模型与图片的预览卡片](docs/screenshots/asset-library.png)
 
@@ -39,6 +39,9 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 ## 文件夹与资产库联动
 
+- 在文件夹的「查看 → 显示」打开「堆叠序列帧」，可把按帧号命名的图片折叠成组。点击堆叠可展开浏览单帧。
+- 文件夹默认隐藏「未入库」标记，可在「查看 → 显示」打开「未入库标记」。
+
 - 在文件夹选中文件后点「在资产库中查看」，可定位对应的资产并保留多选。若筛选隐藏了部分结果，点「查看文件夹选区」，看完可返回原视图。
 - 在资产库多选后点「定位原件」，可按目录打开所选文件的位置。打开文件夹交接时，Nexus 会复用已有标签页并选中可定位的原件。
 - Windows 个人库可用右键「移动原件并保留资产记录…」，在受支持的本地目录间移动已入库文件。移动中断后，Nexus 会尝试恢复，遇到冲突会列出受影响的路径。
@@ -62,10 +65,14 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 - 在「网页采集」安装并配对 Chrome 或 Edge 扩展，然后选择采集素材的目标库与目录。 [扩展使用说明](browser-extension/README.md)
 - Nexus 自动检测创作软件并安装或更新桥接。重开创作软件后，可在「DCC 连接中心」查看在线状态。自定义的 Windows 安装未被检测到时，可在这里选择程序。Cinema 4D 已检测到其他版本时，可用「查找其他版本…」。首次启动 Cinema 4D 会生成桥接所需的用户首选项目录。
 - Cinema 4D 2023 和 2024 支持基础导入，可把 C4D、FBX、OBJ、Alembic 和 STL 合并到当前场景。
-- Cinema 4D 2025 及以上版本的智能导入和视口放置按在线实例显示的能力提供。智能导入支持模型、PBR 贴图、HDRI 和 IES。直接解析 MAX 需要 Blender 4.2 或更新版本，「调用源软件」使用已安装并完成授权的 3ds Max Batch。
+- 从资产库或文件夹把 FBX、OBJ 和 MAX 发送到在线的 Cinema 4D 2023 实例，可智能导入到当前场景。Nexus 会自动查找模型附近匹配的贴图，生成或补齐标准材质。
+- Cinema 4D 2025 及以上版本的智能导入和视口放置按在线实例显示的能力提供。智能导入支持模型、PBR 贴图、HDRI 和 IES。
+- 发送 MAX 时可沿用工作区保存的读取方式，也可为本次导入选择读取方式。「Blender 直接解析」需要 Blender 4.2 或更新版本。「调用 3ds Max Batch」需要 Windows 上已安装并完成授权的 3ds Max Batch。
 - Windows 上可把 MAX 拖进 Blender 4.5 或更新版本的 3D 视口。桥接安装或更新后，重开 Blender 即可使用。
 
 在 Blender 视口放置时用 `S` 缩放、`R` 旋转。在 Cinema 4D 用 `T` 缩放、`R` 旋转，再按住左键拖动调整。左键确认放置，`Esc` 取消。导入任务收到 DCC 回执后会显示结果。
+
+已用带贴图的 MAX 场景在 Blender 和 3ds Max Batch 中验证 FBX 转换。Cinema 4D 2023 的导入流程通过模拟测试，实际宿主内合并待验证。
 
 ## 从源码运行
 

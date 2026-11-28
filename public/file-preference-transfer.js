@@ -10,6 +10,7 @@ const groups = [
   }],
   ['文件夹显示', {
     compact:'紧凑视图', showFrequent:'显示常用文件夹', showHidden:'显示隐藏项目',
+    stackSequences:'堆叠序列帧', showUnindexed:'显示未入库标记',
     showThumbnails:'显示缩略图', showStatus:'显示状态栏', showExtensions:'显示文件扩展名',
     showNavigation:'显示导航窗格', showToolbar:'显示操作工具栏', showBookmarks:'显示书签栏',
   }],

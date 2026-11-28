@@ -691,6 +691,97 @@ def _bitmap_references(c4d, shader):
     return references
 
 
+def _relink_bitmap_paths(c4d, material, resolve):
+    linked = 0
+    pending = [material.GetFirstShader()]
+    while pending:
+        shader = pending.pop()
+        if shader is None:
+            continue
+        pending.extend((shader.GetNext(), shader.GetDown()))
+        if shader.CheckType(c4d.Xbitmap):
+            reference = shader[c4d.BITMAPSHADER_FILENAME]
+            path = resolve(str(reference)) if reference else None
+            if path and path != reference:
+                shader[c4d.BITMAPSHADER_FILENAME] = path
+                linked += 1
+    return linked
+
+
+def _fill_standard_map_channels(c4d, material, channels, resolve):
+    linked = 0
+    for key, (enabled, parameter) in _classic_texture_slots(c4d).items():
+        path = channels.get(key)
+        if not path:
+            continue
+        shader = material[parameter]
+        if shader is not None:
+            if not shader.CheckType(c4d.Xbitmap):
+                continue
+            reference = str(shader[c4d.BITMAPSHADER_FILENAME] or "")
+            if "://" in reference or resolve(reference):
+                continue
+            shader[c4d.BITMAPSHADER_FILENAME] = path
+        else:
+            material[parameter] = _bitmap(c4d, material, path, _linear_texture(key, path))
+        material[enabled] = True
+        if key == "normal":
+            material[c4d.MATERIAL_NORMAL_REVERSEY] = _directx_normal(path)
+        elif key == "opacity":
+            material[c4d.MATERIAL_ALPHA_IMAGEALPHA] = False
+        linked += 1
+
+    reflection_maps = [(channels[key], parameter) for key, parameter in (
+        ("roughness", c4d.REFLECTION_LAYER_MAIN_SHADER_ROUGHNESS),
+        ("specular", c4d.REFLECTION_LAYER_MAIN_SHADER_SPECULAR),
+        ("metallic", c4d.REFLECTION_LAYER_MAIN_SHADER_REFLECTION),
+    ) if key in channels]
+    if reflection_maps:
+        layer = material.GetReflectionLayerIndex(0) if material.GetReflectionLayerCount() else None
+        if layer is None:
+            layer = _created(material.AddReflectionLayer(), "GGX 反射层")
+            material[layer.GetDataID() + c4d.REFLECTION_LAYER_MAIN_DISTRIBUTION] = c4d.REFLECTION_DISTRIBUTION_GGX
+        for path, parameter in reflection_maps:
+            slot = layer.GetDataID() + parameter
+            if material[slot] is None:
+                material[slot] = _bitmap(c4d, material, path, True)
+                material[c4d.MATERIAL_USE_REFLECTION] = True
+                linked += 1
+    return linked
+
+
+def link_standard_scene_textures(c4d, doc, imported_materials, plan, family_key=None):
+    """Relink imported classic materials and fill missing maps with unambiguous matches."""
+    resolve = _texture_resolver(Path(plan["path"]), plan.get("source_path"), doc.GetDocumentPath())
+    named_maps = plan.get("named_material_maps", {})
+    source_maps = plan.get("scene_material_maps", {})
+    names = Counter(material.GetName() for material in imported_materials)
+    baked_maps = _baked_material_channels(plan, names.elements())
+    linked = 0
+    for material in imported_materials:
+        if not material.CheckType(c4d.Mmaterial) or getattr(material, "IsNodeBased", lambda: False)():
+            continue
+        repaired = _relink_bitmap_paths(c4d, material, resolve)
+        name = material.GetName()
+        maps = dict(plan.get("maps", {})) if len(imported_materials) == 1 else {}
+        if family_key is not None:
+            maps.update(named_maps.get(family_key(name), {}))
+        authored = source_maps.get(name, {}) if names[name] == 1 else {}
+        for supplement in (baked_maps.get(name, {}), authored):
+            for channel, path in supplement.items():
+                candidate = Path(path)
+                if candidate.is_absolute() and candidate.suffix.lower() in _IMAGE_TYPES:
+                    existing = _existing_texture(candidate)
+                    if existing is not None:
+                        maps[channel] = str(existing)
+        channels = {key: path for key, path in maps.items() if Path(path).suffix.lower() in _IMAGE_TYPES}
+        repaired += _fill_standard_map_channels(c4d, material, channels, resolve) if channels else 0
+        if repaired:
+            material.Message(c4d.MSG_UPDATE)
+            linked += repaired
+    return f"标准材质已关联 {linked} 项贴图" if linked else ""
+
+
 def _imported_standard_channels(c4d, material, resolve_texture):
     channels = {}
     unlinked = 0
