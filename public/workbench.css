@@ -293,6 +293,7 @@
 .nexus-release-version { margin: 9px 0 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .nexus-release-list { display: grid; gap: 8px; margin: 0; padding-inline-start: 18px; line-height: 1.5; }
 .nexus-release-list li::marker { color: var(--accent); }
+.nexus-release-history { display: inline-block; margin-top: 12px; }
 :is(.top-tools > summary, #about-button, .version-link).has-nexus-update { position: relative; }
 :is(.top-tools > summary, #about-button, .version-link).has-nexus-update::after {
   content: ""; position: absolute; width: 7px; height: 7px; pointer-events: none;
@@ -973,9 +974,6 @@ dialog.modal::backdrop { backdrop-filter: none; background: #080b0dae; }
 .shot-dashboard-candidates > button { max-width:100%; text-overflow:ellipsis; overflow:hidden; }
 .shot-dashboard-dialog h3 { font-size:13px; font-weight:500; margin-block:12px 6px; }
 #shot-dashboard-status { margin:6px 0 0; min-height:1.4em; }
-#favorite-expiry-tools { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
-#favorite-expiry-tools[hidden] { display:none; }
-#favorite-expiry-tools button[aria-pressed="true"] { color:var(--accent); }
 #favorite-expiry-dialog .field-label + .field-label { margin-top:10px; }
 #workspace-layout-presets-preview { white-space:pre-line; overflow-wrap:anywhere; margin-block:10px; }
 #workspace-layout-presets-status:empty { display:none; }

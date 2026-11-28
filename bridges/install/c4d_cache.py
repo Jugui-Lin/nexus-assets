@@ -62,6 +62,8 @@ def _checked_preferences(values):
             preferences[key] = value.strip()
     if values.get("maxMode") in ("direct", "application"):
         preferences["maxMode"] = values["maxMode"]
+    if values.get("maxMaterialRenderer") in ("octane", "standard", "auto"):
+        preferences["maxMaterialRenderer"] = values["maxMaterialRenderer"]
     preferences["cleanupOnStartup"] = values.get("cleanupOnStartup") is True
     return preferences
 

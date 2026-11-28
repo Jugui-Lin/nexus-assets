@@ -68,6 +68,64 @@ function credentials(output) {
   return {token, id: output.match(/[a-f0-9-]{36}/)?.[0]};
 }
 
+test('team thumbnail cache settings sync to members independently of the asset catalog', {timeout: 25_000}, async () => {
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-team-test-'));
+  const database = path.join(scratch, 'db');
+  const cli = async (...args) => (await exec(binary, ['--data', database, ...args], {windowsHide:true})).stdout;
+  let server;
+  try {
+    const admin = credentials(await cli('init', '团队缓存', '管理员'));
+    const member = credentials(await cli('member-add', '成员'));
+    let running = await startTeamServer(database);
+    server = running.server;
+    let request = teamRequest(running.address);
+    const initial = await request('GET', 'catalog/full', member);
+    assert.equal(initial.status, 200);
+    const {team:{id:teamId}, revision} = initial.json;
+    assert.deepEqual(initial.json.thumbnailCache, {root:null,revision:0});
+    const unchanged = async expected => {
+      for (const identity of [admin,member]) {
+        const response = await request('GET', 'catalog/' + revision, identity);
+        assert.equal(response.status, 200);
+        assert.equal(response.json.revision, revision);
+        assert.equal(response.json.catalog, null);
+        assert.deepEqual(response.json.thumbnailCache, expected);
+      }
+    };
+    const save = (identity, root, expectedTeam = teamId) =>
+      request('PATCH', 'team/thumbnail-cache', identity, {teamId:expectedTeam,root});
+    const root = String.raw`\\studio-storage.invalid\team-cache\缩略图`;
+    assert.equal((await save(null, root)).status, 401);
+    assert.equal((await save(member, root)).status, 403);
+    assert.equal((await save(admin, root, randomUUID())).status, 409);
+    for (const invalid of ['C:/local-cache', '//studio-storage.invalid', '//studio-storage.invalid/share/../cache',
+      '//studio-storage.invalid/IPC$', {path:root}]) {
+      assert.equal((await save(admin, invalid)).status, 400, JSON.stringify(invalid));
+    }
+    await unchanged({root:null,revision:0});
+
+    const expected = {root,revision:1};
+    assert.deepEqual(await save(admin,'//studio-storage.invalid/team-cache/缩略图/'), {status:200,json:expected});
+    assert.deepEqual(await save(admin,root), {status:200,json:expected});
+    assert.equal((await save(member,null)).status, 403);
+    await unchanged(expected);
+
+    await stopTeamServer(server);
+    running = await startTeamServer(database);
+    server = running.server;
+    request = teamRequest(running.address);
+    await unchanged(expected);
+
+    const cleared = {root:null,revision:2};
+    assert.deepEqual(await save(admin,null), {status:200,json:cleared});
+    assert.deepEqual(await save(admin,null), {status:200,json:cleared});
+    await unchanged(cleared);
+  } finally {
+    await stopTeamServer(server);
+    await removeTeamScratch(scratch);
+  }
+});
+
 test('team whiteboard merges peer edits, validates batches atomically and survives restart', {timeout: 25_000}, async () => {
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-whiteboard-test-'));
   const database = path.join(scratch, 'db');

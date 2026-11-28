@@ -119,6 +119,7 @@ struct Preferences {
     connection_identity: Option<ConnectionIdentity>,
     mounts: HashMap<String, HashMap<String, String>>,
     thumbnail_cache_roots: HashMap<String, String>,
+    approved_thumbnail_cache_roots: HashMap<String, String>,
     favorites: HashMap<String, HashSet<String>>,
 }
 
@@ -132,6 +133,8 @@ struct Cached {
     asset_indices: HashMap<String, usize>,
     // Effective permission for this member, including older admin-only servers.
     folder_visibility: bool,
+    #[serde(default)]
+    thumbnail_cache: Option<TeamThumbnailCacheConfig>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -227,6 +230,39 @@ impl Workspace {
             .then(|| unc.text())
     }
 
+    fn thumbnail_cache_root<'a>(&'a self, cached: &'a Cached) -> Option<&'a str> {
+        if let Some(config) = &cached.thumbnail_cache {
+            return config.root.as_deref();
+        }
+        self.prefs.thumbnail_cache_roots.get(&cached.team.id).map(String::as_str)
+    }
+
+    fn thumbnail_cache_trusted(&self, cached: &Cached, path: &str) -> bool {
+        let Some(root) = network_paths::UncDirectory::parse(path) else { return false; };
+        let team_id = &cached.team.id;
+        let approved = [self.prefs.approved_thumbnail_cache_roots.get(team_id), self.prefs.thumbnail_cache_roots.get(team_id)]
+            .into_iter()
+            .flatten()
+            .filter_map(|path| network_paths::UncDirectory::parse(path))
+            .any(|path| root.relative_to(&path).as_deref() == Some(""));
+        approved || self.prefs.connection.as_ref().is_some_and(|connection| {
+            root.trusted(&connection.url, self.manual_mounts(cached))
+        })
+    }
+
+    fn thumbnail_cache_for_preview(&self, cached: &Cached) -> Option<PathBuf> {
+        let root = self.thumbnail_cache_root(cached)?;
+        if cached.thumbnail_cache.is_none() || cfg!(windows) && self.thumbnail_cache_trusted(cached, root) {
+            return Some(PathBuf::from(root));
+        }
+        None
+    }
+
+    fn thumbnail_cache_needs_trust(&self, cached: &Cached) -> bool {
+        cfg!(windows) && cached.thumbnail_cache.as_ref().and_then(|cache| cache.root.as_deref())
+            .is_some_and(|root| !self.thumbnail_cache_trusted(cached, root))
+    }
+
     fn resolved_mount(&self, cached: &Cached, library_id: &str) -> Option<String> {
         self.automatic_mount(cached, library_id).or_else(|| {
             self.prefs
@@ -262,6 +298,7 @@ pub(crate) struct TeamPreviewAsset {
     pub team_id: String,
     pub storage: Result<TeamAssetStorage, String>,
     pub thumbnail_cache_root: Option<PathBuf>,
+    pub unified_thumbnail_cache_configured: bool,
     pub relative_path: String,
 }
 
@@ -580,6 +617,16 @@ impl Desktop {
         let identity = ConnectionIdentity::new(&snapshot.team, &snapshot.member);
         let identity_changed = data.cache.as_ref().is_none_or(|cached| cached.identity() != identity);
         let mut persist = false;
+        if let Some(cached) = data.cache.as_mut().filter(|_| !identity_changed) {
+            if cached.thumbnail_cache.as_ref().zip(snapshot.thumbnail_cache.as_ref())
+                .is_some_and(|(known, incoming)| known.revision > incoming.revision)
+            {
+                snapshot.thumbnail_cache.clone_from(&cached.thumbnail_cache);
+            } else if cached.thumbnail_cache != snapshot.thumbnail_cache {
+                cached.thumbnail_cache.clone_from(&snapshot.thumbnail_cache);
+                persist = true;
+            }
+        }
         if snapshot.catalog.is_some() {
             // Concurrent polling can finish out of order.
             if identity_changed || data.cache.as_ref().is_none_or(|cached| cached.revision <= snapshot.revision) {
@@ -589,7 +636,7 @@ impl Desktop {
         } else if let Some(cached) = data.cache.as_mut() {
             if !identity_changed && cached.revision == snapshot.revision {
                 let folder_visibility = folder_visibility_allowed(&snapshot);
-                persist = cached.folder_visibility != folder_visibility
+                persist |= cached.folder_visibility != folder_visibility
                     || cached.member.name != snapshot.member.name
                     || cached.member.role != snapshot.member.role
                     || cached.team.name != snapshot.team.name;
@@ -1289,11 +1336,7 @@ impl Desktop {
         Ok(IndexedTeamPreview {
             asset: local,
             namespace: crate::team_covers::library_namespace(&cached.team.id, library),
-            thumbnail_cache_root: workspace
-                .prefs
-                .thumbnail_cache_roots
-                .get(&cached.team.id)
-                .map(PathBuf::from),
+            thumbnail_cache_root: workspace.thumbnail_cache_for_preview(cached),
         })
     }
 
@@ -1323,19 +1366,17 @@ impl Desktop {
         }
         // Keep the established cache file naming and DCC job IDs portable.
         local.id = format!("team-{}", asset.id);
-        let thumbnail_cache_root = self
-            .data
-            .lock()
-            .unwrap()
-            .prefs
-            .thumbnail_cache_roots
-            .get(&team_id)
-            .map(PathBuf::from);
+        let data = self.data.lock().unwrap();
+        let cached = data.cache.as_ref().filter(|cached| cached.team.id == team_id)
+            .ok_or("团队工作空间已切换")?;
+        let thumbnail_cache_root = data.thumbnail_cache_for_preview(cached);
         Ok(TeamPreviewAsset {
             asset: local,
             team_id,
             storage: TeamAssetStorage::for_asset(canonical_root, &asset),
             thumbnail_cache_root,
+            unified_thumbnail_cache_configured: cached.thumbnail_cache.as_ref()
+                .is_some_and(|config| config.root.is_some()),
             relative_path: asset.relative_path,
         })
     }
@@ -1549,7 +1590,10 @@ fn view(workspace: &Workspace, include_assets: bool) -> Result<Value, String> {
     Ok(json!({
         "team":cached.team,"member":cached.member,"revision":cached.revision,
         "libraries":libraries,"assets":assets,"allLibraries":all_libraries,
-        "thumbnailCacheRoot":workspace.prefs.thumbnail_cache_roots.get(&cached.team.id),
+        "thumbnailCacheRoot":workspace.thumbnail_cache_root(cached),
+        "thumbnailCacheShared":cached.thumbnail_cache.is_some(),
+        "thumbnailCacheNeedsTrust":workspace.thumbnail_cache_needs_trust(cached),
+        "thumbnailCacheUnsupportedPlatform":!cfg!(windows) && cached.thumbnail_cache.is_some(),
         "folderVisibility":cached.folder_visibility,"hiddenFolders":cached.catalog.hidden_folders,
         "linkedFolders":cached.catalog.linked_folders,"definedTags":cached.catalog.defined_tags
     }))
@@ -1570,6 +1614,7 @@ fn cache_from(snapshot: Snapshot) -> Result<Cached, String> {
         catalog,
         asset_indices: HashMap::new(),
         folder_visibility,
+        thumbnail_cache: snapshot.thumbnail_cache,
     };
     cached.build_asset_indices();
     Ok(cached)
@@ -1640,13 +1685,14 @@ pub fn team_status(state: tauri::State<'_, Desktop>) -> Value {
     let data = state.data.lock().unwrap();
     match &data.prefs.connection {
         Some(config) => {
-            let thumbnail_cache_root = data
-                .cache
-                .as_ref()
-                .and_then(|cached| data.prefs.thumbnail_cache_roots.get(&cached.team.id));
+            let cached = data.cache.as_ref();
+            let thumbnail_cache_shared = cached.is_some_and(|cached| cached.thumbnail_cache.is_some());
             json!({
                 "configured":true, "url":config.url,"allowLanHttp":config.allow_lan_http,
-                "thumbnailCacheRoot":thumbnail_cache_root
+                "thumbnailCacheRoot":cached.and_then(|cached| data.thumbnail_cache_root(cached)),
+                "thumbnailCacheShared":thumbnail_cache_shared,
+                "thumbnailCacheNeedsTrust":cached.is_some_and(|cached| data.thumbnail_cache_needs_trust(cached)),
+                "thumbnailCacheUnsupportedPlatform":!cfg!(windows) && thumbnail_cache_shared,
             })
         }
         None => json!({"configured":false}),
@@ -1975,25 +2021,117 @@ pub async fn team_set_thumbnail_cache_root(
     let state = state.inner();
     let _operation = state.begin_storage_operation()?;
     let active = state.connection_for_team(&team_id)?;
+    let shared = {
+        let data = state.data.lock().unwrap();
+        if data.active_connection()? != active {
+            return Err("团队工作空间已切换，请重新打开设置".into());
+        }
+        let cached = data.cache.as_ref().ok_or("请先同步团队目录")?;
+        let shared = cached.thumbnail_cache.is_some();
+        if shared && cached.member.role != "admin" {
+            return Err("只有管理员可以设置团队共享缩略图缓存".into());
+        }
+        shared
+    };
     let root = if let Some(path) = path {
         Some(
-            tauri::async_runtime::spawn_blocking(move || mount_root(&path))
+            tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+                if shared && !cfg!(windows) {
+                    return Err("请在 Windows 客户端选择团队共享缓存目录".into());
+                }
+                let root = mount_root(&path)?;
+                if shared {
+                    return network_paths::folder_unc(&root)
+                        .or_else(|| network_paths::folder_unc(Path::new(&path)))
+                        .map(|network| network.text())
+                        .ok_or_else(|| "请选择团队可访问的 NAS 共享目录".into());
+                }
+                Ok(clean_path(&root))
+            })
                 .await
                 .map_err(|error| error.to_string())??,
         )
     } else {
         None
     };
+    if shared {
+        if state.active_connection()? != active {
+            return Err("团队工作空间已切换，请重新打开设置".into());
+        }
+        let body = serde_json::to_vec(&json!({"teamId":team_id, "root":root}))
+            .map_err(|error| error.to_string())?;
+        let config: TeamThumbnailCacheConfig = state
+            .request(
+                &active.config,
+                Method::PATCH,
+                "/v1/team/thumbnail-cache",
+                Some(body),
+            )
+            .await?;
+        if config.root != root {
+            return Err("团队服务返回了不同的缓存路径，请同步后核对".into());
+        }
+        let mut data = state.data.lock().unwrap();
+        if data.active_connection()? != active {
+            return Err("团队工作空间已切换，请重新打开设置".into());
+        }
+        let cached = data.cache.as_ref().ok_or("请先同步团队目录")?;
+        let newer = cached.thumbnail_cache.as_ref().is_some_and(|known| known.revision > config.revision);
+        if !newer {
+            let mut prefs = data.prefs.clone();
+            if let Some(root) = &config.root {
+                // Choosing the path explicitly also authorizes this computer to use it.
+                prefs.approved_thumbnail_cache_roots.insert(team_id, root.clone());
+            } else {
+                prefs.approved_thumbnail_cache_roots.remove(&team_id);
+            }
+            if state.save(&prefs).is_ok() {
+                data.prefs = prefs;
+            }
+            data.cache.as_mut().ok_or("请先同步团队目录")?.thumbnail_cache = Some(config);
+            let _ = state.persist_local_catalog(&data);
+        }
+        return view(&data, false);
+    }
     let mut data = state.data.lock().unwrap();
     if data.active_connection()? != active {
         return Err("团队工作空间已切换，请重新选择缩略图缓存目录".into());
     }
+    if data.cache.as_ref().is_some_and(|cached| cached.thumbnail_cache.is_some()) {
+        return Err("团队服务已支持统一缓存，请重新选择共享目录".into());
+    }
     let mut prefs = data.prefs.clone();
     if let Some(root) = root {
-        prefs.thumbnail_cache_roots.insert(team_id, clean_path(&root));
+        prefs.thumbnail_cache_roots.insert(team_id, root);
     } else {
         prefs.thumbnail_cache_roots.remove(&team_id);
     }
+    state.save(&prefs)?;
+    data.prefs = prefs;
+    view(&data, false)
+}
+
+#[tauri::command]
+pub fn team_trust_thumbnail_cache_root(
+    state: tauri::State<'_, Desktop>,
+    team_id: String,
+    path: String,
+) -> Result<Value, String> {
+    if !cfg!(windows) {
+        return Err("此系统使用本机缩略图缓存".into());
+    }
+    let _operation = state.begin_storage_operation()?;
+    let mut data = state.data.lock().unwrap();
+    let cached = data.cache.as_ref().ok_or("请先同步团队目录")?;
+    if cached.team.id != team_id {
+        return Err("团队工作空间已切换，请重新打开设置".into());
+    }
+    let root = cached.thumbnail_cache.as_ref().and_then(|config| config.root.as_deref());
+    if root != Some(path.as_str()) || network_paths::UncDirectory::parse(&path).is_none() {
+        return Err("团队缓存目录已变更，请核对新的共享路径".into());
+    }
+    let mut prefs = data.prefs.clone();
+    prefs.approved_thumbnail_cache_roots.insert(team_id, path);
     state.save(&prefs)?;
     data.prefs = prefs;
     view(&data, false)
@@ -3066,6 +3204,49 @@ mod tests {
         assert_eq!(view(&workspace, false).unwrap()["thumbnailCacheRoot"], "current-cache");
         workspace.prefs.thumbnail_cache_roots.remove("team-one");
         assert!(view(&workspace, false).unwrap()["thumbnailCacheRoot"].is_null());
+    }
+
+    #[test]
+    fn server_thumbnail_cache_uses_the_current_team_and_trusted_path() {
+        let mut workspace = Workspace {
+            cache: Some(cache_from(index_snapshot("team", true)).unwrap()),
+            ..Workspace::default()
+        };
+        workspace.prefs.connection = Some(Connection {
+            url: "http://team-nas:47822".into(),
+            token: "fixture".into(),
+            allow_lan_http: true,
+        });
+        workspace.prefs.thumbnail_cache_roots.insert("team".into(), "legacy".into());
+        let configured = r"\\team-nas\Cache\Thumbs";
+        let other_host = r"\\other-nas\Cache\Thumbs";
+        let set_root = |workspace: &mut Workspace, root: Option<&str>| {
+            workspace.cache.as_mut().unwrap().thumbnail_cache = Some(TeamThumbnailCacheConfig {
+                root: root.map(str::to_owned),
+                revision: 1,
+            });
+        };
+        set_root(&mut workspace, Some(configured));
+        let cached = workspace.cache.as_ref().unwrap();
+        assert_eq!(workspace.thumbnail_cache_root(cached), Some(configured));
+        assert!(!workspace.thumbnail_cache_needs_trust(cached));
+        assert_eq!(
+            workspace.thumbnail_cache_for_preview(cached),
+            cfg!(windows).then(|| PathBuf::from(configured))
+        );
+
+        set_root(&mut workspace, Some(other_host));
+        let cached = workspace.cache.as_ref().unwrap();
+        assert!(workspace.thumbnail_cache_for_preview(cached).is_none());
+        assert_eq!(workspace.thumbnail_cache_needs_trust(cached), cfg!(windows));
+        workspace.prefs.approved_thumbnail_cache_roots.insert("team".into(), other_host.into());
+        assert!(workspace.thumbnail_cache_trusted(cached, other_host));
+        assert!(!workspace.thumbnail_cache_trusted(cached, r"\\other-nas\Cache\Different"));
+
+        set_root(&mut workspace, None);
+        let cached = workspace.cache.as_ref().unwrap();
+        assert!(workspace.thumbnail_cache_root(cached).is_none());
+        assert!(workspace.thumbnail_cache_for_preview(cached).is_none());
     }
 
     #[test]

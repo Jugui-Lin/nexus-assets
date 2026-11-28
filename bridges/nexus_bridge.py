@@ -135,6 +135,8 @@ class Bridge:
                                                           getattr(importer, "import_progress", None))),
                         "scopedC4dPreferences": bool(getattr(importer, "scoped_preferences", False)),
                         "maxTextureBindings": bool(getattr(importer, "max_texture_bindings", False)),
+                        "maxMaterialPreferences": bool(getattr(importer, "max_material_preferences", False)),
+                        "maxOctaneMaterials": bool(getattr(importer, "max_octane_materials", False)),
                         "archiveTextures": bool(getattr(importer, "archive_textures", False)),
                         "pbrMaterialSets": bool(getattr(importer, "pbr_material_sets", False)),
                     }

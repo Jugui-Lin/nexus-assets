@@ -1,5 +1,24 @@
 const cacheKey = 'nexus-release-notes-v1';
+const releasesUrl = 'https://github.com/Jugui-Lin/nexus-assets/releases';
 const bundledNotes = new Map([
+  ['0.10.59', [
+    '收藏项目和到期历史已移到左侧「＋ 添加过滤」。',
+    '关于 Nexus 始终显示更新日志，可打开 GitHub 上的完整版本记录。',
+    '团队管理员可统一设置 NAS 缩略图缓存路径，成员同步后共用。',
+    'MAX 导入 Cinema 4D 默认使用 Octane 材质，偏好可从发送入口旁打开。',
+  ]],
+  ['0.10.58', [
+    '文件夹工具栏增加剪切、复制、粘贴、重命名和删除，右键菜单贴近点击位置展开。',
+    '临时素材篮支持拖入原文件引用、显示候选数量，以及按篮内顺序连续预览。',
+    '新建标签页菜单增加白板入口，从资产库新建「此电脑」时会保留已有标签的顺序。',
+    '底部资产详情随可用宽度横向排列，站点导航可以拖动分类标题来调整整组顺序。',
+    '团队库侧栏可直接链接文件夹，视频播放区域移除了焦点蓝框。',
+  ]],
+  ['0.10.57', [
+    '加强文件夹与资产库之间的原件定位，返回时保留搜索和选区。',
+    '序列帧堆叠支持连续编号的 EXR，缩略图使用首帧。',
+    '优化大尺寸 PNG 缩略图生成，白板新增查找与大纲。',
+  ]],
   ['0.10.52-local.15', [
     'B 站视频引用自动补齐标题和封面。',
     '白板文件引用显示缩略图，双击可在资源管理器定位。',
@@ -38,25 +57,41 @@ function summarizeNotes(value) {
     .filter(Boolean).slice(0,4).map(line => line.length > 100 ? line.slice(0,99).trimEnd() + '…' : line);
 }
 
-export function initNexusReleaseNotes({dialog, button}) {
+export function initNexusReleaseNotes({dialog, button, openWebsite}) {
   const versionLabel = dialog.querySelector('[data-release-version]');
   const list = dialog.querySelector('ul');
-  let current;
+  const empty = dialog.querySelector('[data-release-notes-empty]');
+  const link = dialog.querySelector('[data-release-notes-link]');
+  let current = {version:'',items:[]};
   let pending = false;
 
-  function show() {
-    if (!current || dialog.open) return;
+  function render() {
     versionLabel.textContent = current.version;
+    versionLabel.hidden = !current.version;
+    empty.hidden = Boolean(current.items.length);
+    list.classList.toggle('hidden',!current.items.length);
     list.replaceChildren(...current.items.map(text => {
       const row = document.createElement('li');
       row.textContent = text;
       return row;
     }));
-    dialog.showModal();
+    link.href = current.items.length && /^\d+\.\d+\.\d+$/.test(current.version)
+      ? releasesUrl + '/tag/v' + current.version : releasesUrl;
+  }
+
+  function markSeen() {
     pending = false;
+    if (!current.items.length) return;
     const saved = storedNotes();
     saved.seen = [...new Set([...saved.seen,current.version])].slice(-20);
     storeNotes(saved);
+  }
+
+  function show() {
+    if (dialog.open) return;
+    render();
+    dialog.showModal();
+    markSeen();
   }
 
   function showPending() {
@@ -64,16 +99,26 @@ export function initNexusReleaseNotes({dialog, button}) {
   }
 
   button.addEventListener('click',show);
+  link.addEventListener('click',event => {
+    if (!openWebsite) return;
+    event.preventDefault();
+    openWebsite(link.href);
+  });
   document.addEventListener('close',showPending,true);
   return {
     activate(version) {
       const saved = storedNotes();
       const downloaded = saved.downloads.find(note => note?.version === version)?.items;
       const items = bundledNotes.get(version) || (Array.isArray(downloaded) ? downloaded : []);
-      if (!items.length) return;
       current = {version,items};
-      button.hidden = false;
-      pending = !saved.seen.includes(version);
+      if (dialog.open) {
+        render();
+        markSeen();
+        return;
+      }
+      // Bundled stable notes are available on demand after a fresh install.
+      const followedUpdate = Array.isArray(downloaded) && downloaded.length;
+      pending = Boolean(items.length && (followedUpdate || version.includes('-local.')) && !saved.seen.includes(version));
       showPending();
     },
     remember(version, notes) {

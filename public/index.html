@@ -283,14 +283,13 @@
     <section id="asset-filter-toolbar" class="library-toolbar" aria-label="资产筛选和显示">
       <div class="filter-bar asset-filter-strip">
         <div id="asset-pinned-filters" role="group" aria-label="已固定的筛选项"></div>
-        <button id="asset-filter-more-toggle" type="button" class="asset-filter-trigger" aria-controls="asset-filter-more-panel" aria-expanded="false" aria-label="管理筛选项" title="管理筛选项"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
+        <button id="asset-filter-more-toggle" type="button" class="asset-filter-trigger" aria-controls="asset-filter-more-panel" aria-expanded="false" aria-label="添加过滤" title="添加过滤"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
         <div class="view-controls">
           <nav id="main-nav" class="asset-view-navigation" aria-label="浏览资产">
             <button type="button" data-view="favorites" class="nav-item" title="我的收藏" aria-label="我的收藏"><svg aria-hidden="true"><use href="#i-star"/></svg><span class="folder-label">我的收藏</span><span id="fav-count" class="nav-count">0</span></button>
             <button type="button" data-view="recent" class="nav-item" title="最近入库" aria-label="最近入库"><svg aria-hidden="true"><use href="#i-clock"/></svg><span class="folder-label">最近入库</span></button>
             <button type="button" data-view="jobs" class="nav-item" title="导入任务" aria-label="导入任务"><svg aria-hidden="true"><use href="#i-download"/></svg><span class="folder-label">导入任务</span><span id="job-count" class="nav-count"></span></button>
           </nav>
-          <button id="asset-favorites-toggle" type="button" class="asset-filter-trigger asset-toolbar-toggle" data-asset-toolbar-panel aria-controls="asset-favorites-panel" aria-expanded="false" aria-label="收藏筛选" title="收藏筛选" hidden><svg aria-hidden="true"><use href="#i-tag"/></svg><span>收藏筛选</span></button>
           <button id="asset-search-toggle" type="button" class="icon-button asset-search-toggle" aria-controls="asset-search-field" aria-expanded="false" aria-label="搜索资产" title="搜索资产 (/)"><svg aria-hidden="true"><use href="#i-search"/></svg></button>
           <button id="asset-display-toggle" type="button" class="asset-filter-trigger asset-toolbar-toggle" data-asset-toolbar-panel aria-controls="asset-display-panel" aria-expanded="false" aria-label="视图设置" title="视图设置"><svg aria-hidden="true"><use href="#i-grid"/></svg><span>视图</span></button>
         </div>
@@ -302,12 +301,6 @@
           <option value="location">当前目录</option><option value="library">当前库</option><option value="workspace">全部库</option>
         </select>
         <input id="search" type="search" placeholder="搜索名称、路径、标签或备注…" aria-label="搜索资产"><kbd>/</kbd>
-      </div>
-      <div id="asset-favorites-panel" class="asset-filter-panel asset-toolbar-panel" aria-label="收藏筛选" data-pane-transient hidden>
-        <div id="favorite-expiry-tools" role="group" aria-label="收藏项目与历史" hidden>
-          <label class="asset-toolbar-field"><span>收藏项目</span><select aria-label="按项目筛选收藏"><option value="">全部项目</option></select></label>
-          <button class="asset-toolbar-menu-item" data-asset-toolbar-action aria-pressed="false" type="button">到期历史</button>
-        </div>
       </div>
       <div id="asset-display-panel" class="asset-filter-panel asset-toolbar-panel" aria-label="视图设置" data-pane-transient hidden>
         <div class="asset-toolbar-view-modes" role="group" aria-label="资产显示方式">
@@ -346,6 +339,11 @@
         <select id="workflow-filter" aria-label="筛选工作流状态"><option value="">所有状态</option><option value="unset">未设置状态</option><option value="wip">制作中</option><option value="review">待审核</option><option value="approved">已审核</option><option value="archived">已归档</option></select>
       </div>
       <div id="asset-filter-more-panel" class="asset-filter-panel" aria-label="管理筛选项" hidden>
+      <div id="favorite-expiry-tools" role="group" aria-labelledby="favorite-filter-heading" hidden>
+        <strong id="favorite-filter-heading">收藏筛选</strong>
+        <label class="asset-toolbar-field"><span>收藏项目</span><select aria-label="按项目筛选收藏"><option value="">全部项目</option></select></label>
+        <button class="asset-filter-option" aria-pressed="false" type="button">到期历史</button>
+      </div>
       <section class="asset-quick-filters" aria-label="快筛设置">
       <div id="quick-filter-group" role="group" aria-label="资产属性" hidden>
         <button type="button" class="asset-quick-toggle" data-quick-filter="favorite" aria-pressed="false"><svg aria-hidden="true"><use href="#i-star"/></svg>收藏 <span data-filter-count>0</span></button>
@@ -748,6 +746,7 @@
     <ul class="modal-description" data-c4d-send-skipped aria-label="将跳过的文件" hidden></ul>
     <p class="modal-description" data-c4d-send-status role="status"></p>
     <div class="modal-footer">
+      <button type="button" id="explorer-c4d-max-preferences" class="button subtle" hidden>MAX 导入偏好…</button>
       <button type="button" class="button subtle" data-c4d-send-cancel>取消</button>
       <button type="submit" class="button primary" data-c4d-send-confirm>发送</button>
     </div>
@@ -1374,7 +1373,7 @@
       <button id="nexus-install-now" type="button" class="button primary" hidden>立即安装并重启</button>
     </div>
   </section>
-  <button id="about-release-notes" type="button" class="button subtle about-release-notes" aria-haspopup="dialog" aria-controls="nexus-release-notes" hidden>更新日志</button>
+  <button id="about-release-notes" type="button" class="button subtle about-release-notes" aria-haspopup="dialog" aria-controls="nexus-release-notes">更新日志</button>
   <button type="button" class="button subtle about-release-notes" data-workspace-guide aria-haspopup="dialog" aria-controls="workspace-guide-dialog">使用指南</button>
 </dialog>
 <dialog id="workspace-guide-dialog" class="modal workspace-guide-dialog" aria-labelledby="workspace-guide-title">
@@ -1405,6 +1404,8 @@
     </div>
     <p class="nexus-release-version" data-release-version></p>
     <ul class="nexus-release-list"></ul>
+    <p class="muted" data-release-notes-empty hidden>本机暂无此版本的更新摘要。</p>
+    <a data-release-notes-link class="text-button nexus-release-history" href="https://github.com/Jugui-Lin/nexus-assets/releases" target="_blank" rel="noopener noreferrer">在 GitHub 查看完整日志</a>
     <div class="modal-footer"><button type="submit" class="button primary" autofocus>完成</button></div>
   </form>
 </dialog>
@@ -1426,6 +1427,20 @@
     <div id="c4d-drop-blender-note" class="c4d-drop-bridge-note" hidden>
       <p>直接解析 MAX 需要在运行 Cinema 4D 的电脑上安装 Blender 4.2 或更新版本。</p>
       <a id="c4d-drop-blender-download" class="text-button" href="https://www.blender.org/releases/4-5/" target="_blank" rel="noopener noreferrer">下载 Blender 4.5 LTS</a>
+    </div>
+    <div id="c4d-drop-max-material-fields" hidden>
+      <div class="c4d-drop-max-material-row">
+        <label class="field-label" id="c4d-drop-max-material-field" hidden>MAX 材质
+          <select id="c4d-drop-max-material-renderer" class="text-field" aria-describedby="c4d-drop-max-material-note">
+            <option value="">使用已保存设置</option>
+            <option value="octane">Octane</option>
+            <option value="standard">Standard / Physical</option>
+            <option value="auto">按场景使用 Octane 或标准材质</option>
+          </select>
+        </label>
+        <button type="button" id="c4d-drop-max-preferences" class="button subtle" hidden>MAX 导入偏好…</button>
+      </div>
+      <p id="c4d-drop-max-material-note" class="modal-description" hidden></p>
     </div>
     <fieldset id="c4d-drop-scene-fields" class="smart-import-section" hidden>
       <legend>导入内容</legend>
@@ -1451,7 +1466,7 @@
       </label>
       <p id="c4d-drop-octane-preview-note" class="modal-description" hidden></p>
     </fieldset>
-    <p id="c4d-drop-restricted-note" class="modal-description" hidden>智能导入会自动查找模型附近的贴图，并生成标准材质。</p>
+    <p id="c4d-drop-restricted-note" class="modal-description" hidden>FBX 和 OBJ 智能导入会自动查找模型附近的贴图，并生成标准材质。</p>
     <div id="c4d-drop-bridge-note" class="c4d-drop-bridge-note" hidden>
       <p>当前 Cinema 4D 实例会按默认设置导入对象和材质。</p>
       <button id="c4d-drop-bridge-update" type="button" class="button subtle">打开 DCC 连接中心</button>
@@ -1512,6 +1527,13 @@
           <option value="application">调用 3ds Max 转换后导入</option>
           <option value="direct">直接解析 MAX（通过 Blender）</option>
         </select>
+        <label class="field-label" for="c4d-import-max-material-renderer">导入 Cinema 4D 时的默认材质</label>
+        <select id="c4d-import-max-material-renderer" class="text-field" aria-describedby="c4d-import-max-material-help">
+          <option value="octane">Octane</option>
+          <option value="standard">Standard / Physical</option>
+          <option value="auto">按场景使用 Octane 或标准材质</option>
+        </select>
+        <p id="c4d-import-max-material-help">此设置适用于 MAX。目标实例缺少 Octane 时会生成标准材质。</p>
         <label class="field-label" for="c4d-import-max-batch-executable">3ds Max Batch 可执行文件</label>
         <div class="c4d-import-path-row">
           <input id="c4d-import-max-batch-executable" class="text-field" type="text" maxlength="4096" spellcheck="false" autocomplete="off" placeholder="留空自动查找 3dsmaxbatch.exe">
@@ -1727,14 +1749,16 @@
     <div id="team-library-list"></div>
     <section class="team-form team-thumbnail-storage" aria-labelledby="team-thumbnail-storage-title">
       <h3 id="team-thumbnail-storage-title">团队共享缩略图缓存</h3>
-      <p class="team-storage-help">此设置保存在本机。成员选择同一个可写 NAS 目录即可共用缓存。未挂载素材目录时也可浏览已缓存的缩略图。</p>
+      <p id="team-thumbnail-cache-help" class="team-storage-help"></p>
       <div class="team-thumbnail-storage-row">
         <p id="team-thumbnail-cache-path">默认缓存位置</p>
         <div class="team-library-actions">
           <button id="team-thumbnail-cache-pick" type="button" class="button subtle">选择文件夹…</button>
           <button id="team-thumbnail-cache-reset" type="button" class="button subtle hidden">恢复默认</button>
+          <button id="team-thumbnail-cache-trust" type="button" class="button subtle hidden">允许此共享路径</button>
         </div>
       </div>
+      <p id="team-thumbnail-cache-mode" class="team-storage-help"></p>
       <p id="team-thumbnail-cache-status" class="team-dialog-status" role="status"></p>
     </section>
     <form id="team-publish-form" class="team-form hidden">

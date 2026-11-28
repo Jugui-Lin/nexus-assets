@@ -120,6 +120,7 @@ class SmartImportTests(TestCase):
             convert_octane=lambda *args: self.converted.append(args),
             convert_octane_lights=lambda *_: "",
             wants_octane=lambda _c4d, _doc, renderer: renderer == "octane",
+            available_renderers=lambda _c4d: ["standard", "octane"],
         )
 
     def get_settings(self, _message, data):
@@ -303,6 +304,7 @@ class SmartImportTests(TestCase):
                 ),
                 texture_warning=lambda _output: "",
                 scene_object_warning=lambda *_: "",
+                render_settings=lambda _output: {},
                 texture_bindings=lambda filename, original: bindings if (filename, original) == (output, str(source)) else {},
             )
             importer.conversion = SimpleNamespace(
@@ -311,7 +313,8 @@ class SmartImportTests(TestCase):
                 ),
                 max_export_warning=lambda _output: "",
             )
-            preferences = {"maxMode": "application", "blenderExecutable": "blender", "maxBatchExecutable": "3dsmaxbatch"}
+            preferences = {"maxMode": "application", "maxMaterialRenderer": "standard",
+                           "blenderExecutable": "blender", "maxBatchExecutable": "3dsmaxbatch"}
             snapshot = {"workspaceKey": None, "settings": preferences}
             importer._job_runtime = lambda job: (root, None, job["c4dPreferences"]["settings"])
             keep = Node("material", self.doc.materials)
@@ -347,7 +350,24 @@ class SmartImportTests(TestCase):
                     self.assertEqual(self.filter_arguments[-1][0], output)
             with self.assertRaisesRegex(ValueError, "MAX 转换模式无效"):
                 importer._standard_scene_job({"id": "invalid", "path": str(source), "options": {"max_mode": "burn"}})
-        self.assertEqual(self.converted, [])
+            self.assertEqual(self.converted, [])
+            for explicit, saved, expected in ((None, None, "octane"), ("standard", "octane", "standard"),
+                                              ("auto", "octane", "auto")):
+                with self.subTest(explicit=explicit, saved=saved):
+                    if saved is None:
+                        preferences.pop("maxMaterialRenderer", None)
+                    else:
+                        preferences["maxMaterialRenderer"] = saved
+                    options = {"max_material_renderer": explicit} if explicit else {}
+                    job = importer._standard_scene_job({"id": "max", "path": str(source), "options": options,
+                                                        "c4dPreferences": snapshot})
+                    importer._prepare(job, 1)
+                    _generation, _job_id, plan, error = importer.results.get_nowait()
+                    self.assertIsNone(error)
+                    self.assertEqual(plan["renderer"], expected)
+                    importer._apply(self.doc, plan)
+            self.assertEqual(len(self.converted), 1)
+            self.assertEqual(self.converted[0][-1]["renderer"], "octane")
 
     def test_map_linking_is_limited_to_new_unassigned_geometry(self):
         self.initial_material = False
@@ -439,6 +459,26 @@ class SmartImportTests(TestCase):
         self.apply(renderer="standard", maps={})
         self.assertEqual(self.converted, [])
 
+    def test_max_keeps_linked_standard_materials_without_octane(self):
+        original = Node("standard", self.doc.materials)
+        linked = []
+        importer = self.importer
+        importer.materials.available_renderers = lambda _c4d: ["standard"]
+        importer.materials.link_standard_scene_textures = lambda *args: linked.append(args[2])
+        plan = {"path": "converted.fbx", "kind": "scene", "max_material_import": True, "renderer": "octane",
+                "source_path": "original.max", "restore_scene_textures": True}
+        message = importer._apply(self.doc, plan)
+        self.assertIn("未加载 Octane", message)
+        self.assertEqual(linked, [self.doc.materials[1:]])
+        self.assertNotIn(original, linked[0])
+        self.assertEqual(self.converted, [])
+        export_notes = importer._prepare_export_materials(self.doc, plan)
+        self.assertIn("未加载 Octane", export_notes[-1])
+        self.assertEqual(self.converted, [])
+        importer.materials.available_renderers = lambda _c4d: ["standard", "octane"]
+        self.assertEqual(importer._prepare_export_materials(self.doc, plan), [])
+        self.assertEqual(self.converted[0][2], self.doc.materials)
+
     def test_empty_merge_reports_failure_and_restores_the_selection(self):
         original = self.doc.selection.copy()
         self.importer.c4d.documents.MergeDocument = lambda *_: True
@@ -481,6 +521,8 @@ class SmartImportTests(TestCase):
         self.assertEqual((generation, job_id, failure), (1, "drop", None))
         self.assertEqual(plan["path"], "prepared.fbx")
         self.assertEqual(plan["source_path"], "source.MAX")
+        self.assertEqual(plan["renderer"], "octane")
+        self.assertTrue(plan["max_material_import"])
         self.assertEqual(plan["warnings"], [
             "MAX 转出贴图连接 0 项，有 1 项贴图未找到",
             "MAX 直接解析：2 盏灯使用通用光源",
@@ -493,6 +535,49 @@ class SmartImportTests(TestCase):
         self.assertEqual(requests, [("source.MAX", "direct")])
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "preparing"})
         self.assertEqual(importer.import_progress.get_nowait(), {"jobId": "drop", "stage": "direct-max"})
+
+    def test_saved_max_project_applies_renderer_preference_before_packaging(self):
+        importer = self.importer
+        importer.results = Queue()
+        importer.import_progress = Queue()
+        importer.generation = 1
+        importer.preparation = SimpleNamespace(
+            prepare=lambda _host, source, *_: {"kind": "scene", "path": source},
+            collect_baked_scene_maps=lambda *_: {},
+        )
+        importer.max_decode = SimpleNamespace(texture_warning=lambda _: "", scene_object_warning=lambda *_: "",
+                                             render_settings=lambda _: {}, texture_bindings=lambda *_: {})
+        importer.conversion = SimpleNamespace(max_export_warning=lambda _: "")
+        importer.materials.link_standard_scene_textures = lambda *_: ""
+        detached = Document()
+        Node("material", detached.materials)
+        conversions = []
+        export_calls = []
+
+        def convert(_source, mode, *_):
+            conversions.append(mode)
+            return "converted.fbx"
+
+        def export(_c4d, _fbx, _destination, _name, *, maps, prepare_materials):
+            export_calls.append(prepare_materials(detached))
+            return {"textureCount": 0, "warnings": [], "missingTextures": [], "unsupportedTextures": [],
+                    "projectPath": "project.c4d"}
+
+        importer._convert = convert
+        importer.project_export = SimpleNamespace(export_project=export)
+        for mode, renderer in (("direct", "octane"), ("application", "standard")):
+            with self.subTest(mode=mode, renderer=renderer):
+                importer._job_runtime = lambda _: (Path("cache"), None, {"maxMaterialRenderer": renderer})
+                importer._prepare({"id": "save", "path": "source.MAX", "options": {"renderer": "redshift"},
+                                   "projectExport": {"destination": "output", "mode": mode}}, 1)
+                result = importer.poll()
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["projectPath"], "project.c4d")
+                self.assertEqual(conversions[-1], mode)
+        self.assertEqual(export_calls, [[], []])
+        self.assertEqual(len(self.converted), 1)
+        self.assertIs(self.converted[0][1], detached)
+        self.assertEqual(self.converted[0][-1]["renderer"], "octane")
 
     def test_status_feedback_tracks_only_the_active_job_and_clears_when_cancelled(self):
         importer = self.importer

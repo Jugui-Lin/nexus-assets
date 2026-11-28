@@ -83,6 +83,7 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
   const pinned = get('asset-pinned-filters');
   const moreTrigger = get('asset-filter-more-toggle');
   const morePanel = get('asset-filter-more-panel');
+  const favoriteFilters = get('favorite-expiry-tools');
   const activeFilters = get('active-filter');
   const chips = create('span', 'asset-active-filter-list');
   const clearFilters = create('button', 'text-button asset-active-filter-clear', '清除筛选');
@@ -119,7 +120,8 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
   const menuSearch = searchField('asset-filter-menu-search', '搜索筛选项', '搜索筛选项…');
   const menuEmpty = create('p', 'asset-filter-empty', '没有匹配的筛选项');
   menuRows.append(menuEmpty);
-  morePanel.prepend(menuSearch.field, menuRows);
+  morePanel.prepend(menuSearch.field);
+  favoriteFilters.after(menuRows);
 
   let active;
   let drag;
@@ -358,7 +360,9 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
 
   function renderMenu() {
     const query = menuSearch.input.value.trim().toLowerCase();
-    let matches = 0;
+    favoriteFilters.hidden = getState().view !== 'favorites' ||
+      Boolean(query && !'收藏筛选 收藏项目 到期历史'.includes(query));
+    let matches = Number(!favoriteFilters.hidden);
     for (const [key, definition] of definitions) {
       const {row, pin} = definition;
       row.hidden = Boolean(query && !definition.label.includes(query) && !key.includes(query));
@@ -382,8 +386,11 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
         definition.count.textContent = definition.quick.querySelector('[data-filter-count]').textContent;
       }
     }
-    moreTrigger.classList.toggle('is-active',
+    const favoriteFilter = state.view === 'favorites' ? favoriteFilters.dataset.activeFilter : '';
+    moreTrigger.title = favoriteFilter ? '添加过滤 · 收藏筛选 · ' + favoriteFilter : '添加过滤';
+    moreTrigger.classList.toggle('is-active', Boolean(favoriteFilter) ||
       [...definitions].some(([key, definition]) => !pins.has(key) && definition.enabled(state)));
+    if (active?.panel === morePanel) renderMenu();
     definitions.get(active?.key)?.refresh?.();
   }
 

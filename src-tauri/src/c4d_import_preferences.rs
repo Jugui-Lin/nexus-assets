@@ -24,6 +24,15 @@ pub(crate) enum MaxMode {
     Application,
 }
 
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum MaxMaterialRenderer {
+    #[default]
+    Octane,
+    Standard,
+    Auto,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Preferences {
@@ -33,6 +42,7 @@ pub(crate) struct Preferences {
     blender_executable: Option<String>,
     max_batch_executable: Option<String>,
     max_mode: MaxMode,
+    max_material_renderer: MaxMaterialRenderer,
 }
 
 impl Default for Preferences {
@@ -44,6 +54,7 @@ impl Default for Preferences {
             blender_executable: None,
             max_batch_executable: None,
             max_mode: MaxMode::default(),
+            max_material_renderer: MaxMaterialRenderer::default(),
         }
     }
 }
@@ -293,10 +304,14 @@ mod tests {
         assert_eq!(preferences.cache_reminder_gb, 1.0);
         assert!(preferences.cleanup_on_startup);
         assert!(matches!(preferences.max_mode, MaxMode::Direct));
+        assert!(matches!(preferences.max_material_renderer, MaxMaterialRenderer::Octane));
 
         preferences.cache_reminder_gb = 2.5;
+        preferences.max_material_renderer = MaxMaterialRenderer::Standard;
         let saved = write(root.path(), None, preferences).unwrap();
         assert_eq!(saved["cacheReminderGb"], json!(2.5));
+        assert_eq!(saved["maxMaterialRenderer"], "standard");
+        assert_eq!(job_preferences(root.path(), "personal:personal").unwrap()["settings"]["maxMaterialRenderer"], "standard");
         assert_eq!(read(root.path()).unwrap().cache_reminder_gb, 2.5);
 
         let invalid = Preferences {

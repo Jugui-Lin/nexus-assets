@@ -99,7 +99,7 @@ def _inside_package(asset, stage):
     return any(path.is_file() and path.resolve().is_relative_to(stage) for path in candidates)
 
 
-def export_project(c4d, fbx_path, output_root, scene_name, *, maps=None):
+def export_project(c4d, fbx_path, output_root, scene_name, *, maps=None, prepare_materials=None):
     """Save an FBX and its reachable media as a portable .c4d package.
 
     Call on the Cinema 4D main thread with an already converted FBX in the
@@ -126,6 +126,7 @@ def export_project(c4d, fbx_path, output_root, scene_name, *, maps=None):
         stage.mkdir()
         doc.SetDocumentName(scene_file)
         _relink_known_bitmaps(c4d, _asset_list(c4d, doc), maps)
+        warnings = prepare_materials(doc) if prepare_materials is not None else []
         collected, missing = [], []
         flags = (c4d.SAVEPROJECT_ASSETS | c4d.SAVEPROJECT_SCENEFILE
                  | c4d.SAVEPROJECT_USEDOCUMENTNAMEASFILENAME
@@ -152,7 +153,6 @@ def export_project(c4d, fbx_path, output_root, scene_name, *, maps=None):
         del references, verify
         tex = stage / "tex"
         texture_count = sum(file.is_file() for file in tex.rglob("*"))
-        warnings = []
         if missing_names:
             warnings.append(f"{len(missing_names)} 项贴图缺失")
         if external:

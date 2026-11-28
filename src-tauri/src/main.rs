@@ -610,6 +610,8 @@ struct SmartImportOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_mode: Option<c4d_import_preferences::MaxMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_material_renderer: Option<c4d_import_preferences::MaxMaterialRenderer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     scene_import: Option<C4dSceneImportOptions>,
 }
 
@@ -631,7 +633,7 @@ struct C4dSceneImportOptions {
 
 impl SmartImportOptions {
     fn scene_overrides(&self) -> bool {
-        self.scene_import.is_some() || self.max_mode.is_some()
+        self.scene_import.is_some() || self.max_mode.is_some() || self.max_material_renderer.is_some()
     }
 
     fn direct_max_textures(&self, extension: &str, saved_mode: Option<&str>) -> bool {
@@ -737,6 +739,12 @@ async fn queue_import(
     let mut smart_options = smart_options;
     if let Some(options) = &mut smart_options {
         options.validate()?;
+        if options.max_material_renderer.is_some()
+            && (host != "c4d" || !a.ext.eq_ignore_ascii_case("max")
+                || session["maxMaterialPreferences"] != true || project_export.is_some())
+        {
+            return Err("MAX 专用材质设置需要支持此功能的 Cinema 4D 智能导入桥接。".into());
+        }
         if options.pbr_material_set.is_some() && (options.kind != "pbr"
             || host != "c4d" || session["pbrMaterialSets"] != true || project_export.is_some())
         {
@@ -896,6 +904,7 @@ async fn register(
     let max_smart_import = full_smart_import || smart_formats.as_ref().is_some_and(|formats| formats.contains(&"max"));
     let scoped_c4d_preferences = max_smart_import && v["scopedC4dPreferences"] == true;
     let max_texture_bindings = max_smart_import && v["maxTextureBindings"] == true;
+    let max_material_preferences = scoped_c4d_preferences && v["maxMaterialPreferences"] == true;
     let max_import = dcc == "blender" && v["maxImport"] == true;
     let archive_textures = scene_import && v["archiveTextures"] == true;
     let pbr_material_sets = full_smart_import && v["pbrMaterialSets"] == true;
@@ -911,6 +920,8 @@ async fn register(
         "sceneImportOptions": scene_import,
         "scopedC4dPreferences": scoped_c4d_preferences,
         "maxTextureBindings": max_texture_bindings,
+        "maxMaterialPreferences": max_material_preferences,
+        "maxOctaneMaterials": max_material_preferences && v["maxOctaneMaterials"] == true,
         "archiveTextures": archive_textures,
         "pbrMaterialSets": pbr_material_sets,
         "label": v["label"].as_str().unwrap_or(dcc).chars().take(100).collect::<String>(),
@@ -1487,6 +1498,7 @@ fn main() {
             team_desktop::team_set_folder_visibility,
             team_desktop::team_set_mount,
             team_desktop::team_set_thumbnail_cache_root,
+            team_desktop::team_trust_thumbnail_cache_root,
             team_desktop::team_link_folders,
             team_desktop::classify_team_drop,
             team_desktop::team_import_paths,
@@ -1601,6 +1613,7 @@ mod bridge_tests {
                 "dcc":"c4d", "pid":2, "smartImport":true, "smartImportFormats":["OBJ","FBX","obj"],
                 "placement":true, "projectExport":true, "sceneImportOptions":true,
                 "maxTextureBindings":true, "archiveTextures":true, "pbrMaterialSets":true,
+                "maxMaterialPreferences":true, "maxOctaneMaterials":true,
             });
             let registered = register(
                 HttpState(state.clone()),
@@ -1625,7 +1638,7 @@ mod bridge_tests {
                 }
                 for capability in [
                     "placement", "projectExport", "sceneImportOptions", "maxTextureBindings",
-                    "archiveTextures", "pbrMaterialSets",
+                    "archiveTextures", "pbrMaterialSets", "maxMaterialPreferences", "maxOctaneMaterials",
                 ] {
                     assert_eq!(session[capability], false);
                 }
@@ -1651,6 +1664,8 @@ mod bridge_tests {
                 assert_eq!(session["smartImportFormats"], json!(["fbx", "max", "obj"]));
                 assert_eq!(session["maxTextureBindings"], true);
                 assert_eq!(session["scopedC4dPreferences"], true);
+                assert_eq!(session["maxMaterialPreferences"], true);
+                assert_eq!(session["maxOctaneMaterials"], true);
                 assert_eq!(session["sceneImportOptions"], false);
                 assert!(session_supports_smart_import(session, "MAX"));
                 assert!(!session_supports_asset(session, "max"));

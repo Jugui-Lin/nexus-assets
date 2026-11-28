@@ -1,10 +1,11 @@
-export function initExplorerC4dSend(dialog) {
+export function initExplorerC4dSend(dialog, {openMaxPreferences} = {}) {
   const form = dialog.querySelector('form');
   const target = form.querySelector('select');
   const summary = form.querySelector('[data-c4d-send-summary]');
   const skipped = form.querySelector('[data-c4d-send-skipped]');
   const status = form.querySelector('[data-c4d-send-status]');
   const cancel = form.querySelector('[data-c4d-send-cancel]');
+  const maxPreferences = form.querySelector('#explorer-c4d-max-preferences');
   const confirm = form.querySelector('[data-c4d-send-confirm]');
   let current;
 
@@ -15,6 +16,8 @@ export function initExplorerC4dSend(dialog) {
     current.plan = {session,ready};
     target.disabled = current.pending || !current.sessions.length;
     confirm.disabled = current.pending || !ready.length;
+    maxPreferences.hidden = !current.hasMax || !openMaxPreferences;
+    maxPreferences.disabled = current.pending;
     const count = ready.length;
     summary.textContent = count + ' 项可以发送' + (excluded.length ? ' · 将跳过 ' + excluded.length + ' 项' : '');
     const rows = excluded.slice(0, 5).map(({name,reason}) => `${name} · ${reason}`);
@@ -39,6 +42,9 @@ export function initExplorerC4dSend(dialog) {
     status.textContent = '';
   });
   cancel.addEventListener('click', () => finish(null));
+  maxPreferences.addEventListener('click', () => {
+    if (current?.hasMax && !current.pending) openMaxPreferences?.();
+  });
   dialog.addEventListener('close', () => { if (!dialog.open) finish(null); });
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -60,16 +66,17 @@ export function initExplorerC4dSend(dialog) {
     }
   });
 
-  return ({sessions,inspect,prepare,empty}) => {
+  return ({sessions,inspect,prepare,empty,hasMax = false}) => {
     if (current || dialog.open) return null;
     target.replaceChildren(...sessions.map(({id,label}) => new Option(label,id)));
     if (!sessions.length) target.add(new Option('暂无可接收的 Cinema 4D 实例',''));
     status.textContent = empty;
     return new Promise(resolve => {
-      current = {sessions,inspect,prepare,resolve,pending:false};
+      current = {sessions,inspect,prepare,resolve,hasMax,pending:false};
       review();
       dialog.showModal();
-      (target.disabled ? cancel : target).focus({preventScroll:true});
+      const focus = target.disabled ? (maxPreferences.hidden ? cancel : maxPreferences) : target;
+      focus.focus({preventScroll:true});
     });
   };
 }

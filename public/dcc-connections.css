@@ -81,6 +81,14 @@
   color: var(--muted);
 }
 .c4d-drop-bridge-note p { margin: 0; }
+.c4d-drop-max-material-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 6px 10px;
+}
+.c4d-drop-max-material-row .field-label { flex: 1 1 200px; margin: 5px 0 0; }
+.c4d-drop-max-material-row button { flex: none; }
 .c4d-drop-activity {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

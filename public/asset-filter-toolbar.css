@@ -180,11 +180,17 @@
   border-color: var(--line);
 }
 .asset-toolbar-operation-list { width: min(170px, 100%); }
-#asset-favorites-panel > #favorite-expiry-tools:not([hidden]) {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
+#favorite-expiry-tools:not([hidden]) {
+  display: grid;
+  flex-shrink: 0;
   gap: 2px;
+  padding: 5px;
+  border-block-start: 1px solid #374447;
+}
+#favorite-filter-heading {
+  padding: 4px 5px 2px;
+  font-size: 12px;
+  font-weight: 600;
 }
 .asset-toolbar-field {
   display: grid;
@@ -273,6 +279,7 @@
   padding: 5px;
 }
 .asset-filter-search + .asset-filter-options,
+#favorite-expiry-tools + .asset-filter-options,
 .asset-filter-panel-actions { border-top: 1px solid #374447; }
 
 .asset-filter-option,

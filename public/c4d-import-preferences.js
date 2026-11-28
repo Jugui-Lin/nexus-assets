@@ -4,6 +4,9 @@ const validReminderGb = value => Number.isFinite(value) && value > 0 && value <=
 const reminderGb = value => validReminderGb(value) ? value : defaultCacheReminderGb;
 const cacheReminderKey = (workspace, directory, gb) => JSON.stringify([workspace, directory || '', gb]);
 
+export const maxMaterialRendererLabels = {octane:'Octane', standard:'Standard / Physical', auto:'按场景使用 Octane 或标准材质'};
+const maxMaterialRenderer = value => Object.hasOwn(maxMaterialRendererLabels, value) ? value : 'octane';
+
 function formatCacheBytes(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   let unit = 0;
@@ -35,6 +38,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
   const blender = get('c4d-import-blender-executable');
   const max = get('c4d-import-max-batch-executable');
   const mode = get('c4d-import-max-mode');
+  const materialRenderer = get('c4d-import-max-material-renderer');
   const pickers = {directory, blender, max};
   const sectionTitles = {general:'Cinema 4D 导入选项', max:'3ds Max 转换设置', blender:'Blender 转换设置', pbr:'PBR 贴图设置'};
   const cleanupWorkspaces = new Set();
@@ -87,6 +91,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
       blenderExecutable:blender.value.trim() || null,
       maxBatchExecutable:max.value.trim() || null,
       maxMode:mode.value,
+      maxMaterialRenderer:materialRenderer.value,
     };
   }
 
@@ -97,6 +102,7 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
     blender.value = preferences?.blenderExecutable || '';
     max.value = preferences?.maxBatchExecutable || '';
     mode.value = preferences?.maxMode === 'direct' ? 'direct' : 'application';
+    materialRenderer.value = maxMaterialRenderer(preferences?.maxMaterialRenderer);
     effective.textContent = preferences?.effectiveDirectory ? `已保存的实际目录 · ${preferences.effectiveDirectory}` : '';
   }
 
@@ -266,6 +272,11 @@ export function initC4dImportPreferences({api, native, scope = () => 'personal:p
     open,
     checkCacheSize,
     showSection,
+    async readMaxMaterialRenderer() {
+      const workspace = scope();
+      const preferences = await api('get_c4d_import_preferences', {workspace});
+      return workspace === scope() ? maxMaterialRenderer(preferences?.maxMaterialRenderer) : null;
+    },
     async save() {
       if (cleanupWorkspaces.has(openedWorkspace)) throw Error('正在清理导入缓存，请稍候。');
       if (busy) throw Error('导入设置正在读取或选择，请稍候。');

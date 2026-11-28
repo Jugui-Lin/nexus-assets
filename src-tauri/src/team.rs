@@ -100,6 +100,15 @@ pub struct Snapshot {
     pub folder_visibility: bool,
     #[serde(default)]
     pub member_folder_visibility: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_cache: Option<TeamThumbnailCacheConfig>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamThumbnailCacheConfig {
+    pub root: Option<String>,
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +214,48 @@ pub fn relative_path(path: &str) -> Option<PathBuf> {
         result.push(part);
     }
     Some(result)
+}
+
+pub const MAX_UNC_LENGTH: usize = 4096;
+
+pub fn normalize_unc_directory(raw: &str) -> Option<String> {
+    if raw.len() > MAX_UNC_LENGTH {
+        return None;
+    }
+    let path = raw.replace('/', "\\");
+    let rest = if path
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("\\\\?\\UNC\\"))
+    {
+        &path[8..]
+    } else {
+        path.strip_prefix("\\\\")?
+    };
+    let (host, tail) = rest.split_once('\\')?;
+    if host.is_empty()
+        || host == "."
+        || host == ".."
+        || host.len() > 253
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return None;
+    }
+    let logical = tail.trim_end_matches('\\').replace('\\', "/");
+    relative_path(&logical)?;
+    let share = logical.split('/').next()?;
+    let drive_share =
+        share.len() == 2 && share.as_bytes()[0].is_ascii_alphabetic() && share.ends_with('$');
+    if logical.split('/').any(|part| part.starts_with('.'))
+        || drive_share
+        || ["ADMIN$", "IPC$", "PRINT$"]
+            .iter()
+            .any(|name| share.eq_ignore_ascii_case(name))
+    {
+        return None;
+    }
+    Some(format!("\\\\{host}\\{}", logical.replace('/', "\\")))
 }
 
 pub fn mapped_file(root: &Path, relative: &str) -> Result<PathBuf, String> {

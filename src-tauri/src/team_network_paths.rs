@@ -1,8 +1,6 @@
-use nexus_core::team::relative_path;
+use nexus_core::team::{normalize_unc_directory, MAX_UNC_LENGTH};
 use reqwest::Url;
 use std::path::Path;
-
-const MAX_UNC_LENGTH: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub(super) struct UncDirectory {
@@ -12,46 +10,11 @@ pub(super) struct UncDirectory {
 
 impl UncDirectory {
     pub(super) fn parse(raw: &str) -> Option<Self> {
-        if raw.len() > MAX_UNC_LENGTH {
-            return None;
-        }
-        let path = raw.replace('/', "\\");
-        let rest = if path
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("\\\\?\\UNC\\"))
-        {
-            &path[8..]
-        } else {
-            path.strip_prefix("\\\\")?
-        };
-        let (host, tail) = rest.split_once('\\')?;
-        if host.is_empty()
-            || host == "."
-            || host == ".."
-            || host.len() > 253
-            || !host
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        {
-            return None;
-        }
-        let logical = tail.trim_end_matches('\\').replace('\\', "/");
-        relative_path(&logical)?;
-        let components = logical.split('/').map(str::to_owned).collect::<Vec<_>>();
-        let share = components.first()?;
-        let drive_share =
-            share.len() == 2 && share.as_bytes()[0].is_ascii_alphabetic() && share.ends_with('$');
-        if components.iter().any(|part| part.starts_with('.'))
-            || drive_share
-            || ["ADMIN$", "IPC$", "PRINT$"]
-                .iter()
-                .any(|name| share.eq_ignore_ascii_case(name))
-        {
-            return None;
-        }
+        let path = normalize_unc_directory(raw)?;
+        let (host, tail) = path[2..].split_once('\\')?;
         Some(Self {
             host: host.to_owned(),
-            components,
+            components: tail.split('\\').map(str::to_owned).collect(),
         })
     }
 

@@ -283,6 +283,10 @@ fn open_store(dir: &FilePath) -> Result<Connection, Box<dyn std::error::Error>> 
              singleton INTEGER PRIMARY KEY CHECK(singleton=1),
              id TEXT NOT NULL, name TEXT NOT NULL, revision INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS team_thumbnail_cache (
+             singleton INTEGER PRIMARY KEY REFERENCES team(singleton) ON DELETE CASCADE,
+             root TEXT, revision INTEGER NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS members (
              id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
              digest BLOB NOT NULL UNIQUE, enabled INTEGER NOT NULL
@@ -519,6 +523,7 @@ async fn snapshot(
             catalog,
             folder_visibility: true,
             member_folder_visibility: true,
+            thumbnail_cache: Some(thumbnail_cache_config(&tx)?),
         })
     })
     .await
@@ -1264,6 +1269,63 @@ async fn patch_team_name(
     Json(payload): Json<RenameTeam>,
 ) -> ApiResult<TeamNameUpdate> {
     with_member(store, headers, move |conn, member| rename_team(conn, &member, payload)).await
+}
+
+fn thumbnail_cache_config(conn: &Connection) -> Result<TeamThumbnailCacheConfig, ApiError> {
+    Ok(conn
+        .query_row("SELECT root, revision FROM team_thumbnail_cache WHERE singleton=1", [], |row| {
+            Ok(TeamThumbnailCacheConfig {root:row.get(0)?, revision:row.get(1)?})
+        })
+        .optional()
+        .map_err(db_error)?
+        .unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetThumbnailCache {
+    team_id: String,
+    root: Value,
+}
+
+async fn patch_thumbnail_cache(
+    State(store): State<Store>,
+    headers: HeaderMap,
+    Json(payload): Json<SetThumbnailCache>,
+) -> ApiResult<TeamThumbnailCacheConfig> {
+    with_member(store, headers, move |conn, member| {
+        if member.role != "admin" {
+            return Err(error(StatusCode::FORBIDDEN, "只有管理员可以设置团队共享缩略图缓存"));
+        }
+        let root = match payload.root {
+            Value::Null => None,
+            Value::String(path) => normalize_unc_directory(&path).map(Some).ok_or_else(|| {
+                error(StatusCode::BAD_REQUEST, "请选择有效的 UNC 网络共享目录")
+            })?,
+            _ => return Err(error(StatusCode::BAD_REQUEST, "请选择有效的 UNC 网络共享目录")),
+        };
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let team_id = tx.query_row("SELECT id FROM team WHERE singleton=1", [], |row| row.get::<_, String>(0))
+            .map_err(db_error)?;
+        if team_id != payload.team_id {
+            return Err(error(StatusCode::CONFLICT, "团队已切换，请重新打开工作空间"));
+        }
+        let current = thumbnail_cache_config(&tx)?;
+        if current.root == root {
+            return Ok(current);
+        }
+        let revision = current.revision + 1;
+        tx.execute(
+            "INSERT INTO team_thumbnail_cache (singleton, root, revision) VALUES (1,?1,?2)
+             ON CONFLICT(singleton) DO UPDATE SET root=excluded.root, revision=excluded.revision",
+            params![root, revision],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(TeamThumbnailCacheConfig {root, revision})
+    }).await
 }
 
 const AVATAR_EDGE: u32 = 96;
@@ -2041,6 +2103,7 @@ fn router(
             post(presence).layer(Extension(TeamPresence::default())),
         )
         .route("/v1/team/name", patch(patch_team_name).layer(DefaultBodyLimit::max(4 * 1024)))
+        .route("/v1/team/thumbnail-cache", patch(patch_thumbnail_cache).layer(DefaultBodyLimit::max(12 * 1024)))
         .route("/v1/catalog/{since}", get(snapshot))
         .merge(sources.routes(Arc::clone(&refresh)))
         .merge(baidu.routes())

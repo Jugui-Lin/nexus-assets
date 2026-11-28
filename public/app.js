@@ -303,7 +303,6 @@ const explorerFileDrop = nativeDragOut ? initExplorerFileDrop({
 const assetSearchInput = $('#search');
 const assetSearchToggle = $('#asset-search-toggle');
 const assetDisplayToggle = $('#asset-display-toggle');
-const assetFavoritesToggle = $('#asset-favorites-toggle');
 const assetSearchField = $('#asset-search-field');
 const assetSearchScope = $('#asset-search-scope');
 const assetSearchResultsScope = $('#asset-search-results-scope');
@@ -474,7 +473,8 @@ let assetModeHighlightTimer;
 let folderTrees = new Map();
 let markedAnchor = null;
 const team = { active: false, configured: false, info: null, revision: null, pending: null, epoch: 0,
-  fromLocalIndex: false, thumbnailCacheRoot: null,
+  fromLocalIndex: false, thumbnailCacheRoot: null, thumbnailCacheShared: false, thumbnailCacheNeedsTrust: false,
+  thumbnailCacheUnsupportedPlatform: false,
   catalog: null, allLibraries: [], removedFolders: [], sharedHiddenFolders: [], linkedFolders: [], folderVisibility: false,
   online: [], presencePending: null, presenceUnsupported: false, covers: new Map(), coversPending: null };
 let personalWorkspace = {id:'personal', name:'个人工作空间'};
@@ -559,6 +559,9 @@ function queueAsset(asset, session, scene = false, overrides = {}) {
   if (options && Array.isArray(session.smartImportFormats)) {
     options = {kind:'scene', renderer:'standard', lod:null, texture_resolution:null};
     if (asset.ext === 'max' && overrides.max_mode) options.max_mode = overrides.max_mode;
+    if (asset.ext === 'max' && session.maxMaterialPreferences === true && overrides.max_material_renderer) {
+      options.max_material_renderer = overrides.max_material_renderer;
+    }
   } else if (options && scene) {
     Object.assign(options, {kind:'scene', lod:null}, overrides);
   }
@@ -973,7 +976,7 @@ function renderAssets(){
   let navigationFocus;
   if (assetViewNavigation.parentElement !== navigationParent) {
     if (assetViewNavigation.contains(document.activeElement)) navigationFocus = document.activeElement;
-    navigationParent.insertBefore(assetViewNavigation,jobs ? null : assetFavoritesToggle);
+    navigationParent.insertBefore(assetViewNavigation,jobs ? null : assetSearchToggle);
   }
   $('#workspace-asset-controls').hidden = !showAssets;
   syncAssetSearchToggle();
@@ -2145,16 +2148,22 @@ function updateSend() {
   const fileState = fileStates.get(asset?.id);
   const smart = canUseSmartImport(session, asset);
   const restricted = Array.isArray(session?.smartImportFormats);
+  const maxSettings = native && asset?.ext === 'max' && (!session || session.dcc === 'c4d');
   const ok = Boolean(asset && session && !unmapped && !fileState && (smart || sessionSupportsAsset(session, asset)));
   const updateBlender = needsBlenderMaxBridge(session, asset);
   const connect = native && asset && !unmapped && !fileState && (updateBlender || (!session &&
     (smartFormats.has(asset.ext) || Object.values(compat).some(formats => formats.includes(asset.ext)))));
   $('#send-asset').disabled = !ok && !connect;
   $('#send-asset-label').textContent = connect ? '打开 DCC 连接中心'
-    : smart && restricted ? '智能导入到场景'
+    : smart && restricted && asset.ext !== 'max' ? '智能导入到场景'
     : usesC4dSceneDialog(session, asset) ? '选择导入选项'
     : smart ? '智能导入到场景' : '导入到当前场景';
-  $('#smart-import-settings').classList.toggle('hidden', !smart || restricted);
+  const settings = $('#smart-import-settings');
+  const settingsName = maxSettings ? 'MAX 导入偏好' : 'Cinema 4D 导入选项';
+  settings.classList.toggle('hidden', !maxSettings && (!smart || restricted));
+  settings.dataset.importSection = maxSettings ? 'max' : 'general';
+  settings.setAttribute('aria-label', settingsName);
+  settings.title = settingsName;
   $('#send-hint').textContent = fileState === 'missing' ? '右键卡片以重新关联文件'
     : fileState ? '请检查磁盘和 NAS 是否可用'
     : unmapped ? '请先链接团队共享文件夹'
@@ -3252,7 +3261,7 @@ function showSmartImportSettings(section = 'general') {
   return smartImportDialog;
 }
 
-$('#smart-import-settings').addEventListener('click', () => showSmartImportSettings());
+$('#smart-import-settings').addEventListener('click', event => showSmartImportSettings(event.currentTarget.dataset.importSection));
 smartImportDialog.addEventListener('cancel', event => {
   if (savingSmartImport) event.preventDefault();
 });
@@ -3551,7 +3560,9 @@ for (const selector of ['#settings', '#connection-summary']) {
     dccConnections.show();
   });
 }
-const releaseNotes = initNexusReleaseNotes({dialog:$('#nexus-release-notes'),button:$('#about-release-notes')});
+const releaseNotes = initNexusReleaseNotes({
+  dialog:$('#nexus-release-notes'),button:$('#about-release-notes'),openWebsite,
+});
 const nexusUpdater = initNexusUpdater({
   api, enabled:native, panel:$('#nexus-updater'),
   indicators:[topToolsTrigger,$('#about-button'),$('#sidebar-version')],
@@ -4562,6 +4573,7 @@ let hostedStatusRequest = 0;
 let nasTeamBusy = false;
 let nasExportDirectory = null;
 let teamThumbnailCacheBusy = false;
+let teamThumbnailCacheMutation = 0;
 
 async function readHostedTeam() {
   const request = ++hostedStatusRequest;
@@ -4613,14 +4625,51 @@ function renderTeamFolderRow(library, folder, {linked, hidden, canDisconnect, ca
   </div>`;
 }
 
+function canSetTeamThumbnailCache() {
+  return team.active && (!team.thumbnailCacheShared || team.info.member.role === 'admin');
+}
+
+function updateTeamThumbnailCache(data) {
+  const root = data.thumbnailCacheRoot || null;
+  const shared = data.thumbnailCacheShared === true;
+  const unsupported = shared && data.thumbnailCacheUnsupportedPlatform === true;
+  const needsTrust = shared && !unsupported && Boolean(root) && data.thumbnailCacheNeedsTrust === true;
+  const changed = root !== team.thumbnailCacheRoot || shared !== team.thumbnailCacheShared ||
+    needsTrust !== team.thumbnailCacheNeedsTrust || unsupported !== team.thumbnailCacheUnsupportedPlatform;
+  team.thumbnailCacheRoot = root;
+  team.thumbnailCacheShared = shared;
+  team.thumbnailCacheNeedsTrust = needsTrust;
+  team.thumbnailCacheUnsupportedPlatform = unsupported;
+  if (changed) resetThumbnails();
+  return changed;
+}
+
 function renderTeamThumbnailCache() {
+  const {thumbnailCacheRoot:root, thumbnailCacheShared:shared, thumbnailCacheNeedsTrust:needsTrust,
+    thumbnailCacheUnsupportedPlatform:unsupported} = team;
+  const canSet = canSetTeamThumbnailCache();
+  $('#team-thumbnail-cache-help').textContent = shared
+    ? '管理员设置一次，成员同步后会自动收到共享路径。缓存可与素材目录分开保存。'
+    : '当前团队服务未提供统一设置。这里选择的缓存目录仅在此电脑生效。';
   const path = $('#team-thumbnail-cache-path');
-  path.textContent = team.thumbnailCacheRoot || '默认缓存位置';
-  path.title = team.thumbnailCacheRoot || '';
-  $('#team-thumbnail-cache-pick').disabled = teamThumbnailCacheBusy;
+  path.textContent = root || '默认缓存位置';
+  path.title = root || '';
+  let mode = '此电脑正在使用默认缓存。';
+  if (unsupported) mode = '当前平台使用本机默认缓存。团队共享路径目前由 Windows 客户端使用。';
+  else if (needsTrust) mode = '此电脑正在使用默认缓存。确认共享路径后即可使用团队缓存。';
+  else if (root) mode = shared ? '共享目录可用时，此电脑会使用团队缓存。' : '此电脑使用上方的缓存目录。';
+  $('#team-thumbnail-cache-mode').textContent = mode;
+  const pick = $('#team-thumbnail-cache-pick');
+  pick.classList.toggle('hidden', !canSet || unsupported);
+  pick.textContent = shared ? '选择共享目录…' : '选择文件夹…';
+  pick.disabled = teamThumbnailCacheBusy;
   const reset = $('#team-thumbnail-cache-reset');
-  reset.classList.toggle('hidden', !team.thumbnailCacheRoot);
+  reset.classList.toggle('hidden', !canSet || !root);
+  reset.textContent = shared ? '清除团队设置' : '恢复默认';
   reset.disabled = teamThumbnailCacheBusy;
+  const trust = $('#team-thumbnail-cache-trust');
+  trust.classList.toggle('hidden', !needsTrust);
+  trust.disabled = teamThumbnailCacheBusy;
 }
 
 function renderTeamSettings() {
@@ -4752,9 +4801,10 @@ function showRemovedAssetDraft(message) {
   $('#reveal-file').disabled = true;
 }
 
-function applyTeamCatalog(data, { force = false, entering = false } = {}) {
+function applyTeamCatalog(data, { force = false, entering = false, applyThumbnailCache = true } = {}) {
   const previousRevision = team.revision;
   const previousName = team.info?.team.name;
+  const previousMember = team.info?.member;
   const previousScope = collectionScope();
   const oldSelected = selected();
   team.info = { team: data.team, member: data.member };
@@ -4769,8 +4819,10 @@ function applyTeamCatalog(data, { force = false, entering = false } = {}) {
     workspaceNavigation.refreshTeamQuickAccess();
   }
 
+  const thumbnailCacheChanged = applyThumbnailCache && updateTeamThumbnailCache(data);
   updateTeamCatalog(data,force);
-  if (team.catalog && (data.assets || scopeChanged)) {
+  const catalogChanged = team.catalog && (data.assets || scopeChanged);
+  if (catalogChanged) {
     refreshVisibleTeamCatalog();
     // Keep a removed asset's draft on screen until the member switches selection.
     const asset = selected();
@@ -4783,7 +4835,11 @@ function applyTeamCatalog(data, { force = false, entering = false } = {}) {
     renderNav();
     renderAssets();
     teamAssetMessages.render();
-    if ($('#team-dialog').open) renderTeamSettings();
+  } else if (thumbnailCacheChanged && isAssetView()) loadVisibleThumbs();
+  if ($('#team-dialog').open) {
+    if (catalogChanged || previousMember?.role !== data.member.role || previousMember?.name !== data.member.name) {
+      renderTeamSettings();
+    } else if (thumbnailCacheChanged) renderTeamThumbnailCache();
   }
   updateWorkspaceLabel();
   if (previousName !== data.team.name) {
@@ -4817,7 +4873,6 @@ function enterTeam(data, {cached = false} = {}) {
   state.collections = [];
   state.definedTags = [];
   team.info = {team:data.team,member:data.member};
-  team.thumbnailCacheRoot = data.thumbnailCacheRoot || null;
   team.catalog = null;
   team.allLibraries = [];
   team.sharedHiddenFolders = [];
@@ -4888,12 +4943,13 @@ async function refreshTeam(force = false) {
   }
   if (!team.active) return;
   const epoch = team.epoch;
+  const thumbnailCacheMutation = teamThumbnailCacheMutation;
   const task = (async () => {
     try {
       const data = await api('team_catalog', {since: force ? null : team.revision});
       if (team.active && team.epoch === epoch) {
         const revisionChanged = data.revision !== team.revision;
-        applyTeamCatalog(data, {force});
+        applyTeamCatalog(data, {force, applyThumbnailCache:thumbnailCacheMutation === teamThumbnailCacheMutation});
         team.fromLocalIndex = false;
         if (revisionChanged && !force) refreshTeamCovers();
       }
@@ -4936,8 +4992,12 @@ $('#team-link-directory').addEventListener('click', () => {
   showAssetImport();
 });
 
-async function changeTeamThumbnailCache(pick) {
+async function changeTeamThumbnailCache(action) {
   if (!team.active || teamThumbnailCacheBusy) return;
+  const trust = action === 'trust';
+  const pick = action === 'pick';
+  if (trust ? !team.thumbnailCacheNeedsTrust : !canSetTeamThumbnailCache()) return;
+  if (pick && team.thumbnailCacheUnsupportedPlatform) return;
   const teamId = team.info.team.id;
   const epoch = team.epoch;
   const current = () => team.active && team.epoch === epoch;
@@ -4946,31 +5006,33 @@ async function changeTeamThumbnailCache(pick) {
   status.textContent = '';
   renderTeamThumbnailCache();
   try {
-    const path = pick ? await api('pick_folder', {purpose:'team-thumbnail-cache'}) : null;
+    const path = pick ? await api('pick_folder', {purpose:'team-thumbnail-cache'}) : trust ? team.thumbnailCacheRoot : null;
     if (!current() || (pick && !path)) return;
-    status.textContent = '正在保存缓存位置…';
-    const result = await api('team_set_thumbnail_cache_root', {teamId, path});
+    if (!trust && !canSetTeamThumbnailCache()) throw Error('只有团队管理员可以更改共享缓存目录。');
+    if (pick && team.thumbnailCacheUnsupportedPlatform) return;
+    status.textContent = trust ? '正在确认共享路径…' : '正在保存缓存位置…';
+    const result = await api(trust ? 'team_trust_thumbnail_cache_root' : 'team_set_thumbnail_cache_root', {teamId, path});
     if (!current()) return;
-    const next = result.thumbnailCacheRoot || null;
-    if (next !== team.thumbnailCacheRoot) {
-      team.thumbnailCacheRoot = next;
-      resetThumbnails();
-      if (isAssetView()) loadVisibleThumbs();
-    }
-    status.textContent = next ? '已保存共享缓存位置' : '已恢复默认缓存位置';
+    teamThumbnailCacheMutation++;
+    if (updateTeamThumbnailCache(result) && isAssetView()) loadVisibleThumbs();
+    status.textContent = trust ? '此电脑已允许使用共享缓存路径'
+      : team.thumbnailCacheRoot ? (team.thumbnailCacheShared ? '团队缓存目录已保存' : '此电脑的缓存目录已保存')
+      : '已恢复默认缓存位置';
   } catch (failure) {
     if (current()) status.textContent = String(failure?.message || failure);
   } finally {
     teamThumbnailCacheBusy = false;
     if (team.active) renderTeamThumbnailCache();
     if (current() && $('#team-dialog').open && teamSetupMode === 'join' && document.activeElement === document.body) {
-      $('#team-thumbnail-cache-pick').focus({preventScroll:true});
+      const pickButton = $('#team-thumbnail-cache-pick');
+      (pickButton.classList.contains('hidden') ? $('#team-join-mode') : pickButton).focus({preventScroll:true});
     }
   }
 }
 
-$('#team-thumbnail-cache-pick').addEventListener('click', () => changeTeamThumbnailCache(true));
-$('#team-thumbnail-cache-reset').addEventListener('click', () => changeTeamThumbnailCache(false));
+$('#team-thumbnail-cache-pick').addEventListener('click', () => changeTeamThumbnailCache('pick'));
+$('#team-thumbnail-cache-reset').addEventListener('click', () => changeTeamThumbnailCache('reset'));
+$('#team-thumbnail-cache-trust').addEventListener('click', () => changeTeamThumbnailCache('trust'));
 $('#team-refresh').addEventListener('click', async event => {
   const button = event.currentTarget;
   button.disabled = true;
@@ -5811,6 +5873,10 @@ const c4dDropImport = initC4dDropImport({
   canUseSmartImport,
   scope: collectionScope,
   defaultRenderer: () => smartOptions().renderer,
+  readMaxMaterialRenderer: native ? c4dImportPreferences.readMaxMaterialRenderer : null,
+  openMaxPreferences: native ? () => new Promise(resolve => {
+    showSmartImportSettings('max').addEventListener('close', resolve, {once:true});
+  }) : null,
   async queue(asset, sessionId, scene, options) {
     const session = state.sessions.find(item => item.id === sessionId);
     if (!session) throw Error('目标 Cinema 4D 已离线');
@@ -6980,7 +7046,9 @@ function c4dCanReceiveAsset(session,asset) {
     (sessionSupportsAsset(session,asset) || canUseSmartImport(session,asset));
 }
 
-const chooseExplorerC4dTarget = initExplorerC4dSend($('#explorer-c4d-send'));
+const chooseExplorerC4dTarget = initExplorerC4dSend($('#explorer-c4d-send'), {
+  openMaxPreferences: () => showSmartImportSettings('max'),
+});
 
 function inspectExplorerC4dSources(files) {
   return files.map(({path,name}) => {
@@ -7031,7 +7099,7 @@ async function sendExplorerFilesToC4d({files,stillSelected}) {
   const inspect = session => planExplorerC4dSend(sources,session);
   const sessions = online.filter(session => sources.some(({asset}) => asset && c4dCanReceiveAsset(session,asset)))
     .map(session => ({...session,label:session.label || session.name || 'Cinema 4D'}));
-  const chosen = await chooseExplorerC4dTarget({sessions,inspect,
+  const chosen = await chooseExplorerC4dTarget({sessions,inspect,hasMax:files.some(file => /\.max$/i.test(file.name || file.path)),
     empty:sessions.length ? '' : online.length ? '所选文件中没有可发送到在线实例的资产。' : '启动或连接 Cinema 4D 后重试。',
     async prepare({session,ready}) {
       checkSelection();
@@ -7940,7 +8008,8 @@ if (native) window.__TAURI__.event.listen('scan-progress', ({payload}) => {
 let activityBusy = false;
 const connectionSnapshot = sessions => JSON.stringify(sessions.map(session =>
   [session.id, session.dcc, session.label, session.placement, session.maxImport, session.smartImport, session.sceneImportOptions,
-    session.smartImportFormats, session.projectExport]).sort((a, b) => a[0].localeCompare(b[0])));
+    session.smartImportFormats, session.projectExport, session.maxMaterialPreferences, session.maxOctaneMaterials])
+    .sort((a, b) => a[0].localeCompare(b[0])));
 const jobSnapshot = jobs => JSON.stringify(jobs.map(job =>
   [job.id, job.status, job.progress, job.progressStage, job.error, job.message, job.projectPath]));
 setInterval(async () => {

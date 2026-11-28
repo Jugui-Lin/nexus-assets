@@ -1,3 +1,5 @@
+import {maxMaterialRendererLabels} from './c4d-import-preferences.js';
+
 const sceneFormats = new Set(['max', 'blend', 'c4d', 'fbx', 'obj', 'abc', 'stl']);
 const fbxSources = new Set(['max', 'blend', 'fbx']);
 const companionFormats = ['c4d', 'fbx'];
@@ -43,7 +45,8 @@ const statusMessages = {
   interrupted:'Cinema 4D 导入已中断',
 };
 
-export function initC4dDropImport({asset, assets, session, isUsable, supports, canUseSmartImport, scope, defaultRenderer, queue, notify, showJobs, showConnections, openWeb}) {
+export function initC4dDropImport({asset, assets, session, isUsable, supports, canUseSmartImport, scope, defaultRenderer,
+  readMaxMaterialRenderer, openMaxPreferences, queue, notify, showJobs, showConnections, openWeb}) {
   const get = id => document.getElementById(id);
   const dialog = get('c4d-drop-dialog');
   const form = get('c4d-drop-form');
@@ -57,7 +60,13 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
   const storeTextures = form.elements.storeTextures;
   const storeTexturesField = get('c4d-drop-store-textures');
   const renderer = get('c4d-drop-renderer');
+  const rendererField = renderer.closest('label');
   const rendererOptions = Object.fromEntries([...renderer.options].map(option => [option.value, option]));
+  const maxFields = get('c4d-drop-max-material-fields');
+  const maxRendererField = get('c4d-drop-max-material-field');
+  const maxRenderer = get('c4d-drop-max-material-renderer');
+  const maxNote = get('c4d-drop-max-material-note');
+  const maxPreferences = get('c4d-drop-max-preferences');
   const octanePreviewNote = get('c4d-drop-octane-preview-note');
   const bridgeNote = get('c4d-drop-bridge-note');
   const restrictedNote = get('c4d-drop-restricted-note');
@@ -82,15 +91,22 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
   function renderFields() {
     const selected = picks().map(id => asset(id));
     const scene = selected.some(isC4dSceneAsset);
-    const restrictedSmart = draft.restricted && selected.some(source => canUseSmartImport(session(draft.sessionId), source));
+    const target = session(draft.sessionId);
+    const restrictedSmart = draft.restricted && selected.some(source => canUseSmartImport(target, source));
+    const hasMax = selected.some(source => source?.ext === 'max');
+    const maxMaterialOptions = hasMax && draft.maxMaterialPreferences;
     const fbxMaterials = selected.some(source => fbxSources.has(source?.ext));
-    conversion.hidden = !draft.maxOptions || !selected.some(source => source?.ext === 'max');
+    const generalSources = maxMaterialOptions ? selected.filter(source => source?.ext !== 'max') : selected;
+    const generalFbx = generalSources.some(source => fbxSources.has(source?.ext));
+    const showRenderer = generalSources.some(Boolean);
+    conversion.hidden = !draft.maxOptions || !hasMax;
     blenderNote.hidden = conversion.hidden || mode.value !== 'direct';
     if (blenderNote.hidden) mode.removeAttribute('aria-describedby');
     else mode.setAttribute('aria-describedby', blenderNote.id);
     sceneFields.hidden = !draft.custom || !scene;
     bridgeNote.hidden = draft.custom || !scene || restrictedSmart;
-    restrictedNote.hidden = !restrictedSmart;
+    restrictedNote.hidden = !restrictedSmart ||
+      !selected.some(source => source?.ext !== 'max' && canUseSmartImport(target, source));
     const importObjects = form.elements.objects.checked;
     normalsField.hidden = sceneFields.hidden || !fbxMaterials;
     normals.disabled = normalsField.hidden || !importObjects;
@@ -102,13 +118,24 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
     const linkTextures = !form.elements.textures.disabled && form.elements.textures.checked;
     storeTexturesField.hidden = sceneFields.hidden || !draft.archiveTextures;
     storeTextures.disabled = storeTexturesField.hidden || !linkTextures;
-    renderer.disabled = !importMaterials || (!fbxMaterials && !linkTextures);
-    rendererOptions.standard.text = fbxMaterials && !linkTextures ? '保留 FBX 原材质' : 'Standard / Physical（补建材质）';
-    rendererOptions.octane.text = fbxMaterials ? 'Octane（转换 FBX 材质）' : 'Octane（补建材质）';
+    maxFields.hidden = !hasMax;
+    maxRendererField.hidden = !maxMaterialOptions;
+    maxPreferences.hidden = !openMaxPreferences;
+    maxRenderer.disabled = !maxMaterialOptions || !importMaterials;
+    const saved = maxMaterialRendererLabels[draft.savedMaxRenderer];
+    maxRenderer.options[0].text = saved ? '使用已保存设置 · ' + saved : '使用已保存设置';
+    maxNote.textContent = !maxMaterialOptions
+      ? (restrictedSmart ? '当前实例会生成标准材质。更新桥接后可选择 MAX 材质。' : '更新桥接后可选择 MAX 材质。')
+      : target?.maxOctaneMaterials === true ? '' : '当前实例未检测到 Octane。选择 Octane 时会生成标准材质。';
+    maxNote.hidden = !hasMax || !maxNote.textContent;
+    rendererField.hidden = !showRenderer;
+    renderer.disabled = !showRenderer || !importMaterials || (!generalFbx && !linkTextures);
+    rendererOptions.standard.text = generalFbx && !linkTextures ? '保留 FBX 原材质' : 'Standard / Physical（补建材质）';
+    rendererOptions.octane.text = generalFbx ? 'Octane（转换 FBX 材质）' : 'Octane（补建材质）';
     rendererOptions.redshift.disabled = !linkTextures;
     rendererOptions.arnold.disabled = !linkTextures;
     if (rendererOptions[renderer.value]?.disabled) renderer.value = 'auto';
-    const octanePreview = !sceneFields.hidden && !renderer.disabled && fbxMaterials &&
+    const octanePreview = !sceneFields.hidden && !renderer.disabled && generalFbx &&
       (renderer.value === 'octane' || renderer.value === 'auto');
     octanePreviewNote.hidden = !octanePreview;
     if (octanePreview) {
@@ -117,6 +144,17 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
         '导入前可在 Octane Live Viewer → Options → Previews 关闭 Materials Previews，避免自动生成材质缩略图。';
       renderer.setAttribute('aria-describedby', octanePreviewNote.id);
     } else renderer.removeAttribute('aria-describedby');
+  }
+
+  async function refreshMaxMaterialRenderer() {
+    const current = draft;
+    if (!current?.maxMaterialPreferences || !readMaxMaterialRenderer) return;
+    try {
+      const value = await readMaxMaterialRenderer();
+      if (draft !== current || !dialog.open || current.scope !== scope()) return;
+      current.savedMaxRenderer = value;
+      renderFields();
+    } catch {}
   }
 
   function show(ids, sessionId, {validate,exactSources = false} = {}) {
@@ -131,6 +169,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
     const restrictedMax = restricted && target.smartImport === true && target.smartImportFormats.includes('max');
     draft = {scope:scope(), sessionId, validate, restricted,
       custom, maxOptions:custom || restrictedMax,
+      maxMaterialPreferences:target.maxMaterialPreferences === true,
       archiveTextures:target.archiveTextures === true, entries:[]};
     for (const row of sources.querySelectorAll('label')) row.remove();
     for (const item of supported) {
@@ -154,11 +193,13 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
     storeTextures.checked = draft.archiveTextures;
     mode.value = restrictedMax ? '' : 'direct';
     renderer.value = defaultRenderer();
+    maxRenderer.value = '';
     get('c4d-drop-target').textContent = target.label || 'Cinema 4D';
     status.textContent = list.length !== supported.length ? '已跳过 ' + (list.length - supported.length) + ' 项不支持的资产' : '';
     renderFields();
     dialog.showModal();
     draft.entries[0].select.focus();
+    if (supported.some(source => source.ext === 'max')) void refreshMaxMaterialRenderer();
   }
 
   function renderActivity(jobs = []) {
@@ -204,6 +245,11 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
   form.elements.materials.addEventListener('change', renderFields);
   form.elements.textures.addEventListener('change', renderFields);
   renderer.addEventListener('change', renderFields);
+  maxPreferences.addEventListener('click', async () => {
+    if (!openMaxPreferences || busy || !draft) return;
+    await openMaxPreferences();
+    await refreshMaxMaterialRenderer();
+  });
   get('c4d-drop-open-jobs').addEventListener('click', showJobs);
   get('c4d-drop-bridge-update').addEventListener('click', () => {
     dialog.close();
@@ -225,6 +271,7 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
     if (storeTextures.checked && !storeTextures.disabled) scene.storeTextures = true;
     const method = mode.value;
     const materialRenderer = renderer.disabled ? null : renderer.value;
+    const maxMaterialRenderer = maxRenderer.disabled ? '' : maxRenderer.value;
     if (current.scope !== scope()) {
       dialog.close();
       notify('工作空间已切换，请重新拖动资产', true);
@@ -256,10 +303,12 @@ export function initC4dDropImport({asset, assets, session, isUsable, supports, c
           const isScene = isC4dSceneAsset(source);
           if (current.custom && isScene) {
             options.scene_import = scene;
-              if (materialRenderer && (scene.textures || fbxSources.has(source.ext))) {
+            if (materialRenderer && (source.ext !== 'max' || !current.maxMaterialPreferences) &&
+                (scene.textures || fbxSources.has(source.ext))) {
               options.renderer = materialRenderer;
             }
           }
+          if (source.ext === 'max' && maxMaterialRenderer) options.max_material_renderer = maxMaterialRenderer;
           if (current.maxOptions && source.ext === 'max' && method) options.max_mode = method;
           const job = await queue(source, current.sessionId, isScene, options);
           tracked.set(job.id, {assetId:id, sessionId:current.sessionId, ...job});
