@@ -16,7 +16,7 @@ export const defaultFileWorkspacePreferences = Object.freeze({
   showFrequent:true,
   showHidden:false,
   showThumbnails:true,
-  stackSequences:false,
+  stackSequences:true,
   showUnindexed:false,
   showStatus:true,
   showExtensions:true,

@@ -15,7 +15,7 @@ function normalizedName(value) {
   return value.normalize('NFC').toLowerCase();
 }
 
-function assetFilename(asset) {
+export function assetFilename(asset) {
   const path = asset.relativePath || asset.path || '';
   return path.replaceAll('\\', '/').split('/').pop();
 }

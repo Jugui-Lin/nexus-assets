@@ -83,6 +83,18 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
   const pinned = get('asset-pinned-filters');
   const moreTrigger = get('asset-filter-more-toggle');
   const morePanel = get('asset-filter-more-panel');
+  const activeFilters = get('active-filter');
+  const chips = create('span', 'asset-active-filter-list');
+  const clearFilters = create('button', 'text-button asset-active-filter-clear', '清除筛选');
+  activeFilters.classList.add('asset-active-filters');
+  activeFilters.setAttribute('role', 'group');
+  activeFilters.setAttribute('aria-label', '已选资产筛选条件');
+  activeFilters.closest('.results-line').after(activeFilters);
+  activeFilters.append(chips, clearFilters);
+  clearFilters.addEventListener('click', () => onChange({
+    kind:'all', tag:null, search:'', rating:0, workflow:'',
+    formatIncludes:[], formatExcludes:[], tagIncludes:[], tagExcludes:[], quickFilters:[], fileNameQuery:'',
+  }));
   const definitions = new Map([
     ['type', {label:'类型', icon:'grid', panel:get('asset-type-panel'), enabled:s => s.kind !== 'all'}],
     ['tags', {label:'标签', icon:'tag', facet:true, enabled:s => s.tag || s.tagIncludes.length || s.tagExcludes.length}],
@@ -113,12 +125,76 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
   let drag;
   let dropTarget;
   let suppressClick = false;
+  let lastChips;
+
+  function renderChips(state) {
+    const descriptors = [];
+    const add = (field, label, value, key = field, exclude = false) => descriptors.push({field, label, value, key, exclude});
+    if (state.search) add('search', '搜索 · ' + (get('search').value.trim() || state.search), '');
+    if (state.kind !== 'all') {
+      const type = get('type-tabs').querySelector('[data-kind="' + CSS.escape(state.kind) + '"] [data-filter-label]');
+      add('kind', '类型 · ' + (type?.textContent || state.kind), 'all');
+    }
+    if (state.tag) add('tag', '标签 · ' + state.tag, null);
+    for (const [field, label, exclude] of [
+      ['tagIncludes', '标签', false], ['tagExcludes', '标签', true],
+      ['formatIncludes', '格式', false], ['formatExcludes', '格式', true],
+    ]) {
+      for (const value of new Set(state[field])) {
+        const text = field.startsWith('format') ? value.toUpperCase() : value;
+        add(field, label + ' · ' + (exclude ? '排除 ' : '包含 ') + text,
+          value, JSON.stringify([field,value]), exclude);
+      }
+    }
+    for (const [field, initial] of [['rating',0], ['workflow','']]) {
+      if (!state[field]) continue;
+      const definition = definitions.get(field);
+      const option = [...definition.select.options].find(item => item.value === String(state[field]));
+      add(field, definition.label + ' · ' + (option?.textContent || state[field]), initial);
+    }
+    if (state.fileNameQuery.trim()) add('fileNameQuery', '文件名 · ' + state.fileNameQuery.trim(), '');
+    for (const value of state.quickFilters) {
+      const definition = definitions.get(value);
+      if (definition?.quick) add('quickFilters', definition.label, value, JSON.stringify(['quickFilters',value]));
+    }
+
+    const signature = JSON.stringify(descriptors);
+    if (signature === lastChips) return;
+    lastChips = signature;
+    const previous = [...chips.children];
+    const focused = previous.indexOf(document.activeElement);
+    const focusedClear = document.activeElement === clearFilters;
+    const next = descriptors.map(({key,label,field,value,exclude}) => {
+      const button = create('button', 'asset-active-filter-chip');
+      button.dataset.assetFilterChip = key;
+      button.toggleAttribute('data-exclude', exclude);
+      button.setAttribute('aria-label', '移除筛选 ' + label);
+      button.title = label;
+      button.append(create('span', '', label), icon('close'));
+      button.addEventListener('click', () => {
+        const current = getState()[field];
+        onChange({[field]:Array.isArray(current) ? current.filter(item => item !== value) : value});
+      });
+      return button;
+    });
+    chips.replaceChildren(...next);
+    activeFilters.hidden = !next.length;
+    clearFilters.hidden = next.length < 2;
+    if (focused >= 0 || (focusedClear && clearFilters.hidden)) {
+      const oldKey = previous[focused]?.dataset.assetFilterChip;
+      const restore = next.find(button => button.dataset.assetFilterChip === oldKey) ||
+        next[Math.max(0, Math.min(focused, next.length - 1))] || moreTrigger;
+      restore.focus();
+    }
+  }
 
   function alignPanel() {
     if (!active) return;
     const {panel, trigger} = active;
     const base = toolbar.getBoundingClientRect();
-    const left = trigger.getBoundingClientRect().left - base.left;
+    const bounds = trigger.getBoundingClientRect();
+    const edge = trigger.hasAttribute('data-asset-toolbar-panel') ? bounds.right - panel.offsetWidth : bounds.left;
+    const left = edge - base.left;
     panel.style.insetInlineStart = Math.max(0, Math.min(left, base.width - panel.offsetWidth)) + 'px';
   }
 
@@ -295,6 +371,7 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
 
   function render() {
     const state = getState();
+    renderChips(state);
     for (const [key, definition] of definitions) {
       const enabled = Boolean(definition.enabled(state));
       definition.trigger.classList.toggle('is-active', enabled);
@@ -424,7 +501,8 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
     trigger.id = 'asset-' + key + '-toggle';
     trigger.dataset.pinnedFilter = key;
     trigger.dataset.filterReorder = key;
-    trigger.title = '拖动排序，或按 Alt + 左右方向键';
+    trigger.title = definition.label + ' · 拖动排序，或按 Alt + 左右方向键';
+    trigger.setAttribute('aria-label', definition.label);
     trigger.setAttribute('aria-keyshortcuts', 'Alt+ArrowLeft Alt+ArrowRight');
     trigger.append(icon(definition.icon), definition.label);
     if (definition.panel) {
@@ -470,6 +548,17 @@ export function initAssetFilterToolbar({getState, getFacetAssets, onChange, onEr
     renderMenu();
     toggle('more', moreTrigger, morePanel, menuSearch.input);
   });
+  for (const trigger of strip.querySelectorAll('[data-asset-toolbar-panel]')) {
+    const panel = get(trigger.getAttribute('aria-controls'));
+    trigger.addEventListener('click', () => {
+      const focus = panel.querySelector('[aria-pressed="true"]') ||
+        panel.querySelector('select:not(:disabled), button:not(:disabled, .hidden)');
+      toggle(panel.id, trigger, panel, focus);
+    });
+    panel.addEventListener('click', event => {
+      if (active?.panel === panel && event.target.closest('[data-asset-toolbar-action]')) close(true);
+    });
+  }
   get('asset-type-panel').addEventListener('click', event => {
     if (event.target.closest('[data-kind]')) close(true);
   });

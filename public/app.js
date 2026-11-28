@@ -4,7 +4,7 @@ import {initWorkspaceDrag} from './workspace-drag.js';
 import {initWorkspaceLayout} from './workspace-layout.js';
 import {initWorkspaceLayoutPresets} from './workspace-layout-presets.js';
 import {initSidebarZones} from './sidebar-zones.js';
-import {initWorkspaceNavigation} from './workspace-navigation.js';
+import {initWorkspaceNavigation, normalizeAssetSearchScope} from './workspace-navigation.js';
 import {initAssetCompare} from './asset-compare.js';
 import {chooseAssetOriginalLocations} from './asset-original-locations.js';
 import {chooseWhiteboardReferenceTarget} from './whiteboard-reference-target.js';
@@ -20,16 +20,16 @@ import {initWorkspacePicker, workspaceOpeningView} from './workspace-picker.js';
 import {initFolderBrowser} from './folder-browser.js';
 import {initAssetFolderHistory, matchFolderAddress} from './folder-address.js';
 import {initLocalExplorer} from './local-explorer.js';
+import {explorerPathFormats,formatExplorerPaths} from './local-explorer-path-format.js';
 import {initExplorerC4dSend} from './local-explorer-c4d-send.js';
 import {initExplorerIndexedMove} from './local-explorer-indexed-move.js';
 import {initExplorerIndexedRecovery} from './local-explorer-indexed-recovery.js';
 import {initProjectDependencies} from './project-dependencies.js';
 import {initProjectCleanup} from './project-cleanup.js';
-import {initDeliveryTemplate} from './delivery-template.js';
+import {isExplorerRenderFrame} from './local-explorer-render-sequences.js';
 import {initRenderSequenceViewer} from './render-sequence-viewer.js';
 import {initExrChannelViewer} from './exr-channel-viewer.js';
 import {initTemporaryAssetBasket} from './temporary-asset-basket.js';
-import {initWorkspaceHandoff} from './workspace-handoff.js';
 import {initFolderSystemIntegration} from './folder-system-integration.js';
 import {initFolderContext} from './folder-context.js';
 import {initFolderAppearance} from './folder-appearance.js';
@@ -37,7 +37,7 @@ import {initDccConnections} from './dcc-connections.js';
 import {initCloudMounts} from './cloud-mounts.js';
 import {initBaiduCloud} from './baidu-cloud.js';
 import {initScreenshotCover} from './screenshot-cover.js';
-import {assetKindLabels as kinds, initQuickFilters, isRecentlyAdded, summarizeQuickFilters} from './quick-filters.js';
+import {assetFilename, assetKindLabels as kinds, initQuickFilters, isRecentlyAdded, summarizeQuickFilters} from './quick-filters.js';
 import {initAssetTypePreferences} from './asset-type-preferences.js';
 import {initAssetFilterToolbar} from './asset-filter-toolbar.js';
 import {assetFormatGroup,assetFormatGroups,retainAssetOrder} from './asset-browse-options.js';
@@ -140,7 +140,7 @@ const storedDensity = localStorage.getItem('nexus-grid-density');
 const state = {
   assets: [], libraries: [], sessions: [], jobs: [], collections: [], hiddenFolders: [], definedTags: [],
   view: workspaceOpeningView(), library: null, folder: '', collection: null, recursive: true,
-  kind: 'all', tag: null, search: '', sort: 'added', selected: null,
+  kind: 'all', tag: null, search: '', searchScope: 'location', sort: 'added', selected: null,
   formatIncludes: [], formatExcludes: [], tagIncludes: [], tagExcludes: [],
   rating: 0, workflow: '', quickFilters: [], fileNameQuery: '',
   assetWindowAnchor: null,
@@ -155,6 +155,8 @@ const fileWorkspace = $('#file-workspace');
 const sharedSidebar = nativeDragOut ? createExplorerSidebarWidth() : null;
 const fileSidebar = native ? initExplorerSidebar(fileWorkspace,sharedSidebar ?? undefined) : null;
 const workspaceBar = $('#nexus-workspace-bar');
+const workspaceReturnButton = $('#workspace-return');
+const workspaceReturns = new Map();
 const newTabTrigger = $('#workspace-new-tab');
 const newTabMenu = $('#workspace-new-tab-menu');
 const newTabOptions = $('#workspace-new-tab-options');
@@ -194,6 +196,7 @@ const localExplorer = initLocalExplorer({
   driveDetails:nativeDragOut ? readExplorerDriveDetails : undefined,
   thumbnail:native ? args => invoke('local_explorer_thumbnail',args) : undefined,
   folderThumbnail:native ? args => invoke('local_explorer_folder_thumbnail',args) : undefined,
+  sequenceThumbnail:native ? args => invoke('render_sequence_frame_preview',args) : undefined,
   fileIcon:nativeDragOut ? args => invoke('local_explorer_file_icon',args) : undefined,
   contextMenu:native ? initExplorerContextMenu(fileWorkspace) : undefined,
   fileAction:nativeDragOut ? args => invoke('local_explorer_file_action',args) : undefined,
@@ -206,6 +209,7 @@ const localExplorer = initLocalExplorer({
   columns:initExplorerColumns,
   onOpenFiles:revealFileWorkspace,
   onDetachTab:nativeDragOut ? tab => openDetachedTab('files',tab) : undefined,
+  canCloseLastTab:nativeDragOut ? hasAssetWorkspaceTab : undefined,
   onOpenAssetLibrary:() => showAssetWorkspace().catch(error),
   onBrowseAssets:nativeDragOut ? location => browseFolderAssets(location).catch(error) : undefined,
   onAddToAssets:nativeDragOut ? location => addExplorerSourceToAssets(location).catch(error) : undefined,
@@ -225,6 +229,7 @@ const localExplorer = initLocalExplorer({
   lookupAssets:nativeDragOut ? lookupExplorerAssets : undefined,
   onLoadAssets:nativeDragOut ? ensureAssetWorkspace : undefined,
   onToggleFavorite:nativeDragOut ? toggleExplorerFavorite : undefined,
+  assetRating:nativeDragOut ? {lookup:lookupExplorerRating,save:setExplorerRating} : undefined,
   searchAssets:nativeDragOut ? searchExplorerCatalog : undefined,
   assetSearchKey:explorerPathKey,
   onOpenAssetPane:nativeDragOut ? () => {
@@ -236,6 +241,7 @@ const localExplorer = initLocalExplorer({
     fileInspector?.refresh();
     fileNewMenu?.update();
     folderAssetPane?.updateLocation();
+    renderWorkspaceReturn();
   },
   onQuickPreview:() => fileInspector?.togglePreview(),
 });
@@ -292,7 +298,11 @@ const explorerFileDrop = nativeDragOut ? initExplorerFileDrop({
 }) : null;
 const assetSearchInput = $('#search');
 const assetSearchToggle = $('#asset-search-toggle');
+const assetDisplayToggle = $('#asset-display-toggle');
+const assetFavoritesToggle = $('#asset-favorites-toggle');
 const assetSearchField = $('#asset-search-field');
+const assetSearchScope = $('#asset-search-scope');
+const assetSearchResultsScope = $('#asset-search-results-scope');
 const assetSearchToolbar = assetSearchField.parentElement;
 const assetSearchStrip = assetSearchToggle.closest('.asset-filter-strip');
 const emptyAssetSearch = initAssetEmptySearch($('#empty-search-help'),{input:assetSearchInput,
@@ -323,12 +333,28 @@ function renderAssetSort() {
 }
 
 function syncAssetSearchToggle() {
+  const localLabel = state.library ? '当前目录' : state.collection ? '当前合集'
+    : state.view === 'favorites' ? '当前收藏' : state.view === 'recent' ? '最近入库' : '全部库';
+  const selectable = localLabel !== '全部库';
+  const scope = selectable ? normalizeAssetSearchScope(state.searchScope, state.library) : 'location';
+  for (const control of [assetSearchScope, assetSearchResultsScope]) {
+    control.options[0].textContent = localLabel;
+    control.options[1].disabled = control.options[1].hidden = !state.library;
+    control.options[2].disabled = control.options[2].hidden = !selectable;
+    control.value = scope;
+    control.hidden = !selectable || (control === assetSearchResultsScope && !state.search);
+  }
   const expanded = assetSearchToggle.getAttribute('aria-expanded') === 'true';
   const label = expanded ? '收起搜索' : state.search ? '搜索资产（已筛选）' : '搜索资产';
   const query = assetSearchInput.value.trim().slice(0, 100);
   assetSearchToggle.classList.toggle('has-query', Boolean(state.search));
   assetSearchToggle.setAttribute('aria-label', label);
-  assetSearchToggle.title = expanded ? label : label + ' (/)' + (query ? ` · 「${query}」` : '');
+  assetSearchToggle.title = expanded ? label : label + ' (/)' + (query
+    ? ` · ${assetSearchScope.selectedOptions[0].textContent} · 「${query}」` : '');
+}
+
+function effectiveAssetSearchScope() {
+  return state.search ? normalizeAssetSearchScope(state.searchScope, state.library) : 'location';
 }
 
 function alignAssetSearch() {
@@ -336,7 +362,7 @@ function alignAssetSearch() {
   const toolbar = assetSearchToolbar.getBoundingClientRect();
   const button = assetSearchToggle.getBoundingClientRect();
   const leftSpace = Math.min(toolbar.width, button.left - toolbar.left - 6);
-  const besideButton = leftSpace >= 144;
+  const besideButton = leftSpace >= (assetSearchScope.hidden ? 144 : 222);
   const width = Math.min(350, besideButton ? leftSpace : toolbar.width);
   const top = besideButton ? button.top : assetSearchStrip.getBoundingClientRect().bottom + 3;
   Object.assign(assetSearchField.style, {
@@ -444,7 +470,7 @@ let assetModeHighlightTimer;
 let folderTrees = new Map();
 let markedAnchor = null;
 const team = { active: false, configured: false, info: null, revision: null, pending: null, epoch: 0,
-  fromLocalIndex: false,
+  fromLocalIndex: false, thumbnailCacheRoot: null,
   catalog: null, allLibraries: [], removedFolders: [], sharedHiddenFolders: [], linkedFolders: [], folderVisibility: false,
   online: [], presencePending: null, presenceUnsupported: false, covers: new Map(), coversPending: null };
 let personalWorkspace = {id:'personal', name:'个人工作空间'};
@@ -566,6 +592,7 @@ const thumbnailRenderer = new MeshPreview(document.createElement('canvas'), {wid
 const thumbCache=new Map();
 const thumbnailSizeKey = 'nexus-thumbnail-pixels';
 const rasterBrowseSizeLimit = 192 * 1024 * 1024;
+const pngBrowseSizeLimit = 512 * 1024 * 1024;
 let thumbnailSize = Number(localStorage.getItem(thumbnailSizeKey)) || 256;
 if (!Number.isInteger(thumbnailSize) || thumbnailSize < 128 || thumbnailSize > 1024) thumbnailSize = 256;
 let toastPointer;
@@ -613,7 +640,10 @@ function currentLibrary() {
   return state.libraries.find(library => library.id === state.library);
 }
 function baseAssets() {
+  const searchScope = effectiveAssetSearchScope();
+  if (searchScope === 'workspace') return state.assets;
   const library = currentLibrary();
+  if (searchScope === 'library' && library) return assetsByLibrary.get(library.id) || [];
   const collection = currentCollection();
   const assets = library ? assetsByLibrary.get(library.id) || [] : state.assets;
   const inFolder = library && (state.folder || !state.recursive)
@@ -862,9 +892,10 @@ function renderLocation() {
   const note = $('#page-description');
   note.textContent = description;
   note.title = description;
-  $('#folder-options').classList.toggle('hidden', !lib);
+  $('#folder-options').classList.toggle('hidden', !lib || effectiveAssetSearchScope() !== 'location');
   $('#edit-collection').classList.toggle('hidden', !collection);
   $('#asset-folder-file-view').hidden = !nativeDragOut || !lib?.path || !isAssetView();
+  renderWorkspaceReturn();
   assetFolderHistory.recordLocation();
 }
 function renderSubfolders(focusing) {
@@ -939,9 +970,10 @@ function renderAssets(){
   let navigationFocus;
   if (assetViewNavigation.parentElement !== navigationParent) {
     if (assetViewNavigation.contains(document.activeElement)) navigationFocus = document.activeElement;
-    navigationParent.insertBefore(assetViewNavigation,jobs ? null : assetSearchToggle);
+    navigationParent.insertBefore(assetViewNavigation,jobs ? null : assetFavoritesToggle);
   }
   $('#workspace-asset-controls').hidden = !showAssets;
+  syncAssetSearchToggle();
   const browse = currentAssetBrowse();
   const focus = browse?.focus;
   const groupSearch = $('#group-search-locations');
@@ -952,7 +984,7 @@ function renderAssets(){
   navigationFocus?.focus({preventScroll:true});
   $('#asset-grid').classList.toggle('hidden', !showAssets);
   renderLocation();
-  renderSubfolders(Boolean(focus));
+  renderSubfolders(Boolean(focus) || effectiveAssetSearchScope() !== 'location');
   workspaceNavigation?.render();
   if (!isAssetView()) {
     videoCardDurations?.refresh();
@@ -969,7 +1001,8 @@ function renderAssets(){
   const candidates = focus?.linked ? linkedAssetRows(base,focus.ids) : view.rows;
   const ordered = browse?.order ? retainAssetOrder(candidates,browse.order) : candidates;
   const rows = focus && !focus.linked ? ordered.filter(asset => focus.ids.has(asset.id)) : ordered;
-  assetSearchLocations.update(state.search ? JSON.stringify([libraryScope(),state.search]) : '',rows);
+  assetSearchLocations.update(state.search ? JSON.stringify([libraryScope(),state.library,state.folder,state.view,
+    state.collection,effectiveAssetSearchScope(),state.search]) : '',rows);
   if (focus) {
     const inFocus = new Set(rows.map(asset => asset.id));
     for (const id of markedAssets) if (!inFocus.has(id)) markedAssets.delete(id);
@@ -979,7 +1012,7 @@ function renderAssets(){
   displayedAssetRows = rows;
   $('#show-material-sets').hidden = !rows.some(isMaterialSetImage);
   renderAssetBrowseControls(browse,base);
-  $('#result-count').textContent=rows.length;$('#active-filter').innerHTML=state.tag?`<button class="active-filter-chip">${escape(state.tag)} ×</button>`:'';
+  $('#result-count').textContent = rows.length;
   $('#check-files').classList.toggle('hidden', !native || !rows.length);
   const grid = $('#asset-grid');
   const list = state.layout === 'list';
@@ -990,6 +1023,7 @@ function renderAssets(){
   if (anchorGroup) assetSearchLocations.opened.add(anchorGroup);
   const shownOrigins = origins ? [...origins.values()].slice(0,Math.ceil(state.limit / 60) * 40) : null;
   if (anchorGroup && origins.has(anchorGroup) && !shownOrigins.some(group => group.key === anchorGroup)) shownOrigins.push(origins.get(anchorGroup));
+  $('#collapse-search-locations').hidden = !shownOrigins?.some(group => assetSearchLocations.opened.has(group.key));
   if (state.assetWindowAnchor && rowGroups) {
     browse.formats.delete(assetFormatGroup(assetsById.get(state.assetWindowAnchor)));
   }
@@ -1005,6 +1039,11 @@ function renderAssets(){
     const button = $(selector);
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', String(active));
+    if (active) {
+      assetDisplayToggle.querySelector('use').setAttribute('href',button.querySelector('use').getAttribute('href'));
+      assetDisplayToggle.title = '视图设置 · ' + button.getAttribute('aria-label');
+      assetDisplayToggle.setAttribute('aria-label',assetDisplayToggle.title);
+    }
   }
   if (list) grid.setAttribute('role', 'table');
   else grid.removeAttribute('role');
@@ -1021,9 +1060,10 @@ function renderAssets(){
   renderGridSize();
   videoCardDurations?.refresh();
   if (focusedCard) grid.querySelector(`.asset-card[data-id="${CSS.escape(focusedCard)}"]`)?.focus({preventScroll:true});
-  const emptyCollection = currentCollection() && !base.length;
-  const emptyFolder = currentLibrary() && !base.length;
-  const emptyFavorites = state.view === 'favorites' && !base.length;
+  const browsingLocation = effectiveAssetSearchScope() === 'location';
+  const emptyCollection = browsingLocation && currentCollection() && !base.length;
+  const emptyFolder = browsingLocation && currentLibrary() && !base.length;
+  const emptyFavorites = browsingLocation && state.view === 'favorites' && !base.length;
   const emptyTeam = team.active && state.view === 'all' && !emptyCollection && !base.length;
   const showRemoved = emptyTeam && !state.libraries.length && folderContext.hasRemoved();
   $('#empty-heading').textContent = focus?.linked ? '文件夹选区中的资产已不可用'
@@ -1070,10 +1110,18 @@ function renderAssetOriginGroups(groups,visible,libraries) {
     const list = Boolean(libraries);
     const label = escape(title);
     const marked = items.some(asset => assetSearchLocations.alias(asset));
-    const button = `<button type="button" data-asset-origin-group="${escape(key)}" aria-expanded="${assetSearchLocations.opened.has(key)}"
+    const disclosure = `<button type="button" data-asset-origin-group="${escape(key)}" aria-expanded="${assetSearchLocations.opened.has(key)}"
        title="${label}">${icon('chevron')}<strong>${label}</strong><span>${items.length.toLocaleString('zh-CN')} 项</span>${marked ? '<span>有同一 NAS 原件</span>' : ''}</button>`;
-    return `<div class="asset-format-group asset-origin-group" ${list ? 'role="row"' : 'role="heading" aria-level="3"'}>
-      ${list ? '<div role="cell">' + button + '</div>' : button}</div>` +
+    const original = nativeDragOut && items.find(explorerAssetFile);
+    const directory = original && assetSourceDirectory(original.path);
+    const openFolder = directory ? `<button type="button" class="icon-button asset-origin-open"
+      data-open-origin-directory="${escape(directory)}" aria-label="在文件夹中打开 ${label}" title="在文件夹中打开">${icon('folder')}</button>` : '';
+    return `<div class="asset-format-group asset-origin-group" ${list ? 'role="row"' : ''}>
+      <div class="asset-origin-group-controls" ${list ? 'role="cell"' : ''}>
+        <div class="asset-origin-heading" ${list ? '' : 'role="heading" aria-level="3"'}>${disclosure}</div>
+        ${openFolder}
+      </div>
+      </div>` +
       (visibleGroups.get(key)?.items || []).map(asset => renderAssetCard(asset,libraries?.get(asset.libraryId))).join('');
   }).join('');
 }
@@ -1159,7 +1207,7 @@ function renderAssetCard(asset, library) {
       <button class="icon-button card-favorite ${asset.favorite ? 'is-favorite' : ''}" data-favorite="${id}" title="${asset.favorite ? '取消收藏' : '收藏资产'}">${icon('star')}</button>
       ${native && !list && asset.kind === 'video' && !fileWarning ? `<span class="card-video-duration hidden" data-video-duration="${id}" aria-hidden="true"></span>` : ''}
       <button class="card-check" data-mark="${id}" aria-label="选择 ${title}" aria-pressed="${marked}">${icon('check')}</button>
-      ${nativeDragOut ? '<button type="button" class="card-native-drag" data-native-drag title="拖到其他桌面软件" aria-label="拖到其他桌面软件">' + icon('drag-out') + '</button>' : ''}
+      ${nativeDragOut && (!isTeamAsset(asset) || asset.teamMounted) ? '<button type="button" class="card-native-drag" data-native-drag title="拖到其他桌面软件" aria-label="拖到其他桌面软件">' + icon('drag-out') + '</button>' : ''}
     </div>
     <div class="card-info"${list ? ' role="presentation"' : ''}>
       ${list ? `<div class="asset-list-name" role="cell">${nameRow}
@@ -1277,7 +1325,18 @@ $('#group-search-locations').addEventListener('click',event => {
   state.assetWindowAnchor = null;
   renderAssets();
 });
+$('#collapse-search-locations').addEventListener('click',() => {
+  assetSearchLocations.opened.clear();
+  state.assetWindowAnchor = null;
+  renderAssets();
+  $('#group-search-locations').focus({preventScroll:true});
+});
 $('#asset-grid').addEventListener('click',event => {
+  const open = event.target.closest('[data-open-origin-directory]');
+  if (open) {
+    void openAssetOriginDirectory(open.dataset.openOriginDirectory).catch(error);
+    return;
+  }
   const toggle = event.target.closest('[data-asset-origin-group]');
   if (!toggle) return;
   const key = toggle.dataset.assetOriginGroup;
@@ -1463,26 +1522,47 @@ $('#clear-asset-marker').addEventListener('click',() => {
   (card || assetSearchToggle).focus({preventScroll:true});
 });
 
-const thumbObserver=new IntersectionObserver(entries=>{for(const e of entries)if(e.isIntersecting){thumbObserver.unobserve(e.target);const img=e.target.querySelector('[data-thumb]');if(img)enqueueThumb(img);}},{rootMargin:'200px'});
-let thumbActive=0,thumbCacheBytes=0,thumbGeneration=0;const thumbQueue=[];
+const thumbnailViewport = $('#browser-scroll');
+const thumbnailMargin = 160;
+// The native preview worker runs two image jobs. Avoid queuing extra work behind them.
+const thumbnailJobs = native ? 2 : 4;
+const thumbQueue = new Set();
+let thumbActive=0,thumbPrefetch=0,thumbFrame=0,thumbCacheBytes=0,thumbGeneration=0;
+const thumbObserver = new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    const img = entry.target.querySelector('[data-thumb]');
+    if (!img) continue;
+    if (entry.isIntersecting) thumbQueue.add(img);
+    else thumbQueue.delete(img);
+  }
+  scheduleThumbs();
+}, {root:thumbnailViewport,rootMargin:`${thumbnailMargin}px 0px`});
+thumbnailViewport.addEventListener('scroll',scheduleThumbs,{passive:true});
 const pendingThumbnails = new Map();
-const videoThumbnailRetry = new Map();
+const thumbnailRetry = new Map();
+const thumbnailRetryDelay = 20_000;
 function resetThumbnails() {
   thumbCache.clear();
-  videoThumbnailRetry.clear();
+  thumbnailRetry.clear();
   thumbCacheBytes = 0;
   thumbGeneration++;
 }
 function loadVisibleThumbs() {
   thumbObserver.disconnect();
-  thumbQueue.length = 0;
+  thumbQueue.clear();
   for (const img of $$('[data-thumb]')) observeThumbnail(img);
 }
-function videoThumbnailCoolingDown(asset) {
-  const previous = videoThumbnailRetry.get(asset.id);
+function unmountedTeamThumbnail(asset) {
+  return isTeamAsset(asset) && !asset.teamMounted;
+}
+function thumbnailCacheOnly(asset) {
+  return native && (!state.library || unmountedTeamThumbnail(asset));
+}
+function thumbnailCoolingDown(asset) {
+  const previous = thumbnailRetry.get(asset.id);
   if (!previous) return false;
   if (previewChanged(previous.asset, asset)) {
-    videoThumbnailRetry.delete(asset.id);
+    thumbnailRetry.delete(asset.id);
     return false;
   }
   return previous.until > performance.now();
@@ -1492,9 +1572,9 @@ function observeThumbnail(img, after = null) {
   const start = after === null ? 0 : ids.indexOf(after) + 1;
   for (const id of ids.slice(start)) {
     const asset = assetsById.get(id);
-    if (!asset || (team.active && !asset.teamMounted)) continue;
+    if (!asset || (!native && unmountedTeamThumbnail(asset))) continue;
     const cached = thumbCache.get(id);
-    if (cached === null || (cached === undefined && videoThumbnailCoolingDown(asset))) continue;
+    if (cached === null || (cached === undefined && thumbnailCoolingDown(asset))) continue;
     img.dataset.thumb = id;
     setThumb(img, cached);
     if (cached === undefined) thumbObserver.observe(img.parentElement);
@@ -1512,29 +1592,56 @@ $('#asset-grid').addEventListener('error', event => {
   const img = event.target;
   if (img.matches('.card-thumb img[data-thumb]') && img.hasAttribute('src')) setThumb(img, null);
 }, true);
-function enqueueThumb(img){thumbQueue.push(img);pumpThumbs();}
+function scheduleThumbs() {
+  if (!thumbFrame && thumbQueue.size) thumbFrame = requestAnimationFrame(() => {
+    thumbFrame = 0;
+    pumpThumbs();
+  });
+}
+
+function nextThumbnail(viewport, allowPrefetch) {
+  let nearby;
+  let nearest = thumbnailMargin;
+  for (const img of thumbQueue) {
+    if (!img.isConnected) {
+      thumbQueue.delete(img);
+      continue;
+    }
+    const bounds = img.parentElement.getBoundingClientRect();
+    if (!bounds.height || bounds.left >= viewport.right || bounds.right <= viewport.left) continue;
+    if (bounds.top < viewport.bottom && bounds.bottom > viewport.top) return {img,prefetch:false};
+    const distance = Math.max(viewport.top - bounds.bottom,bounds.top - viewport.bottom);
+    if (allowPrefetch && distance < nearest) {
+      nearby = img;
+      nearest = distance;
+    }
+  }
+  return nearby && {img:nearby,prefetch:true};
+}
 function cacheThumb(id,url){thumbCacheBytes-=thumbCache.get(id)?.length||0;thumbCache.set(id,url);thumbCacheBytes+=url?.length||0;while(thumbCache.size>180||thumbCacheBytes>32*1024*1024){const key=thumbCache.keys().next().value;thumbCacheBytes-=thumbCache.get(key)?.length||0;thumbCache.delete(key);}}
 function cacheThumbnailResult(asset, url, cacheOnly) {
   const {id} = asset;
-  if (asset.kind === 'video') {
+  const unmounted = unmountedTeamThumbnail(asset);
+  if (asset.kind === 'video' || unmounted) {
     if (!url) {
       const now = performance.now();
-      const previous = videoThumbnailRetry.get(id);
+      const previous = thumbnailRetry.get(id);
       if (previous && !previewChanged(previous.asset, asset)) {
-        if (previous.until <= now) previous.until = now + 20_000;
+        if (previous.until <= now) previous.until = now + thumbnailRetryDelay;
         return;
       }
-      const retry = {asset, until:now + 20_000};
-      videoThumbnailRetry.set(id, retry);
-      if (videoThumbnailRetry.size > 180) videoThumbnailRetry.delete(videoThumbnailRetry.keys().next().value);
+      const retry = {asset, until:now + thumbnailRetryDelay};
+      thumbnailRetry.set(id, retry);
+      if (thumbnailRetry.size > 180) thumbnailRetry.delete(thumbnailRetry.keys().next().value);
+      if (unmounted) return;
       setTimeout(() => {
-        if (videoThumbnailRetry.get(id) !== retry || previewChanged(asset, assetsById.get(id))) return;
+        if (thumbnailRetry.get(id) !== retry || previewChanged(asset, assetsById.get(id))) return;
         const thumbnail = $(`#asset-grid:not(.hidden) .asset-card[data-id="${CSS.escape(id)}"] [data-thumb]`);
         if (thumbnail) observeThumbnail(thumbnail);
-      }, 20_000);
+      }, thumbnailRetryDelay);
       return;
     }
-    videoThumbnailRetry.delete(id);
+    thumbnailRetry.delete(id);
   }
   if (url || !cacheOnly) cacheThumb(id, url);
 }
@@ -1706,7 +1813,8 @@ async function readThumbnail(asset, size, cacheOnly) {
   if (customCover) cacheOnly = false;
   const existing = await readImage(cacheOnly ? 'thumbnail_cached' : 'thumbnail');
   if (existing) return existing;
-  if (cacheOnly && asset.kind === 'texture' && asset.size <= rasterBrowseSizeLimit &&
+  const browseSizeLimit = asset.ext === 'png' ? pngBrowseSizeLimit : rasterBrowseSizeLimit;
+  if (cacheOnly && asset.kind === 'texture' && asset.size <= browseSizeLimit &&
       (!isTeamAsset(asset) || asset.teamMounted)) {
     // The native route looks for a NAS thumbnail before decoding the source.
     return readImage('thumbnail');
@@ -1768,31 +1876,40 @@ async function resolveWhiteboardAssetMedia(id, workspaceKey) {
 }
 
 function pumpThumbs() {
-  while (thumbActive < 4 && thumbQueue.length) {
-    const img = thumbQueue.shift();
-    if (!img.isConnected) continue;
+  const viewport = thumbnailViewport.getBoundingClientRect();
+  while (thumbActive < thumbnailJobs && thumbQueue.size) {
+    const next = nextThumbnail(viewport,!thumbPrefetch && thumbActive < thumbnailJobs - 1);
+    if (!next) return;
+    const {img,prefetch} = next;
+    thumbQueue.delete(img);
+    thumbObserver.unobserve(img.parentElement);
     const id = img.dataset.thumb;
     const before = assetsById.get(id);
     if (!before) continue;
     const cached = thumbCache.get(id);
-    if (cached !== undefined || videoThumbnailCoolingDown(before)) {
+    if (cached !== undefined || thumbnailCoolingDown(before)) {
       if (cached) setThumb(img, cached);
       else observeThumbnail(img, id);
       continue;
     }
     const coverRevision = coverRevisions.get(id);
     const generation = thumbGeneration;
-    const cacheOnly = native && !state.library;
-    const key = JSON.stringify([id, generation, coverRevision, before.path, before.modified, before.size, cacheOnly]);
+    const cacheOnly = thumbnailCacheOnly(before);
+    const unmounted = unmountedTeamThumbnail(before);
+    const key = JSON.stringify([id, generation, coverRevision, before.path, before.modified, before.size, cacheOnly, unmounted]);
     let request = pendingThumbnails.get(key);
     if (!request) {
-      request = readThumbnail(before, thumbnailSize, cacheOnly).catch(() => null).finally(() => pendingThumbnails.delete(key));
+      const read = unmounted
+        ? api('read_preview', {id,mode:'thumbnail_cached',size:thumbnailSize}).then(preview => preview?.url)
+        : readThumbnail(before, thumbnailSize, cacheOnly);
+      request = read.catch(() => null).finally(() => pendingThumbnails.delete(key));
       pendingThumbnails.set(key, request);
     }
     thumbActive++;
+    if (prefetch) thumbPrefetch++;
     request.then(url => {
       const current = assetsById.get(id);
-      if (generation !== thumbGeneration || cacheOnly !== (native && !state.library) ||
+      if (generation !== thumbGeneration || cacheOnly !== thumbnailCacheOnly(current) ||
           previewChanged(before, current) || coverRevisions.get(id) !== coverRevision) return;
       cacheThumbnailResult(before, url, cacheOnly);
       if (!img.isConnected || img.dataset.thumb !== id) return;
@@ -1800,7 +1917,8 @@ function pumpThumbs() {
       else observeThumbnail(img, id);
     }).finally(() => {
       thumbActive--;
-      pumpThumbs();
+      if (prefetch) thumbPrefetch--;
+      scheduleThumbs();
     });
   }
 }
@@ -2210,7 +2328,7 @@ function locatePinnedFolder(libraryId, path) {
   row.focus({preventScroll: true});
 }
 
-async function jumpToIndexedAsset(id, stillOpen = () => true, beforeOpen = null) {
+async function jumpToIndexedAsset(id, stillOpen = () => true, beforeOpen = null, onLocated = null) {
   const scope = collectionScope();
   if (editor.saving) throw Error('正在保存资产详情，请稍后再试');
   if (editor.dirty && state.selected !== id && !await confirmDiscardWorkspaceEdits(true)) return;
@@ -2226,6 +2344,7 @@ async function jumpToIndexedAsset(id, stillOpen = () => true, beforeOpen = null)
   const card = $$('#asset-grid .asset-card').find(item => item.dataset.id === id);
   card?.scrollIntoView({block:'nearest'});
   card?.focus({preventScroll:true});
+  onLocated?.();
   await preview;
 }
 
@@ -2575,6 +2694,7 @@ function resetFilters(restoreFolder = false, assetWindowAnchor = null, {preserve
   if (restoreFolder) Object.assign(state, quickFilters.remembered());
   else if (!assetWindowAnchor && !preserveSearch) quickFilters.saveIfRemembered();
   if (!preserveSearch) {
+    state.searchScope = 'location';
     assetSearchInput.value = '';
     setAssetSearchExpanded(false);
   }
@@ -2599,11 +2719,11 @@ function setView(view) {
 }
 
 function captureWorkbenchPage() {
-  const {view, library, folder, collection, recursive, kind, tag, search, sort, selected, limit,
+  const {view, library, folder, collection, recursive, kind, tag, search, searchScope, sort, selected, limit,
     formatIncludes, formatExcludes, tagIncludes, tagExcludes, rating, workflow, quickFilters,
     fileNameQuery, assetWindowAnchor, layout, density, gridZoom} = state;
   return {
-    criteria:structuredClone({view, library, folder, collection, recursive, kind, tag, search, sort, selected, limit,
+    criteria:structuredClone({view, library, folder, collection, recursive, kind, tag, search, searchScope, sort, selected, limit,
       formatIncludes, formatExcludes, tagIncludes, tagExcludes, rating, workflow, quickFilters,
       fileNameQuery, assetWindowAnchor, layout, density, gridZoom}),
     text:assetSearchInput.value,
@@ -2630,7 +2750,7 @@ function restoreWorkbenchPage(page) {
   markedAnchor = markedAssets.has(page.markedAnchor) ? page.markedAnchor : null;
   assetFilterToolbar.close();
   const needsPreview = state.selected !== criteria.selected;
-  Object.assign(state, structuredClone(criteria));
+  Object.assign(state, structuredClone(criteria), {searchScope:normalizeAssetSearchScope(criteria.searchScope,criteria.library)});
   if (state.selected && !assetsById.has(state.selected)) state.selected = null;
   if (state.library) expandFolderPath(state.library, state.folder);
   assetSearchInput.value = page.text;
@@ -2671,9 +2791,10 @@ $('#show-earlier-assets').addEventListener('click', () => {
   $('#browser-scroll').scrollTop = 0;
   renderAssets();
 });
-function applySavedSearch({searchText, ...criteria}) {
+function applySavedSearch({searchText, searchScope, ...criteria}) {
   assetFilterToolbar.close();
-  Object.assign(state, criteria, {limit: 60, assetWindowAnchor:null});
+  Object.assign(state, criteria, {searchScope:normalizeAssetSearchScope(searchScope, criteria.library),
+    limit:60, assetWindowAnchor:null});
   if (state.library) expandFolderPath(state.library, state.folder);
   markedAssets.clear();
   markedAnchor = null;
@@ -2824,7 +2945,6 @@ $('#sidebar-tags').addEventListener('toggle', event => {
   else expanded?.delete(path);
 }, true);
 $('#tag-search').addEventListener('input', renderTags);
-$('#active-filter').addEventListener('click',()=>{state.tag=null;renderNav();renderAssets();});
 const quickFilters = initQuickFilters({
   getState: () => state,
   getScope: collectionScope,
@@ -2843,13 +2963,40 @@ const assetFilterToolbar = initAssetFilterToolbar({
   getFacetAssets: facet => assetView(baseAssets(), facet).rows,
   onChange(criteria) {
     Object.assign(state, criteria, {limit:60, assetWindowAnchor:null});
+    if ('search' in criteria) assetSearchInput.value = state.search;
+    if ('rating' in criteria) $('#rating-filter').value = String(state.rating);
+    if ('workflow' in criteria) $('#workflow-filter').value = state.workflow;
     $('#browser-scroll').scrollTop = 0;
-    if ('tag' in criteria) renderNav();
+    if ('tag' in criteria || 'search' in criteria) renderNav();
     renderAssets();
+    if ('kind' in criteria || 'quickFilters' in criteria || 'fileNameQuery' in criteria) quickFilters.saveIfRemembered();
   },
   onError: error,
 });
-$('#search').addEventListener('input',e=>{state.search=e.target.value.trim().toLowerCase().replaceAll('\\','/');state.limit=60;if(!isAssetView())state.view='all';renderNav();renderAssets();});
+assetSearchInput.addEventListener('input', event => {
+  state.search = event.target.value.trim().toLowerCase().replaceAll('\\','/');
+  state.limit = 60;
+  state.assetWindowAnchor = null;
+  if (!isAssetView()) state.view = 'all';
+  renderNav();
+  renderAssets();
+});
+for (const control of [assetSearchScope, assetSearchResultsScope]) {
+  control.addEventListener('change', () => {
+    const scope = normalizeAssetSearchScope(control.value, state.library);
+    if (state.searchScope === scope) return;
+    state.searchScope = scope;
+    if (!state.search) {
+      syncAssetSearchToggle();
+      return;
+    }
+    state.limit = 60;
+    state.assetWindowAnchor = null;
+    $('#browser-scroll').scrollTop = 0;
+    const rows = renderAssets();
+    if (!rows.some(asset => asset.id === state.selected)) selectAsset(rows[0]?.id || null).catch(error);
+  });
+}
 assetSort.addEventListener('change', () => {
   state.sort = assetSort.value;
   libraryPreferences.setItem(sortPreferenceKey(state.view), state.sort);
@@ -3304,11 +3451,6 @@ const projectDependencies = initProjectDependencies({api,async reveal(path) {
   await localExplorer.openPath(path);
 }});
 const projectCleanup = initProjectCleanup({api,reveal:path => localExplorer.openPath(path)});
-if (nativeDragOut) initDeliveryTemplate({api,closeMenu:() => closeTopTools(true),notify:toast,
-  currentFolder:() => !fileWorkspace.hidden ? localExplorer.getCurrentDirectory() :
-    currentLibrary() ? diskFolderPath(currentLibrary(),state.folder) : '',
-  openFolder(path) { revealFileWorkspace(); return localExplorer.openPath(path); },
-});
 const materialSets = initMaterialSets({
   button:$('#show-material-sets'),
   current:() => {
@@ -3340,15 +3482,6 @@ const materialSets = initMaterialSets({
     if (state.view === 'jobs') renderJobs();
   },
   notify:toast,
-});
-const workspaceHandoff = initWorkspaceHandoff({capture:captureWorkspaceHandoff,open:openWorkspaceHandoff,notify:toast});
-$('#workspace-handoff-export').addEventListener('click', () => {
-  closeTopTools(true);
-  void workspaceHandoff.showExport();
-});
-$('#workspace-handoff-import').addEventListener('click', () => {
-  closeTopTools(true);
-  void workspaceHandoff.showImport();
 });
 fileWorkspaceMenu.addEventListener('click', async event => {
   const button = event.target.closest('button[data-asset-workspace-required]');
@@ -3382,9 +3515,6 @@ fileWorkspaceMenu.addEventListener('click',async event => {
         break;
       case 'tab-preferences':
         filePreferences?.openTabSettings(() => topToolsTrigger.focus({preventScroll:true}));
-        break;
-      case 'quit':
-        workspaceBar.querySelector('[data-window-action="close"]')?.click();
         break;
     }
   } catch (failure) { error(failure); }
@@ -3440,36 +3570,32 @@ for (const id of ['#about-button', '#sidebar-version']) {
     showTeamServiceVersion();
   });
 }
-function showTeamServiceVersion() {
+$('#about-github-repository').addEventListener('click', event => {
+  event.preventDefault();
+  openWebsite(event.currentTarget.href);
+});
+async function showTeamServiceVersion() {
   const request = ++aboutTeamVersionRequest;
   const teamId = native && team.active ? team.info?.team?.id : null;
   const epoch = team.epoch;
-
-  async function displayVersion(selector, readVersion) {
-    const row = $(`${selector}-row`);
-    const value = $(selector);
-    row.hidden = !teamId;
-    value.textContent = teamId ? '正在读取…' : '';
-    if (!teamId) return;
-    let version;
-    try {
-      version = await readVersion();
-    } catch {
-      version = '暂时无法读取';
-    }
-    if (request !== aboutTeamVersionRequest) return;
-    if (!team.active || team.epoch !== epoch || team.info?.team?.id !== teamId) {
-      row.hidden = true;
-      return;
-    }
-    value.textContent = version;
-  }
-
-  displayVersion('#about-team-version', async () => {
+  const row = $('#about-team-version-row');
+  const value = $('#about-team-version');
+  row.hidden = !teamId;
+  value.textContent = teamId ? '正在读取…' : '';
+  if (!teamId) return;
+  let version;
+  try {
     const result = await api('team_service_info', {teamId});
-    return result?.serverVersion || '服务未提供版本号';
-  });
-  displayVersion('#about-team-latest', () => api('latest_team_service_version'));
+    version = result?.serverVersion || '服务未提供版本号';
+  } catch {
+    version = '暂时无法读取';
+  }
+  if (request !== aboutTeamVersionRequest) return;
+  if (!team.active || team.epoch !== epoch || team.info?.team?.id !== teamId) {
+    row.hidden = true;
+    return;
+  }
+  value.textContent = version;
 }
 async function showClientVersion() {
   const version = $('#about-version');
@@ -4363,6 +4489,7 @@ let hostedTeamBusy = false;
 let hostedStatusRequest = 0;
 let nasTeamBusy = false;
 let nasExportDirectory = null;
+let teamThumbnailCacheBusy = false;
 
 async function readHostedTeam() {
   const request = ++hostedStatusRequest;
@@ -4383,6 +4510,7 @@ function openTeamDialog() {
     return;
   }
   $('#team-dialog-status').textContent = '';
+  $('#team-thumbnail-cache-status').textContent = '';
   teamSetupMode = 'join';
   renderTeamSettings();
   openDialog('#team-dialog');
@@ -4411,6 +4539,16 @@ function renderTeamFolderRow(library, folder, {linked, hidden, canDisconnect, ca
       ${canDisconnect ? `<button type="button" class="button subtle" data-disconnect-team-library="${escape(library.id)}" aria-label="移出团队库 ${escape(name)}">移出团队库</button>` : ''}
     </div>
   </div>`;
+}
+
+function renderTeamThumbnailCache() {
+  const path = $('#team-thumbnail-cache-path');
+  path.textContent = team.thumbnailCacheRoot || '默认缓存位置';
+  path.title = team.thumbnailCacheRoot || '';
+  $('#team-thumbnail-cache-pick').disabled = teamThumbnailCacheBusy;
+  const reset = $('#team-thumbnail-cache-reset');
+  reset.classList.toggle('hidden', !team.thumbnailCacheRoot);
+  reset.disabled = teamThumbnailCacheBusy;
 }
 
 function renderTeamSettings() {
@@ -4454,6 +4592,7 @@ function renderTeamSettings() {
   }
   const canDisconnect = canManageSharedFolders();
   $('#team-member').textContent = member.name;
+  renderTeamThumbnailCache();
   $('#team-publish-form').classList.toggle('hidden', !canPublishSnapshot);
   $('#team-library-list').innerHTML = team.allLibraries.flatMap(library => {
     const hidden = hiddenRoots.has(library.id);
@@ -4477,7 +4616,7 @@ function setTeamSyncStatus(message) {
 
 function previewChanged(before, after) {
   return !before || !after || before.path !== after.path || before.modified !== after.modified ||
-    before.size !== after.size || before.thumbnail !== after.thumbnail;
+    before.size !== after.size || before.thumbnail !== after.thumbnail || before.teamMounted !== after.teamMounted;
 }
 
 function invalidateCover(id) {
@@ -4486,7 +4625,7 @@ function invalidateCover(id) {
   coverRevisions.set(id, (coverRevisions.get(id) || 0) + 1);
   thumbCacheBytes -= thumbCache.get(id)?.length || 0;
   thumbCache.delete(id);
-  videoThumbnailRetry.delete(id);
+  thumbnailRetry.delete(id);
 }
 
 async function refreshTeamCovers() {
@@ -4526,6 +4665,7 @@ function updateTeamCatalog(data, force = false) {
       thumbCacheBytes -= thumbCache.get(asset.id)?.length || 0;
       thumbCache.delete(asset.id);
     }
+    if (force && unmountedTeamThumbnail(asset)) thumbnailRetry.delete(asset.id);
   }
   team.catalog = {assets: data.assets, libraries: data.libraries};
   team.allLibraries = data.allLibraries || data.libraries;
@@ -4605,6 +4745,7 @@ function enterTeam(data, {cached = false} = {}) {
   state.collections = [];
   state.definedTags = [];
   team.info = {team:data.team,member:data.member};
+  team.thumbnailCacheRoot = data.thumbnailCacheRoot || null;
   team.catalog = null;
   team.allLibraries = [];
   team.sharedHiddenFolders = [];
@@ -4688,7 +4829,13 @@ async function refreshTeam(force = false) {
       if (team.active && team.epoch === epoch) {
         $('#team-sync-status').dataset.offline = 'yes';
         setTeamSyncStatus('同步失败 · 显示上次同步的资产');
-        if (force) error(e);
+        if (force) {
+          for (const [id,{asset}] of thumbnailRetry) {
+            if (unmountedTeamThumbnail(asset)) thumbnailRetry.delete(id);
+          }
+          if (isAssetView()) loadVisibleThumbs();
+          error(e);
+        }
       }
       throw e;
     }
@@ -4716,6 +4863,42 @@ $('#team-link-directory').addEventListener('click', () => {
   $('#team-dialog').close();
   showAssetImport();
 });
+
+async function changeTeamThumbnailCache(pick) {
+  if (!team.active || teamThumbnailCacheBusy) return;
+  const teamId = team.info.team.id;
+  const epoch = team.epoch;
+  const current = () => team.active && team.epoch === epoch;
+  const status = $('#team-thumbnail-cache-status');
+  teamThumbnailCacheBusy = true;
+  status.textContent = '';
+  renderTeamThumbnailCache();
+  try {
+    const path = pick ? await api('pick_folder', {purpose:'team-thumbnail-cache'}) : null;
+    if (!current() || (pick && !path)) return;
+    status.textContent = '正在保存缓存位置…';
+    const result = await api('team_set_thumbnail_cache_root', {teamId, path});
+    if (!current()) return;
+    const next = result.thumbnailCacheRoot || null;
+    if (next !== team.thumbnailCacheRoot) {
+      team.thumbnailCacheRoot = next;
+      resetThumbnails();
+      if (isAssetView()) loadVisibleThumbs();
+    }
+    status.textContent = next ? '已保存共享缓存位置' : '已恢复默认缓存位置';
+  } catch (failure) {
+    if (current()) status.textContent = String(failure?.message || failure);
+  } finally {
+    teamThumbnailCacheBusy = false;
+    if (team.active) renderTeamThumbnailCache();
+    if (current() && $('#team-dialog').open && teamSetupMode === 'join' && document.activeElement === document.body) {
+      $('#team-thumbnail-cache-pick').focus({preventScroll:true});
+    }
+  }
+}
+
+$('#team-thumbnail-cache-pick').addEventListener('click', () => changeTeamThumbnailCache(true));
+$('#team-thumbnail-cache-reset').addEventListener('click', () => changeTeamThumbnailCache(false));
 $('#team-refresh').addEventListener('click', async event => {
   const button = event.currentTarget;
   button.disabled = true;
@@ -4968,6 +5151,17 @@ if (native) {
 
 function draggedIds(id) {
   return (markedAssets.has(id) ? [...markedAssets] : [id]).filter(assetId => assetsById.has(assetId));
+}
+
+async function copyAssetOriginals(ids,{names = false,format} = {}) {
+  const remaining = new Set(ids);
+  const ordered = $$('#asset-grid .asset-card').map(card => card.dataset.id).filter(id => remaining.delete(id));
+  const selected = [...ordered,...remaining].map(id => assetsById.get(id)).filter(Boolean);
+  const values = selected.map(asset => names ? assetFilename(asset) : explorerAssetFile(asset)?.path).filter(Boolean);
+  if (!values.length) return toast(names ? '所选资产没有可复制的原文件名' : '所选资产没有本机可用的原件路径',true);
+  await copyWorkspaceText(formatExplorerPaths(values,format));
+  const skipped = selected.length - values.length;
+  toast(`已复制 ${values.length} 个原${names ? '文件名' : '件路径'}${skipped ? `，${skipped} 项不可用` : ''}`);
 }
 
 function whiteboardMediaIds(ids) {
@@ -5956,6 +6150,9 @@ function showAssetCardMenu(event) {
   const ids = draggedIds(asset.id);
   const local = native && (!isTeamAsset(asset) || asset.teamMounted);
   const preview = [['preview', asset.kind === 'video' ? 'play' : 'eye', '快速预览', 'Space']];
+  if (ids.length === 1 && assetRenderSequencePath(asset)) {
+    preview.push(['inspect-render-sequence','stack','检查渲染序列…']);
+  }
   if (native && ids.length === 1 && asset.ext === 'exr' && explorerAssetFile(asset)) {
     preview.push(['exr-channels','compare','EXR 通道对照…']);
   }
@@ -5969,6 +6166,13 @@ function showAssetCardMenu(event) {
   const covers = [];
   const send = [];
   const remove = [];
+  const sourceInfo = [];
+  const selection = ids.map(id => assetsById.get(id));
+  if (selection.some(asset => assetFilename(asset))) sourceInfo.push(['copy-source-names','copy','复制原文件名']);
+  if (selection.some(explorerAssetFile)) {
+    sourceInfo.push(['copy-source-path','copy','复制原件路径','Ctrl+Shift+C'],
+      ...explorerPathFormats.map(([format,label]) => ['copy-source-path:' + format,'copy',label]));
+  }
 
   if (ids.length >= 2 && ids.length <= 4) preview.push(['compare', 'compare', '并排对比']);
   preview.push(['return-marker','pin',currentAssetBrowse()?.marker?.id === asset.id ? '清除返回标记' : '设为返回标记']);
@@ -6002,7 +6206,7 @@ function showAssetCardMenu(event) {
       send.push(['c4d-project:application', 'download', '调用 Blender 保存 C4D…']);
     }
   }
-  for (const session of state.sessions) {
+  for (const session of isTeamAsset(asset) && !asset.teamMounted ? [] : state.sessions) {
     const smart = canUseSmartImport(session, asset);
     if (smart || sessionSupportsAsset(session, asset)) {
       send.push(['send:' + session.id, 'drag-out', (smart ? '智能导入到 ' : '导入到 ') + (session.label || dccs[session.dcc]?.name || session.dcc)]);
@@ -6022,6 +6226,7 @@ function showAssetCardMenu(event) {
   const other = [['group:files', 'notes', '文件与封面']];
   if (send.length) other.push(['group:dcc', 'drag-out', 'DCC 导入']);
   if (!files.length && !covers.length) other.shift();
+  if (sourceInfo.length) other.push(['group:copy-source','copy','复制原件信息']);
   showAssetMenu([['预览与定位', preview], ['整理', organize], ['更多操作', other], ['删除', remove]], x, y, '资产操作', {
     name:ids.length > 1 ? `已选 ${ids.length} 项资产` : asset.name,
     detail:ids.length > 1 ? '' : [asset.name, asset.path || asset.relativePath].filter(Boolean).join('\n'),
@@ -6029,6 +6234,7 @@ function showAssetCardMenu(event) {
     submenus:{
       files:{title:'文件与封面', section:['文件与封面', [...files, ...covers]]},
       dcc:{title:'DCC 导入', section:['DCC 导入', send]},
+      'copy-source':{title:'复制原件信息',section:['复制原件信息',sourceInfo]},
     },
   });
 }
@@ -6127,11 +6333,18 @@ assetMenu.addEventListener('click', event => {
   else if (action === 'asset-ai') assetAI.show(draggedIds(id));
   else if (action === 'thumbnails') showThumbnailSettings(draggedIds(id));
   else if (action === 'copy-whiteboard-reference') copyWhiteboardMediaReferences(whiteboardMediaIds(draggedIds(id))).catch(error);
+  else if (action === 'copy-source-names') copyAssetOriginals(draggedIds(id),{names:true}).catch(error);
+  else if (action === 'copy-source-path' || action.startsWith('copy-source-path:'))
+    copyAssetOriginals(draggedIds(id),{format:action.split(':')[1]}).catch(error);
   else if (action === 'copy') copyFiles(draggedIds(id)).catch(error);
   else if (action === 'recycle') assetRecycle.confirm(draggedIds(id));
   else if (action === 'delete-source') assetRecycle.confirm(draggedIds(id), 'delete');
   else if (action === 'check') checkFiles(draggedIds(id)).catch(error);
   else if (action === 'relink') showRelinkSuggestions(id).catch(error);
+  else if (action === 'inspect-render-sequence') {
+    const path = assetRenderSequencePath(assetsById.get(id));
+    if (path && draggedIds(id).length === 1) void renderSequenceViewer.show({path,isDirectory:false});
+  }
   else if (action === 'exr-channels') {
     const asset = assetsById.get(id);
     if (asset) void exrChannelViewer.show({id,name:asset.name});
@@ -6518,7 +6731,8 @@ initWorkspaceLayoutPresets({
   enabled:() => fileWorkspace.hidden && isAssetView() && Boolean(workspaceLayout),
   capture(includeSearch) {
     return {panels:workspaceLayout.snapshot(),view:state.layout,fit:state.thumbnailFit,density:state.density,zoom:state.gridZoom,
-      ...(includeSearch ? {search:{query:assetSearchInput.value.slice(0,1024),expanded:assetSearchToggle.getAttribute('aria-expanded') === 'true'}} : {})};
+      ...(includeSearch ? {search:{query:assetSearchInput.value.slice(0,1024),scope:state.searchScope,
+        expanded:assetSearchToggle.getAttribute('aria-expanded') === 'true'}} : {})};
   },
   apply(preset) {
     if (!Object.hasOwn(assetViewButtons,preset.view) || !['compact','normal','large'].includes(preset.density) ||
@@ -6534,6 +6748,7 @@ initWorkspaceLayoutPresets({
     if (typeof preset.search?.query === 'string' && preset.search.query.length <= 1024) {
       assetSearchInput.value = preset.search.query;
       state.search = preset.search.query.trim().toLowerCase().replaceAll('\\','/');
+      state.searchScope = normalizeAssetSearchScope(preset.search.scope,state.library);
       state.limit = 60;
       state.assetWindowAnchor = null;
       setAssetSearchExpanded(preset.search.expanded === true);
@@ -7083,6 +7298,10 @@ shouldConfirmDesktopClose = () => fileInspector?.hasUnsavedChanges?.()
   : filePreferences?.get().confirmCloseTabs &&
     localExplorer.getTabCount() + (assetWorkspaceReady ? workbenchTabs.getTabCount() : 0) > 1;
 
+function hasAssetWorkspaceTab() {
+  return Boolean(assetWorkspaceReady && workbenchTabs.getTabCount() && !appRoot.classList.contains('app-starting'));
+}
+
 function renderNewTabPreference(action) {
   const choice = newTabOptions.querySelector('[data-new-tab="'+action+'"]');
   const label = choice ? '新建标签页 · ' + choice.textContent.trim() : '新建标签页';
@@ -7099,16 +7318,15 @@ if (nativeDragOut) {
   const filesOption = newTabOptions.querySelector('[data-new-tab="files"]');
   const batchFilesOption = newTabOptions.querySelector('[data-new-tab="batch-files"]');
   const currentOption = newTabOptions.querySelector('[data-new-tab="current"]');
-  const hasAssetView = () => Boolean(assetWorkspaceReady && workbenchTabs.getTabCount() && !appRoot.classList.contains('app-starting'));
-  initWorkspaceTabOverview(workspaceBar, hasAssetView);
-  const canDuplicateCurrent = () => fileWorkspace.hidden ? hasAssetView() : localExplorer.canDuplicateActive();
+  initWorkspaceTabOverview(workspaceBar, hasAssetWorkspaceTab);
+  const canDuplicateCurrent = () => fileWorkspace.hidden ? hasAssetWorkspaceTab() : localExplorer.canDuplicateActive();
   renderNewTabPreference(filePreferences.get().newTabAction);
   newTabOptions.addEventListener('beforetoggle',event => {
     if (event.newState !== 'open') return;
     newTabOptions.style.setProperty('--new-tab-left',newTabTrigger.getBoundingClientRect().left + 'px');
     filesOption.disabled = originalAddFile.disabled;
     batchFilesOption.hidden = fileWorkspace.hidden;
-    currentOption.hidden = fileWorkspace.hidden ? !hasAssetView() : !localExplorer.getTabCount();
+    currentOption.hidden = fileWorkspace.hidden ? !hasAssetWorkspaceTab() : !localExplorer.getTabCount();
     currentOption.disabled = !canDuplicateCurrent();
   });
   async function openNewTab(action) {
@@ -7571,6 +7789,13 @@ document.addEventListener('keydown', event => {
     } else if (event.key.toLowerCase() === 'a' && active?.closest('#asset-grid')) {
       event.preventDefault();
       $('#select-visible').click();
+    } else if (event.key.toLowerCase() === 'c' && event.shiftKey && !editing && isAssetView() &&
+        active?.closest('#asset-grid') && assetMenu.classList.contains('hidden') && document.getSelection()?.isCollapsed) {
+      const ids = markedAssets.size ? [...markedAssets] : [active.closest('.asset-card')?.dataset.id || state.selected].filter(Boolean);
+      if (ids.length) {
+        event.preventDefault();
+        if (!event.repeat) copyAssetOriginals(ids).catch(error);
+      }
     } else if (event.key.toLowerCase() === 'c' && !event.shiftKey && !editing && isAssetView() &&
         !active?.closest('button, a') && document.getSelection()?.isCollapsed) {
       const cardId = active?.closest('#asset-grid .asset-card')?.dataset.id;
@@ -7737,6 +7962,11 @@ function explorerAssetFile(asset) {
   return matchFolderAddress(asset.path,[]) ? asset : null;
 }
 
+function assetRenderSequencePath(asset) {
+  const path = nativeDragOut ? explorerAssetFile(asset)?.path : null;
+  return path && isExplorerRenderFrame(path.split(/[\\/]/).at(-1)) ? path : null;
+}
+
 async function readExplorerDriveDetails(path) {
   const details = await invoke('local_explorer_drive_details',{path});
   const drive = /^[a-z]:/i.exec(path)?.[0].toLowerCase();
@@ -7755,12 +7985,9 @@ function explorerCatalogAddress(path) {
   return remote ? remote + normal.slice(2) : normal;
 }
 
-function normalizedExplorerPathKey(normal) {
-  return normal && (/^[a-z]:|^\\\\/i.test(normal) ? normal.replace(/\\+$/,'').toLowerCase() : normal);
-}
-
 function explorerPathKey(path) {
-  return normalizedExplorerPathKey(explorerCatalogAddress(path));
+  const normal = explorerCatalogAddress(path);
+  return normal && (/^[a-z]:|^\\\\/i.test(normal) ? normal.replace(/\\+$/,'').toLowerCase() : normal);
 }
 
 let explorerAssetPathIndex;
@@ -7995,8 +8222,7 @@ async function openExplorerReference(record, reference, scope, stillRequested = 
   }
 }
 
-async function lookupExplorerMetadata(entries) {
-  await ensureAssetWorkspace();
+function findExplorerMetadata(entries) {
   const scope = collectionScope();
   const assets = [];
   for (const {path,isDirectory} of entries) {
@@ -8006,12 +8232,37 @@ async function lookupExplorerMetadata(entries) {
   return {scope,assets};
 }
 
-async function saveExplorerMetadata({scope,updates}) {
+async function lookupExplorerMetadata(entries) {
+  await ensureAssetWorkspace();
+  return findExplorerMetadata(entries);
+}
+
+function lookupExplorerRating(entries) {
+  if (!assetWorkspaceReady || appRoot.classList.contains('app-starting') || !entries.length) return null;
+  const target = findExplorerMetadata(entries);
+  const {assets} = target;
+  if (assets.length !== entries.length || assets.some(asset => !asset.writable) ||
+      new Set(assets.map(asset => asset.id)).size !== assets.length) return null;
+  return target;
+}
+
+async function setExplorerRating({scope,assets,rating,stillSelected}) {
+  const updates = assets.filter(asset => asset.rating !== rating)
+    .map(({id,path,revision}) => ({id,path,revision,patch:{rating}}));
+  if (!updates.length) return toast('所选资产的评分没有变化');
+  const {saved,errors} = await saveExplorerMetadata({scope,updates,stillSelected});
+  const message = `已保存 ${saved} 项资产评分`;
+  toast(errors.length ? `${message}，${errors.length} 项未保存。 ${errors[0].split('\n').at(-1)}` : message,Boolean(errors.length));
+}
+
+async function saveExplorerMetadata({scope,updates,stillSelected}) {
   if (scope !== collectionScope()) throw Error('工作空间已切换，请重新选择文件');
   const assets = [], errors = [];
+  let saved = 0;
   for (const {id,path,revision,patch} of updates) {
     try {
       if (scope !== collectionScope()) throw Error('工作空间已切换');
+      if (stillSelected && !stillSelected()) throw Error('文件选择已变化');
       const asset = indexedExplorerFile(path, {unique:true});
       if (!asset || asset.id !== id) throw Error('文件对应的资产已变化');
       if (editor.id === id && (editor.dirty || editor.saving)) throw Error('请先保存资产详情中的编辑');
@@ -8023,6 +8274,7 @@ async function saveExplorerMetadata({scope,updates}) {
       const next = Object.fromEntries(Object.entries({name,tags,notes,rating,workflow})
         .filter(([,value]) => value !== undefined));
       await writeMetadata(asset, next, revision, expected);
+      saved++;
       const current = scope === collectionScope() && assetsById.get(id);
       if (current) assets.push(explorerMetadataRecord(current, path));
     } catch (failure) {
@@ -8034,7 +8286,7 @@ async function saveExplorerMetadata({scope,updates}) {
     renderAssets();
     if (!editor.dirty && !editor.saving) void renderInspector(false).catch(error);
   }
-  return {assets,errors};
+  return {assets,errors,saved};
 }
 
 function explorerFolderMatch(path, address = explorerCatalogAddress) {
@@ -8215,7 +8467,8 @@ async function browseFolderAssets({path,isDirectory,selectedPath,selectedPaths})
       }
     }
     if (!asset) { toast('此文件尚未在当前资产库中索引'); return; }
-    return jumpToIndexedAsset(asset.id, current, revealAssetWorkspace);
+    const origin = workspaceReturnPoint('files');
+    return jumpToIndexedAsset(asset.id, current, revealAssetWorkspace, () => rememberWorkspaceReturn(origin));
   }
   const match = await explorerFolderForAssets(path,current);
   if (!match || !current()) return;
@@ -8225,14 +8478,75 @@ async function browseFolderAssets({path,isDirectory,selectedPath,selectedPaths})
   editor.dirty = false;
   const asset = selectedPath && indexedExplorerFile(selectedPath);
   const id = asset?.libraryId === match.libraryId && asset.id || null;
+  const origin = workspaceReturnPoint('files');
   revealAssetWorkspace();
   showFolderTree(match.libraryId,match.folder);
   openFolder(match.libraryId,match.folder,id);
+  rememberWorkspaceReturn(origin);
   if (id) await selectAsset(id);
   centerFolderInTree(match.libraryId,match.folder);
 }
 
 const linkedWorkspaceTabs = new Map();
+
+function workspaceReturnPoint(kind) {
+  if (!nativeDragOut) return null;
+  const tab = kind === 'files' ? localExplorer.getTabIdentity?.() : workbenchTabs.activeId();
+  if (!tab) return null;
+  const scope = collectionScope();
+  const path = kind === 'files' ? localExplorer.getCurrentDirectory() : null;
+  const location = kind === 'files' ? explorerPathKey(path) : [state.view,state.library,state.folder,state.collection];
+  return {kind,tab,scope,path,key:JSON.stringify([scope,kind,tab,location])};
+}
+
+function currentWorkspaceReturnPoint() {
+  return workspaceReturnPoint(fileWorkspace.hidden ? 'assets' : 'files');
+}
+
+function workspaceReturnAvailable(origin) {
+  if (!origin || origin.scope !== collectionScope()) return false;
+  return origin.kind === 'files' ? localExplorer.hasTabIdentity?.(origin.tab,origin.path) : workbenchTabs.hasTab(origin.tab);
+}
+
+function rememberWorkspaceReturn(origin) {
+  const target = currentWorkspaceReturnPoint();
+  if (!origin || !target || origin.kind === target.kind || origin.scope !== target.scope) return;
+  workspaceReturns.delete(target.key);
+  workspaceReturns.set(target.key,origin);
+  if (workspaceReturns.size > 96) workspaceReturns.delete(workspaceReturns.keys().next().value);
+  renderWorkspaceReturn();
+}
+
+function renderWorkspaceReturn() {
+  const target = currentWorkspaceReturnPoint();
+  const origin = target && workspaceReturns.get(target.key);
+  const available = workspaceReturnAvailable(origin);
+  workspaceReturnButton.hidden = !available;
+  if (!available) return;
+  const label = origin.kind === 'files' ? '返回原文件夹标签页' : '返回原资产库标签页';
+  workspaceReturnButton.title = label;
+  workspaceReturnButton.setAttribute('aria-label',label);
+}
+
+workspaceReturnButton.addEventListener('click',async () => {
+  const target = currentWorkspaceReturnPoint();
+  const origin = target && workspaceReturns.get(target.key);
+  if (!workspaceReturnAvailable(origin)) return renderWorkspaceReturn();
+  workspaceReturnButton.disabled = true;
+  try {
+    if (origin.kind === 'files') {
+      if (!localExplorer.showTabIdentity(origin.tab,origin.path)) return;
+    } else {
+      if (!await workbenchTabs.activateLinkedView(origin.tab) || currentWorkspaceReturnPoint()?.key !== target.key) return;
+      await showAssetWorkspace({ensureTab:false});
+    }
+    if (workspaceReturns.get(target.key) === origin) workspaceReturns.delete(target.key);
+  } catch (failure) { error(failure); }
+  finally {
+    workspaceReturnButton.disabled = false;
+    renderWorkspaceReturn();
+  }
+});
 
 function carryExplorerFilenameSearch(link, filename) {
   if (state.fileNameQuery !== (link.carriedFilenameSearch ?? '') || filename === state.fileNameQuery) return;
@@ -8304,127 +8618,6 @@ async function applyLinkedAssetSelection({ids,lead,total}) {
   await preview;
 }
 
-function handoffCatalogId() {
-  return team.active ? `team:${team.info.team.id}` : personalWorkspace.id;
-}
-
-async function captureWorkspaceHandoff() {
-  if (!fileWorkspace.hidden) {
-    const path = localExplorer.getCurrentDirectory();
-    if (!path) throw Error('请先打开具体的文件夹');
-    const entries = localExplorer.getSelectedEntries().filter(item => !item.isDirectory);
-    const directory = await workspaceNetworkPath(path,false);
-    const assets = await Promise.all(entries.map(async ({path,name}) => ({path:await workspaceNetworkPath(path,false),name})));
-    return {workspace:{kind:'files',path:directory,name:path.split(/[/\\]/).filter(Boolean).at(-1)},assets};
-  }
-  await ensureAssetWorkspace();
-  const library = currentLibrary();
-  const collection = currentCollection();
-  const projectId = state.view === 'whiteboard' ? whiteboard.captureProject() : null;
-  const view = projectId ? 'whiteboard' : collection ? 'collection' : library ? 'folder'
-    : ['favorites','recent'].includes(state.view) ? state.view : 'all';
-  const workspace = {kind:'assets',name:$('#page-title').textContent,view,catalogId:handoffCatalogId()};
-  if (view === 'folder') {
-    const path = diskFolderPath(library,state.folder);
-    Object.assign(workspace,{path:path ? await workspaceNetworkPath(path,false) : undefined,libraryId:library.id,folder:state.folder});
-  }
-  if (view === 'collection') workspace.collectionId = collection.id;
-  if (view === 'whiteboard') workspace.projectId = projectId;
-  const ids = markedAssets.size ? [...markedAssets] : state.selected ? [state.selected] : [];
-  const assets = await Promise.all(ids.map(id => assetsById.get(id)).filter(Boolean).map(async asset => {
-    const path = explorerAssetFile(asset)?.path;
-    return {id:asset.id,name:asset.name,path:path ? await workspaceNetworkPath(path,false) : undefined};
-  }));
-  return {workspace,assets};
-}
-
-async function openFileWorkspaceHandoff(workspace,assets) {
-  if (!nativeDragOut) throw Error('请在 Windows 客户端打开这个文件夹交接');
-  const fromFiles = !fileWorkspace.hidden;
-  const previousTab = fromFiles ? localExplorer.getTabIdentity() : workbenchTabs.activeId();
-  const previousDirectory = fromFiles ? localExplorer.getCurrentDirectory() : null;
-  const normalize = path => matchFolderAddress(path,[])?.path;
-  const driveRoot = path => /^[a-z]:\\/i.exec(path || '')?.[0].toUpperCase();
-  const originals = assets.map(({path}) => normalize(path));
-  const directory = normalize(await workspaceNetworkPath(workspace.path,true)) || workspace.path;
-  const roots = new Set([directory,workspace.path,...localExplorer.getTabLocations(),...originals].map(driveRoot).filter(Boolean));
-  const shares = await Promise.all([...roots].map(async root => [root,normalize(await workspaceNetworkPath(root,false))]));
-  const mappings = new Map(shares.filter(([,share]) => share?.startsWith('\\\\')));
-  const pathIdentity = path => {
-    const normal = normalize(path);
-    const remote = mappings.get(driveRoot(normal));
-    return normalizedExplorerPathKey(remote ? remote.replace(/\\+$/,'') + '\\' + normal.slice(3) : normal);
-  };
-  const sourceKey = pathIdentity(workspace.path);
-  const paths = originals.filter(path => path && pathIdentity(assetSourceDirectory(path)) === sourceKey);
-  if (fromFiles !== !fileWorkspace.hidden || (fromFiles
-    ? previousTab !== localExplorer.getTabIdentity() || previousDirectory !== localExplorer.getCurrentDirectory()
-    : previousTab !== workbenchTabs.activeId())) return false;
-  revealFileWorkspace();
-  const result = await localExplorer.revealSources(paths,{directory,lead:paths[0],keepTabs:true,pathIdentity,
-    keepSelection:!assets.length});
-  if (!result || fileWorkspace.hidden) return false;
-  if (result.unavailable) {
-    if (!fromFiles) revealAssetWorkspace(false);
-    else if (previousTab) localExplorer.showTabIdentity(previousTab,previousDirectory);
-    throw Error(result.unavailable === 'tab-limit' ? '文件夹标签已满，请先关闭一页' : '无法打开交接目录，请核对路径或挂载');
-  }
-  if (!assets.length) return {message:'已打开交接目录'};
-  const outside = assets.length-paths.length;
-  const missing = result.requested-result.count;
-  const details = [
-    outside && outside + ' 项无路径或位于其他目录',
-    missing && missing + ' 个原件缺失或未出现在当前文件视图',
-    result.limited && result.limited + ' 个超出单次定位上限',
-  ].filter(Boolean);
-  return {message:'已打开交接目录，定位 ' + result.count + ' 个原件' + (details.length ? ' · ' + details.join(' · ') : '')};
-}
-
-async function openWorkspaceHandoff({workspace,assets}) {
-  if (workspace.kind === 'files') return openFileWorkspaceHandoff(workspace,assets);
-
-  await ensureAssetWorkspace();
-  const sameCatalog = !workspace.catalogId || workspace.catalogId === handoffCatalogId();
-  const scope = collectionScope();
-  let folder;
-  if (workspace.view === 'folder') {
-    const node = sameCatalog && findFolder(folderTrees.get(workspace.libraryId),workspace.folder);
-    folder = node ? {libraryId:workspace.libraryId,folder:node.path} : indexedExplorerFolder(workspace.path);
-    if (!folder && workspace.path) folder = indexedExplorerFolder(await workspaceNetworkPath(workspace.path,true));
-    if (!folder) throw Error('当前资产库找不到交接目录，请核对路径或打开对应资产库');
-  }
-  if (workspace.view === 'collection' && (!sameCatalog || !state.collections.some(item => item.id === workspace.collectionId))) {
-    throw Error('当前资产库找不到这个合集');
-  }
-  if (workspace.view === 'whiteboard' && !sameCatalog) throw Error('请先打开白板所在的资产库');
-
-  const tab = await workbenchTabs.openLinkedView(workspace.name || '工作交接');
-  if (!tab || scope !== collectionScope()) throw Error('未打开交接视图');
-  revealAssetWorkspace(false);
-  if (folder) openFolder(folder.libraryId,folder.folder);
-  else if (workspace.view === 'collection') openCollection(workspace.collectionId);
-  else setView(workspace.view);
-  if (workspace.view === 'whiteboard') {
-    if (!await whiteboard.restoreProject(workspace.projectId)) throw Error('当前工作空间找不到这个白板项目');
-    return {message:'已打开交接白板'};
-  }
-  const ids = new Set((await Promise.all(assets.map(async ({id,path}) => {
-    if (sameCatalog && assetsById.has(id)) return id;
-    if (!path) return null;
-    return indexedExplorerFile(path,{unique:true})?.id ||
-      indexedExplorerFile(await workspaceNetworkPath(path,true),{unique:true})?.id;
-  }))).filter(Boolean));
-  if (scope !== collectionScope()) throw Error('已切换资产库，请重新打开交接视图');
-  if (ids.size) {
-    const matches = filtered().filter(asset => ids.has(asset.id));
-    for (const asset of matches) markedAssets.add(asset.id);
-    if (matches.length) await selectAsset(matches[0].id);
-    renderAssets();
-    return {message:`已打开交接视图，定位 ${matches.length} 项资产`};
-  }
-  return {message:assets.length ? '已打开交接视图，当前库未找到所选资产引用' : '已打开交接视图'};
-}
-
 async function browseCurrentFolderAsAssets(path = localExplorer.getCurrentDirectory(), selection = null, resolved) {
   if (!path || fileWorkspace.hidden) return;
   const fileTab = localExplorer.getTabIdentity?.();
@@ -8435,6 +8628,7 @@ async function browseCurrentFolderAsAssets(path = localExplorer.getCurrentDirect
     fileTab === localExplorer.getTabIdentity?.() && path === localExplorer.getCurrentDirectory();
   const match = await explorerFolderForAssets(path,stillOpen,resolved);
   if (!match || !stillOpen()) return;
+  const origin = workspaceReturnPoint('files');
   const files = selection || {
     selectedPath:localExplorer.getSelectedEntry()?.path,
     selectedPaths:localExplorer.getSelectedEntries().filter(item => !item.isDirectory).map(item => item.path),
@@ -8450,6 +8644,7 @@ async function browseCurrentFolderAsAssets(path = localExplorer.getCurrentDirect
       const targets = linkedAssetSelection(match.libraryId,files);
       revealAssetWorkspace(false);
       carryExplorerFilenameSearch(linked,filename);
+      rememberWorkspaceReturn(origin);
       $('#asset-folder-file-view').focus({preventScroll:true});
       return applyLinkedAssetSelection(targets);
     }
@@ -8465,6 +8660,7 @@ async function browseCurrentFolderAsAssets(path = localExplorer.getCurrentDirect
   showFolderTree(match.libraryId,match.folder);
   openFolder(match.libraryId,match.folder,id || null);
   carryExplorerFilenameSearch(link,filename);
+  rememberWorkspaceReturn(origin);
   centerFolderInTree(match.libraryId,match.folder);
   if (targets.total) return applyLinkedAssetSelection(targets);
   $('#asset-folder-file-view').focus({preventScroll:true});
@@ -8509,6 +8705,7 @@ async function locateMarkedOriginals() {
   if (!nativeDragOut || !isAssetView() || !fileWorkspace.hidden || locatingOriginals || $('dialog[open]')) return;
   const scope = collectionScope();
   const tab = workbenchTabs.activeId();
+  const returnTo = workspaceReturnPoint('assets');
   const lead = state.selected;
   const view = JSON.stringify([state.view,state.library,state.folder,state.collection]);
   const diskPath = id => explorerAssetFile(assetsById.get(id))?.path || '';
@@ -8539,7 +8736,7 @@ async function locateMarkedOriginals() {
     let opened = 0, count = 0, hidden = 0, failed = 0, capped = 0, limited = 0;
     let first;
     for (const {directory,paths,lead} of choices) {
-      const result = await revealAssetFileLocation(directory,directory,{paths,lead,keepTabs:true});
+      const result = await revealAssetFileLocation(directory,directory,{paths,lead,keepTabs:true,returnTo});
       if (!current() || fileWorkspace.hidden) return;
       if (!result) break;
       if (result.unavailable === 'tab-limit') { capped++; continue; }
@@ -8717,6 +8914,21 @@ async function openAssetSourceInFolder(id) {
   await revealAssetFileLocation(asset.path,directory);
 }
 
+async function openAssetOriginDirectory(path) {
+  const directory = nativeDragOut && matchFolderAddress(path,[])?.path;
+  if (!directory || !fileWorkspace.hidden) return;
+  const result = await revealAssetFileLocation(directory,directory,{paths:[],keepTabs:true,keepSelection:true});
+  if (!result || fileWorkspace.hidden) return;
+  if (result.unavailable) {
+    revealAssetWorkspace(false);
+    const origin = assetWorkspaceFocus?.isConnected ? assetWorkspaceFocus : $('#group-search-locations');
+    origin.focus({preventScroll:true});
+    toast(result.unavailable === 'tab-limit' ? '文件夹标签已满，请先关闭一页' : '无法打开原件文件夹，请核对路径或挂载',true);
+    return;
+  }
+  $('#explorer-file-content').focus({preventScroll:true});
+}
+
 function assetSourceDirectory(path) {
   const normalized = matchFolderAddress(path,[])?.path;
   const parent = normalized?.replace(/[\\/][^\\/]+$/,'');
@@ -8726,6 +8938,7 @@ function assetSourceDirectory(path) {
 async function revealAssetFileLocation(path,directory,sourceSelection) {
   const scope = collectionScope();
   const assetTab = workbenchTabs.activeId();
+  const origin = sourceSelection?.returnTo || (fileWorkspace.hidden ? workspaceReturnPoint('assets') : null);
   const directoryKey = explorerPathKey(directory);
   const assetDirectoryKey = explorerPathKey(diskFolderPath(currentLibrary() || {},state.folder));
   const existing = [...linkedWorkspaceTabs.values()].findLast(item => item.assetTab === assetTab &&
@@ -8733,11 +8946,12 @@ async function revealAssetFileLocation(path,directory,sourceSelection) {
   revealFileWorkspace();
   const options = {directory,preferredTab:existing?.fileTab};
   const opened = sourceSelection?.paths ? await localExplorer.revealSources(sourceSelection.paths,{...options,lead:sourceSelection.lead,
-    keepTabs:sourceSelection.keepTabs})
+    keepTabs:sourceSelection.keepTabs,keepSelection:sourceSelection.keepSelection})
     : await localExplorer.revealSource(path,{...options,keepDirectorySearch:sourceSelection?.keepDirectorySearch});
   if (!opened || fileWorkspace.hidden || scope !== collectionScope()) return false;
   if (opened.unavailable) return opened;
   if (explorerPathKey(localExplorer.getCurrentDirectory()) !== directoryKey) return false;
+  rememberWorkspaceReturn(origin);
   const fileTab = localExplorer.getTabIdentity();
   if (!fileTab || !assetTab || assetDirectoryKey !== directoryKey) return opened;
   const key = JSON.stringify([scope,fileTab,directoryKey]);
@@ -8766,6 +8980,7 @@ function renderWorkspaceMode() {
   workspaceBar.dataset.activeWorkspace = files ? 'files' : 'assets';
   workspaceBar.querySelector('[data-workspace-mode="files"]').setAttribute('aria-pressed',String(files));
   workspaceBar.querySelector('[data-workspace-mode="assets"]').setAttribute('aria-pressed',String(!files));
+  renderWorkspaceReturn();
   syncIndexedMoveRecovery();
 }
 

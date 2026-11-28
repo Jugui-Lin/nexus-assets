@@ -1,5 +1,19 @@
 const renderExtensions = new Set(['exr','png','jpg','jpeg','tiff','tif','webp','bmp','hdr']);
 const windowsPath = /^(?:[a-z]:[\\/]|[\\/]{2})/i;
+const sequenceSeparators = /[._ -]+$/;
+
+function validMonthDay(digits,leapYear = true) {
+  const month = Number(digits.slice(0,2));
+  const day = Number(digits.slice(2));
+  const daysInMonth = [31,leapYear ? 29 : 28,31,30,31,30,31,31,30,31,30,31];
+  return day > 0 && day <= daysInMonth[month - 1];
+}
+
+function validCalendarDate(digits) {
+  const year = Number(digits.slice(0,4));
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  return year >= 1900 && year <= 2099 && validMonthDay(digits.slice(4),leapYear);
+}
 
 // Match the filename rules used by the native render-sequence viewer.
 function renderFrame(name) {
@@ -10,8 +24,22 @@ function renderFrame(name) {
   if (!renderExtensions.has(extension)) return null;
   const stem = name.slice(0,dot);
   const digits = /[0-9]+$/.exec(stem);
-  if (!digits || digits.index + digits[0].length !== stem.length || digits[0].length > 6) return null;
-  return {prefix:stem.slice(0,digits.index),extension,padding:digits[0].length,number:Number(digits[0])};
+  if (!digits || digits.index + digits[0].length !== stem.length) return null;
+  const token = digits[0];
+  const label = stem.slice(0,digits.index);
+  const trimmedLabel = label.replace(sequenceSeparators,'');
+  if (/(?:udim|uvtile)$/i.test(trimmedLabel)) return null;
+  let padding = token.length;
+  if (padding > 6) {
+    if (!trimmedLabel || trimmedLabel === label) return null;
+    // Renders can append frame digits directly to an MMDD or YYYYMMDD date.
+    const date = token.slice(0,-4);
+    const datedFrame = (padding === 8 && !validCalendarDate(token) && validMonthDay(date))
+      || (padding === 12 && validCalendarDate(date));
+    if (!datedFrame) return null;
+    padding = 4;
+  }
+  return {prefix:stem.slice(0,-padding),extension,padding,number:Number(token.slice(-padding))};
 }
 
 export function isExplorerRenderFrame(name) {

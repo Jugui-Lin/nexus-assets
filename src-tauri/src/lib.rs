@@ -19,6 +19,7 @@ pub mod creative_subscriptions;
 mod file_import;
 mod ies_preview;
 mod linear_preview;
+mod png_preview;
 #[cfg(all(windows, feature = "desktop"))]
 mod jpeg_preview;
 pub mod team;
@@ -904,11 +905,13 @@ pub fn scaled_preview_image(
             fs::read(p).map_err(|e| e.to_string())?,
         )));
     }
-    if !embedded_scene && asset_raster_preview_limit(&ext).is_none() {
-        return Ok(None);
-    }
-    if !embedded_scene && metadata.len() > MAX_PREVIEW_SOURCE_BYTES {
-        return Err("图片源文件超过当前预览大小限制（192 MiB）".into());
+    if !embedded_scene {
+        let Some(limit) = asset_raster_preview_limit(&ext) else {
+            return Ok(None);
+        };
+        if metadata.len() > limit {
+            return Err(format!("图片源文件超过当前预览大小限制（{} MiB）", limit / (1024 * 1024)));
+        }
     }
     let stamp = metadata
         .modified()
@@ -946,7 +949,11 @@ pub fn scaled_preview_image(
 const MAX_PREVIEW_SOURCE_BYTES: u64 = 192 * 1024 * 1024;
 
 pub fn asset_raster_preview_limit(ext: &str) -> Option<u64> {
-    (ext == "ies" || preview_image_format(ext)).then_some(MAX_PREVIEW_SOURCE_BYTES)
+    if ext == "png" {
+        Some(png_preview::MAX_SOURCE_BYTES)
+    } else {
+        (ext == "ies" || preview_image_format(ext)).then_some(MAX_PREVIEW_SOURCE_BYTES)
+    }
 }
 
 fn attachment_extension(path: &Path) -> String {
@@ -997,7 +1004,7 @@ fn decode_raster_preview(
     path: &Path,
     ext: &str,
     max_size: u32,
-    _source_bytes: u64,
+    source_bytes: u64,
 ) -> Result<image::DynamicImage, String> {
     const MAX_DECODE: u64 = 256 * 1024 * 1024;
     let mut reader = image::ImageReader::open(path)
@@ -1010,14 +1017,33 @@ fn decode_raster_preview(
     limits.max_image_height = Some(32768);
     reader.limits(limits);
     let format = reader.format();
+    if format != Some(image::ImageFormat::Png) && source_bytes > MAX_PREVIEW_SOURCE_BYTES {
+        return Err("图片源文件超过当前预览大小限制（192 MiB）".into());
+    }
+    let try_streaming_png = format == Some(image::ImageFormat::Png)
+        && source_bytes >= png_preview::STREAMING_THRESHOLD_BYTES;
+    if try_streaming_png {
+        if let Some(image) = png_preview::decode(path, max_size)? {
+            return Ok(image);
+        }
+        if source_bytes > MAX_PREVIEW_SOURCE_BYTES {
+            return Err("此 PNG 图像超过常规预览限制，无法逐行缩放".into());
+        }
+    }
     #[cfg(all(windows, feature = "desktop"))]
-    if format == Some(image::ImageFormat::Jpeg) && _source_bytes >= 8 * 1024 * 1024 {
+    if format == Some(image::ImageFormat::Jpeg) && source_bytes >= 8 * 1024 * 1024 {
         if let Some(result) = jpeg_preview::decode_if_large(path, MAX_DECODE, max_size) {
             return result;
         }
     }
     match reader.decode() {
         Ok(image) => Ok(image),
+        Err(error @ image::ImageError::Limits(_))
+            if format == Some(image::ImageFormat::Png) && !try_streaming_png =>
+        {
+            png_preview::decode(path, max_size)?
+                .ok_or_else(|| format!("无法解码 PNG 图片：{error}"))
+        }
         Err(image::ImageError::Limits(_)) if format == Some(image::ImageFormat::Hdr) => {
             linear_preview::decode_hdr(path, MAX_DECODE, max_size)
         }

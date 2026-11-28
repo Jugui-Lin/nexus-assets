@@ -1,5 +1,6 @@
 use super::{
-    decode_scaled_preview, preview_image_format, video_mime, Asset, MAX_PREVIEW_SOURCE_BYTES,
+    asset_raster_preview_limit, decode_scaled_preview, preview_image_format, video_mime, Asset,
+    MAX_PREVIEW_SOURCE_BYTES,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -154,8 +155,9 @@ fn source(asset: &Asset, size: u32) -> Result<Option<Source<'_>>, String> {
             preview_image_format(&ext).then_some(ThumbnailFormat::Png)
         };
         if let Some(format) = format {
+            let limit = asset_raster_preview_limit(&ext).unwrap_or(MAX_PREVIEW_SOURCE_BYTES);
             match fs::metadata(path) {
-                Ok(meta) if meta.is_file() && meta.len() <= MAX_PREVIEW_SOURCE_BYTES => {
+                Ok(meta) if meta.is_file() && meta.len() <= limit => {
                     return make_source(asset, path, role, ext, size, format, &meta).map(Some);
                 }
                 Ok(_) => {}
@@ -542,17 +544,27 @@ pub fn read_or_generate(
     dir: &Path,
     size: u32,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
+    read_or_generate_preferring(asset, dir, size, || None)
+}
+
+pub fn read_or_generate_preferring(
+    asset: &Asset,
+    dir: &Path,
+    size: u32,
+    preferred_directory: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<(String, Vec<u8>)>, String> {
     let size = normalized_size(size);
     let Some(selected) = source(asset, size)? else {
         return Ok(None);
     };
-    read_or_generate_source(asset, &selected, dir, size)
+    read_or_generate_source(asset, &selected, dir, size, preferred_directory)
 }
 
 pub fn read_or_generate_sidecar(
     asset: &Asset,
     dir: &Path,
     size: u32,
+    preferred_directory: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
     let Some(cover) = asset.thumbnail.as_deref().filter(|_| asset.kind != "texture") else {
         return Ok(None);
@@ -563,7 +575,7 @@ pub fn read_or_generate_sidecar(
     }) else {
         return Ok(None);
     };
-    read_or_generate_source(asset, &selected, dir, size)
+    read_or_generate_source(asset, &selected, dir, size, preferred_directory)
 }
 
 fn read_or_generate_source(
@@ -571,6 +583,7 @@ fn read_or_generate_source(
     selected: &Source<'_>,
     dir: &Path,
     size: u32,
+    preferred_directory: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
     if let Ok(Some(bytes)) = read_cached(selected, dir) {
         return Ok(Some((selected.format.mime().into(), bytes)));
@@ -582,8 +595,12 @@ fn read_or_generate_source(
         return Ok(None);
     };
     confirm_source(asset, selected, size)?;
-    // Browsing can still show a decoded thumbnail from a read-only share.
-    let _ = save(selected, dir, &bytes);
+    let saved = preferred_directory()
+        .is_some_and(|preferred| save(selected, &preferred, &bytes).is_ok());
+    if !saved {
+        // Browsing returns the decoded image even if neither cache is writable.
+        let _ = save(selected, dir, &bytes);
+    }
     Ok(Some((selected.format.mime().into(), bytes)))
 }
 

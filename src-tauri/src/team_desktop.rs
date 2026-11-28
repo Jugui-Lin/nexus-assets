@@ -118,6 +118,7 @@ struct Preferences {
     connection: Option<Connection>,
     connection_identity: Option<ConnectionIdentity>,
     mounts: HashMap<String, HashMap<String, String>>,
+    thumbnail_cache_roots: HashMap<String, String>,
     favorites: HashMap<String, HashSet<String>>,
 }
 
@@ -260,6 +261,14 @@ pub(crate) struct TeamPreviewAsset {
     pub asset: Asset,
     pub team_id: String,
     pub storage: Result<TeamAssetStorage, String>,
+    pub thumbnail_cache_root: Option<PathBuf>,
+    pub relative_path: String,
+}
+
+pub(crate) struct IndexedTeamPreview {
+    pub asset: Asset,
+    pub namespace: String,
+    pub thumbnail_cache_root: Option<PathBuf>,
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -1270,14 +1279,22 @@ impl Desktop {
         Ok(self.preview_asset(id)?.asset)
     }
 
-    pub(crate) fn indexed_preview_asset(&self, id: &str) -> Result<(Asset, String), String> {
+    pub(crate) fn indexed_preview_asset(&self, id: &str) -> Result<IndexedTeamPreview, String> {
         let workspace = self.data.lock().unwrap();
         let cached = workspace.cache.as_ref().ok_or("没有本地团队索引")?;
         let asset = cached.asset(id).ok_or("团队资产不存在")?;
         let mut local = as_asset(asset, Some(&asset.relative_path), false);
         local.id = format!("team-{}", asset.id);
         let library = asset.storage_library_id.as_deref().unwrap_or(&asset.library_id);
-        Ok((local, crate::team_covers::library_namespace(&cached.team.id, library)))
+        Ok(IndexedTeamPreview {
+            asset: local,
+            namespace: crate::team_covers::library_namespace(&cached.team.id, library),
+            thumbnail_cache_root: workspace
+                .prefs
+                .thumbnail_cache_roots
+                .get(&cached.team.id)
+                .map(PathBuf::from),
+        })
     }
 
     pub(crate) fn mounted_asset(&self, id: &str) -> Result<(SharedAsset, PathBuf, String), String> {
@@ -1306,10 +1323,20 @@ impl Desktop {
         }
         // Keep the established cache file naming and DCC job IDs portable.
         local.id = format!("team-{}", asset.id);
+        let thumbnail_cache_root = self
+            .data
+            .lock()
+            .unwrap()
+            .prefs
+            .thumbnail_cache_roots
+            .get(&team_id)
+            .map(PathBuf::from);
         Ok(TeamPreviewAsset {
             asset: local,
             team_id,
             storage: TeamAssetStorage::for_asset(canonical_root, &asset),
+            thumbnail_cache_root,
+            relative_path: asset.relative_path,
         })
     }
 
@@ -1522,6 +1549,7 @@ fn view(workspace: &Workspace, include_assets: bool) -> Result<Value, String> {
     Ok(json!({
         "team":cached.team,"member":cached.member,"revision":cached.revision,
         "libraries":libraries,"assets":assets,"allLibraries":all_libraries,
+        "thumbnailCacheRoot":workspace.prefs.thumbnail_cache_roots.get(&cached.team.id),
         "folderVisibility":cached.folder_visibility,"hiddenFolders":cached.catalog.hidden_folders,
         "linkedFolders":cached.catalog.linked_folders,"definedTags":cached.catalog.defined_tags
     }))
@@ -1612,7 +1640,14 @@ pub fn team_status(state: tauri::State<'_, Desktop>) -> Value {
     let data = state.data.lock().unwrap();
     match &data.prefs.connection {
         Some(config) => {
-            json!({"configured":true, "url":config.url,"allowLanHttp":config.allow_lan_http})
+            let thumbnail_cache_root = data
+                .cache
+                .as_ref()
+                .and_then(|cached| data.prefs.thumbnail_cache_roots.get(&cached.team.id));
+            json!({
+                "configured":true, "url":config.url,"allowLanHttp":config.allow_lan_http,
+                "thumbnailCacheRoot":thumbnail_cache_root
+            })
         }
         None => json!({"configured":false}),
     }
@@ -1929,6 +1964,39 @@ pub async fn team_set_mount(
     state.save(&prefs)?;
     data.prefs = prefs;
     view(&data, true)
+}
+
+#[tauri::command]
+pub async fn team_set_thumbnail_cache_root(
+    state: tauri::State<'_, Desktop>,
+    team_id: String,
+    path: Option<String>,
+) -> Result<Value, String> {
+    let state = state.inner();
+    let _operation = state.begin_storage_operation()?;
+    let active = state.connection_for_team(&team_id)?;
+    let root = if let Some(path) = path {
+        Some(
+            tauri::async_runtime::spawn_blocking(move || mount_root(&path))
+                .await
+                .map_err(|error| error.to_string())??,
+        )
+    } else {
+        None
+    };
+    let mut data = state.data.lock().unwrap();
+    if data.active_connection()? != active {
+        return Err("团队工作空间已切换，请重新选择缩略图缓存目录".into());
+    }
+    let mut prefs = data.prefs.clone();
+    if let Some(root) = root {
+        prefs.thumbnail_cache_roots.insert(team_id, clean_path(&root));
+    } else {
+        prefs.thumbnail_cache_roots.remove(&team_id);
+    }
+    state.save(&prefs)?;
+    data.prefs = prefs;
+    view(&data, false)
 }
 
 #[tauri::command]
@@ -2972,6 +3040,32 @@ mod tests {
             result["hiddenFolders"][0],
             json!({"libraryId":"root","folder":""})
         );
+    }
+
+    #[test]
+    fn shared_thumbnail_root_is_local_to_the_active_team_workspace() {
+        let snapshot = serde_json::from_value(json!({
+            "team":{"id":"team-one","name":"团队"},
+            "member":{"id":"member","name":"成员","role":"member"},
+            "revision":1,
+            "catalog":{"libraries":[],"assets":[]}
+        }))
+        .unwrap();
+        let old_prefs: Preferences = serde_json::from_value(json!({"mounts":{}})).unwrap();
+        assert!(old_prefs.thumbnail_cache_roots.is_empty());
+        let mut workspace = Workspace {
+            cache: Some(cache_from(snapshot).unwrap()),
+            prefs: old_prefs,
+            ..Workspace::default()
+        };
+
+        let roots = &mut workspace.prefs.thumbnail_cache_roots;
+        roots.insert("team-two".into(), "other-cache".into());
+        assert!(view(&workspace, false).unwrap()["thumbnailCacheRoot"].is_null());
+        workspace.prefs.thumbnail_cache_roots.insert("team-one".into(), "current-cache".into());
+        assert_eq!(view(&workspace, false).unwrap()["thumbnailCacheRoot"], "current-cache");
+        workspace.prefs.thumbnail_cache_roots.remove("team-one");
+        assert!(view(&workspace, false).unwrap()["thumbnailCacheRoot"].is_null());
     }
 
     #[test]

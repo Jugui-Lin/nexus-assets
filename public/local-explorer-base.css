@@ -230,6 +230,17 @@ button.local-explorer-location:hover { background: var(--accent-dark); }
   white-space: nowrap;
 }
 
+.local-explorer-sequence-thumbnail {
+  flex: none;
+  inline-size: 36px;
+  block-size: 30px;
+  object-fit: contain;
+}
+
+#file-workspace table:not(.local-explorer-grid) .local-explorer-sequence-thumbnail {
+  order: -1;
+}
+
 #file-workspace [data-explorer-compact] table:not(.local-explorer-grid) .local-explorer-sequence-stack td {
   padding-block: 0;
 }
@@ -264,11 +275,23 @@ button.local-explorer-location:hover { background: var(--accent-dark); }
   display: block;
 }
 
+#file-workspace .local-explorer-grid [data-has-thumbnail] .local-explorer-sequence-toggle > svg:has(> use[href="#i-stack"]) {
+  display: none;
+}
+
+.local-explorer-grid .local-explorer-sequence-thumbnail {
+  grid-area: 1 / 1;
+  inline-size: 100%;
+  block-size: 100%;
+  padding-inline: 8px;
+}
+
 #file-workspace .local-explorer-grid .local-explorer-sequence-toggle > svg:has(> use[href="#i-chevron"]) {
   place-self: start;
   inline-size: 14px;
   block-size: 14px;
   color: var(--muted);
+  z-index: 1;
 }
 
 .local-explorer-grid .local-explorer-sequence-toggle > span:not(.local-explorer-sequence-count) {
@@ -278,4 +301,5 @@ button.local-explorer-location:hover { background: var(--accent-dark); }
 .local-explorer-grid .local-explorer-sequence-count {
   grid-area: 1 / 1;
   place-self: end;
+  z-index: 1;
 }

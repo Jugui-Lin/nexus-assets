@@ -19,6 +19,7 @@ export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnt
   const nameInput = createForm.querySelector('#workspace-create-name');
   const nameLabel = createForm.querySelector('label');
   const saveName = createForm.querySelector('[type="submit"]');
+  const createLocation = createForm.querySelector('#workspace-create-location');
   const createNameMaxLength = nameInput.maxLength;
   const dialog = document.querySelector('#workspace-dialog');
   const dialogStatus = dialog.querySelector('#workspace-status');
@@ -54,6 +55,7 @@ export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnt
     const currentPath = dialog.querySelector('#workspace-current-path');
     currentPath.textContent = current?.path || (native ? '正在读取…' : '桌面版可管理本地数据库');
     currentPath.title = current?.path || '';
+    dialog.querySelector('#workspace-current-storage').hidden = !current?.path;
     dialog.querySelector('#workspace-migrate').disabled = busy || !native;
     dialog.querySelector('#workspace-team').disabled = busy || !native;
     if (!anchor) return;
@@ -147,7 +149,8 @@ export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnt
     render();
     try {
       if (!await canSwitch() || (fromSettings ? !dialog.open : !anchor)) return;
-      feedback.textContent = action === 'migrate' ? '准备迁移数据库…' : '正在打开工作空间…';
+      feedback.textContent = action === 'create' ? '请选择个人库数据目录…' :
+        action === 'migrate' ? '准备迁移数据库…' : '正在打开工作空间…';
       if (action === 'enter-team') {
         await onEnterTeam();
       } else if (action === 'personal') {
@@ -178,7 +181,10 @@ export function initWorkspacePicker({api, native, teamChoice, onWorkspace, onEnt
     actions.classList.toggle('hidden', value);
     status.textContent = '';
     nameLabel.textContent = draft?.isTeam ? '团队库名称' : '个人库名称';
-    saveName.textContent = draft ? '保存名称' : '选择保存位置…';
+    saveName.textContent = draft ? '保存名称' : '选择数据目录…';
+    createLocation.hidden = Boolean(draft);
+    if (draft) saveName.removeAttribute('aria-describedby');
+    else saveName.setAttribute('aria-describedby',createLocation.id);
     nameInput.maxLength = draft ? (draft.isTeam ? 400 : 200) : createNameMaxLength;
     if (value) {
       nameInput.value = draft?.name || '';

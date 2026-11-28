@@ -52,6 +52,38 @@ pub(crate) struct FrameSize {
     height: Option<u32>,
 }
 
+fn valid_month_day(digits: &str, leap_year: bool) -> bool {
+    let (month, day) = digits.split_at(2);
+    let month = month.parse::<usize>().unwrap_or_default();
+    let day = day.parse::<u8>().unwrap_or_default();
+    let days_in_month = [
+        0,
+        31,
+        if leap_year { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    day > 0
+        && days_in_month
+            .get(month)
+            .is_some_and(|&last_day| day <= last_day)
+}
+
+fn valid_calendar_date(digits: &str) -> bool {
+    let (year, day) = digits.split_at(4);
+    let year = year.parse::<u32>().unwrap_or_default();
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    (1900..=2099).contains(&year) && valid_month_day(day, leap_year)
+}
+
 fn sequence_name(path: &Path) -> Option<(&str, String, usize, u32)> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(
@@ -62,11 +94,34 @@ fn sequence_name(path: &Path) -> Option<(&str, String, usize, u32)> {
     }
     let stem = path.file_stem()?.to_str()?;
     let digits = stem.bytes().rev().take_while(u8::is_ascii_digit).count();
-    if !(1..=6).contains(&digits) {
+    if digits == 0 {
         return None;
     }
-    let (prefix, number) = stem.split_at(stem.len() - digits);
-    Some((prefix, extension, digits, number.parse().ok()?))
+    let (label, token) = stem.split_at(stem.len() - digits);
+    let trimmed_label = label.trim_end_matches(['.', '_', ' ', '-']);
+    let lowercase_label = trimmed_label.to_ascii_lowercase();
+    if lowercase_label.ends_with("udim") || lowercase_label.ends_with("uvtile") {
+        return None;
+    }
+    let padding = match digits {
+        1..=6 => digits,
+        // Renders can append frame digits directly to an MMDD or YYYYMMDD date.
+        8 | 12 if !trimmed_label.is_empty() && trimmed_label != label => {
+            let date = &token[..digits - 4];
+            let dated_frame = if digits == 8 {
+                !valid_calendar_date(token) && valid_month_day(date, true)
+            } else {
+                valid_calendar_date(date)
+            };
+            if !dated_frame {
+                return None;
+            }
+            4
+        }
+        _ => return None,
+    };
+    let (prefix, number) = stem.split_at(stem.len() - padding);
+    Some((prefix, extension, padding, number.parse().ok()?))
 }
 
 pub(crate) fn is_numbered_render_frame(path: &Path) -> bool {
@@ -277,6 +332,52 @@ pub(crate) async fn render_sequence_frame_sizes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn groups_date_prefixed_frames_and_keeps_dated_stills_and_udims_out() {
+        let fixture = tempfile::tempdir().unwrap();
+        for name in [
+            "S04_11180000.exr",
+            "S04_11180002.exr",
+            "S04_11180031.exr",
+            "S04_11190000.exr",
+            "S04_11190001.exr",
+            "S04_11180000.png",
+            "S04_11180031.png",
+            "S04_202611180003.exr",
+            "S04_202611180004.exr",
+            "S04_20261118.exr",
+            "S04_20261119.exr",
+            "S04_UDIM_1001.exr",
+            "S04_UDIM_1002.exr",
+        ] {
+            fs::write(fixture.path().join(name), b"fixture").unwrap();
+        }
+        let report = inspect(
+            &fixture.path().join("S04_11180031.exr"),
+            false,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(report.sequences.len(), 4);
+        let active = report
+            .sequences
+            .iter()
+            .find(|sequence| Some(sequence.key.as_str()) == report.active_key.as_deref())
+            .unwrap();
+        assert_eq!(active.label, "S04_1118####.exr");
+        assert_eq!(active.padding, 4);
+        assert_eq!(
+            active
+                .frames
+                .iter()
+                .map(|frame| frame.number)
+                .collect::<Vec<_>>(),
+            [0, 2, 31]
+        );
+        assert!(is_numbered_render_frame(Path::new("S04_1001.exr")));
+        assert!(!is_numbered_render_frame(Path::new("S04_13320001.exr")));
+    }
 
     #[test]
     fn groups_one_level_preserves_padding_and_reads_exr_dimensions() {

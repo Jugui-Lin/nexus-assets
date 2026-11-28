@@ -19,6 +19,7 @@
 !src-tauri/src/linear_preview/
 !src-tauri/src/linear_preview/exr_compare.rs
 !src-tauri/src/max_preview.rs
+!src-tauri/src/png_preview.rs
 !src-tauri/src/team.rs
 !src-tauri/src/team_organization.rs
 !src-tauri/src/thumbnail_cache.rs

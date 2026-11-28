@@ -1,5 +1,5 @@
 use crate::{
-    asset_cover, lock_db, team_covers, team_desktop::Desktop,
+    asset_cover, lock_db, team_covers, team_desktop::{Desktop, IndexedTeamPreview},
     workspace_data::workspace_data_directory, AppState,
 };
 use base64::Engine;
@@ -80,8 +80,24 @@ pub(super) async fn local_explorer_file_icon(
 pub(super) struct PreviewSource {
     pub asset: Asset,
     pub data_dir: PathBuf,
-    team: Option<(Option<PathBuf>, String)>,
-    index_root: PathBuf,
+    team: Option<TeamThumbnailCache>,
+}
+
+struct TeamThumbnailCache {
+    source_mount: Option<PathBuf>,
+    shared_root: Option<PathBuf>,
+    namespace: String,
+    relative_path: String,
+}
+
+impl TeamThumbnailCache {
+    fn legacy_directory(&self, create: bool) -> Result<Option<PathBuf>, String> {
+        if let Some(mount) = &self.source_mount {
+            team_shared_cache_directory(mount, &self.namespace, create)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 type OriginalImage = (String, Vec<u8>, (u32, u32));
@@ -136,23 +152,85 @@ pub(super) fn read_indexed_thumbnail(
     id: &str,
     size: u32,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
-    let (asset, namespace) = if let Some(id) = id.strip_prefix("team:") {
-        let (asset, namespace) = app.state::<Desktop>().indexed_preview_asset(id)?;
-        (asset, Some(namespace))
-    } else {
-        (lock_db(state)?.asset(id)?, None)
+    if let Some(id) = id.strip_prefix("team:") {
+        let preview = app.state::<Desktop>().indexed_preview_asset(id)?;
+        return Ok(read_team_indexed_thumbnail(&preview, &state.root, size));
+    }
+
+    let catalog = lock_db(state)?;
+    let asset = catalog.asset(id)?;
+    let data_dir = catalog.dir.clone();
+    drop(catalog);
+    read_personal_thumbnail_index(&asset, &data_dir, &state.root, size)
+}
+
+fn team_shared_cache_directory(
+    root: &Path,
+    namespace: &str,
+    create: bool,
+) -> Result<Option<PathBuf>, String> {
+    workspace_data_directory(root, &[".nexus", "thumbnail-cache", namespace], create)
+}
+
+fn read_team_indexed_thumbnail(
+    preview: &IndexedTeamPreview,
+    local_root: &Path,
+    size: u32,
+) -> Option<(String, Vec<u8>)> {
+    let asset = &preview.asset;
+    if let Ok(Some(image)) = read_thumbnail_index(asset, local_root, size) {
+        return Some(image);
+    }
+    if let Ok(Some(directory)) =
+        workspace_data_directory(local_root, &["team-thumbnail-cache", &preview.namespace], false)
+    {
+        if let Ok(Some(image)) = thumbnail_cache::read_team_original_from_index(asset, &directory, size) {
+            return Some(image);
+        }
+    }
+
+    let root = preview.thumbnail_cache_root.as_ref()?;
+    let directory = team_shared_cache_directory(root, &preview.namespace, false).ok()??;
+    let (mime, bytes) = read_thumbnail_index(asset, &directory, size)
+        .ok()
+        .flatten()
+        .or_else(|| thumbnail_cache::read_team_original_from_index(asset, &directory, size).ok().flatten())?;
+    store_thumbnail_index(asset, local_root, size, &mime, &bytes);
+    Some((mime, bytes))
+}
+
+fn read_thumbnail_index(
+    asset: &Asset,
+    root: &Path,
+    size: u32,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    let Some(directory) = workspace_data_directory(root, &["indexed-thumbnails"], false)? else {
+        return Ok(None);
     };
-    if let Some(dir) = workspace_data_directory(&state.root, &["indexed-thumbnails"], false)? {
-        if let Some(image) = thumbnail_cache::read_indexed(&asset, &dir, size)? {
-            return Ok(Some(image));
-        }
+    thumbnail_cache::read_indexed(asset, &directory, size)
+}
+
+fn store_thumbnail_index(asset: &Asset, root: &Path, size: u32, mime: &str, bytes: &[u8]) {
+    if let Ok(Some(dir)) = workspace_data_directory(root, &["indexed-thumbnails"], true) {
+        let _ = thumbnail_cache::store_indexed(asset, &dir, size, mime, bytes);
     }
-    if let Some(namespace) = namespace {
-        if let Some(dir) = workspace_data_directory(&state.root, &["team-thumbnail-cache", &namespace], false)? {
-            return thumbnail_cache::read_team_original_from_index(&asset, &dir, size);
-        }
+}
+
+fn read_personal_thumbnail_index(
+    asset: &Asset,
+    data_dir: &Path,
+    legacy_root: &Path,
+    size: u32,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    let cached = read_thumbnail_index(asset, data_dir, size)?;
+    if cached.is_some() || data_dir == legacy_root {
+        return Ok(cached);
     }
-    Ok(None)
+    let legacy = read_thumbnail_index(asset, legacy_root, size)?;
+    if let Some((mime, bytes)) = &legacy {
+        store_thumbnail_index(asset, data_dir, size, mime, bytes);
+    }
+    Ok(legacy)
 }
 
 pub(super) fn read_shared_thumbnail(
@@ -189,15 +267,24 @@ impl PreviewSource {
                     }
                     let namespace =
                         team_covers::library_namespace(&source.team_id, &storage.library_id);
-                    (mount, namespace)
+                    TeamThumbnailCache {
+                        source_mount: mount,
+                        shared_root: source.thumbnail_cache_root,
+                        namespace,
+                        relative_path: source.relative_path,
+                    }
                 }
-                Err(_) => (None, team_covers::library_namespace(&source.team_id, &asset.library_id)),
+                Err(_) => TeamThumbnailCache {
+                    source_mount: None,
+                    shared_root: None,
+                    namespace: team_covers::library_namespace(&source.team_id, &asset.library_id),
+                    relative_path: source.relative_path,
+                },
             };
             Ok(Self {
                 asset,
                 data_dir: state.root.clone(),
                 team: Some(team),
-                index_root: state.root.clone(),
             })
         } else {
             let catalog = lock_db(state)?;
@@ -212,17 +299,18 @@ impl PreviewSource {
                 asset,
                 data_dir,
                 team: None,
-                index_root: state.root.clone(),
             })
         }
     }
 
     fn shared_directory(&self, create: bool) -> Result<Option<PathBuf>, String> {
-        match &self.team {
-            Some((Some(mount), namespace)) => {
-                workspace_data_directory(mount, &[".nexus", "thumbnail-cache", namespace], create)
-            }
-            _ => Ok(None),
+        let Some(team) = &self.team else {
+            return Ok(None);
+        };
+        if let Some(root) = &team.shared_root {
+            team_shared_cache_directory(root, &team.namespace, create)
+        } else {
+            team.legacy_directory(create)
         }
     }
 
@@ -236,11 +324,16 @@ impl PreviewSource {
             .ok_or_else(|| "无法创建缩略图目录".into())
     }
 
+    fn preferred_browse_cache(&self) -> Option<PathBuf> {
+        self.team.as_ref()?.shared_root.as_ref()?;
+        self.shared_directory(true).ok().flatten()
+    }
+
     fn local_directory(&self, create: bool) -> Result<Option<PathBuf>, String> {
         match &self.team {
-            Some((_, namespace)) => workspace_data_directory(
+            Some(team) => workspace_data_directory(
                 &self.data_dir,
-                &["team-thumbnail-cache", namespace],
+                &["team-thumbnail-cache", &team.namespace],
                 create,
             ),
             None => workspace_data_directory(&self.data_dir, &["thumbnail-cache"], create),
@@ -254,8 +347,24 @@ impl PreviewSource {
         Some((image.mime, image.bytes))
     }
 
+    fn cached_shared_thumbnail(&self, size: u32) -> Option<(String, Vec<u8>)> {
+        let team = self.team.as_ref()?;
+        self.shared_directory(false)
+            .ok()
+            .flatten()
+            .and_then(|directory| self.cached_thumbnail(&directory, size))
+            .or_else(|| {
+                team.shared_root.as_ref()?;
+                let legacy = team.legacy_directory(false).ok()??;
+                self.cached_thumbnail(&legacy, size)
+            })
+    }
+
     fn browse_shared_thumbnail(&self, size: u32) -> Result<Option<(String, Vec<u8>)>, String> {
-        for directory in [self.shared_directory(false).ok().flatten(), self.local_directory(false).ok().flatten()].into_iter().flatten() {
+        if let Some(image) = self.cached_shared_thumbnail(size) {
+            return Ok(Some(image));
+        }
+        if let Some(directory) = self.local_directory(false).ok().flatten() {
             if let Some(image) = self.cached_thumbnail(&directory, size) {
                 return Ok(Some(image));
             }
@@ -264,7 +373,9 @@ impl PreviewSource {
             return Ok(None);
         }
         let directory = self.write_directory(false)?;
-        let image = thumbnail_cache::read_or_generate_sidecar(&self.asset, &directory, size)?;
+        let image = thumbnail_cache::read_or_generate_sidecar(&self.asset, &directory, size, || {
+            self.preferred_browse_cache()
+        })?;
         if let Some((mime, bytes)) = &image {
             self.cache_indexed_thumbnail(size, mime, bytes);
         }
@@ -279,10 +390,8 @@ impl PreviewSource {
                 }
             }
         }
-        if let Some(path) = self.shared_directory(false).ok().flatten() {
-            if let Some(image) = self.cached_thumbnail(&path, size) {
-                return Ok(Some(image));
-            }
+        if let Some(image) = self.cached_shared_thumbnail(size) {
+            return Ok(Some(image));
         }
         let local = self.write_directory(false)?;
         if self.asset.kind == "video" {
@@ -290,7 +399,9 @@ impl PreviewSource {
                 return Ok(Some(image));
             }
         }
-        let image = thumbnail_cache::read_or_generate(&self.asset, &local, size)?;
+        let image = thumbnail_cache::read_or_generate_preferring(&self.asset, &local, size, || {
+            self.preferred_browse_cache()
+        })?;
         if let Some((mime, bytes)) = &image {
             self.cache_indexed_thumbnail(size, mime, bytes);
         }
@@ -298,8 +409,15 @@ impl PreviewSource {
     }
 
     fn cache_indexed_thumbnail(&self, size: u32, mime: &str, bytes: &[u8]) {
-        if let Ok(Some(dir)) = workspace_data_directory(&self.index_root, &["indexed-thumbnails"], true) {
-            let _ = thumbnail_cache::store_indexed(&self.asset, &dir, size, mime, bytes);
+        if let Some(team) = &self.team {
+            let mut indexed = self.asset.clone();
+            indexed.path.clone_from(&team.relative_path);
+            store_thumbnail_index(&indexed, &self.data_dir, size, mime, bytes);
+            if let Some(directory) = self.preferred_browse_cache() {
+                store_thumbnail_index(&indexed, &directory, size, mime, bytes);
+            }
+        } else {
+            store_thumbnail_index(&self.asset, &self.data_dir, size, mime, bytes);
         }
     }
 
@@ -315,15 +433,35 @@ impl PreviewSource {
         bytes: &[u8],
         batch: bool,
     ) -> Result<thumbnail_cache::ThumbnailStatus, String> {
+        self.store_rendered_thumbnail(size, cache_key, bytes, batch, true)
+    }
+
+    fn store_rendered_thumbnail(
+        &self,
+        size: u32,
+        cache_key: &str,
+        bytes: &[u8],
+        batch: bool,
+        video: bool,
+    ) -> Result<thumbnail_cache::ThumbnailStatus, String> {
         let save = |directory: &Path| {
-            let status = thumbnail_cache::store_video(&self.asset, directory, size, cache_key, bytes)?;
+            let status = if video {
+                thumbnail_cache::store_video(&self.asset, directory, size, cache_key, bytes)?
+            } else {
+                thumbnail_cache::store_mesh(&self.asset, directory, size, cache_key, bytes)?
+            };
             if let Ok(Some((mime, frame))) = thumbnail_cache::read(&self.asset, directory, size) {
                 self.cache_indexed_thumbnail(size, &mime, &frame);
             }
             Ok::<_, String>(status)
         };
         if !batch {
-            if let Ok(Some(directory)) = self.shared_directory(true) {
+            let preferred = if video {
+                self.shared_directory(true).ok().flatten()
+            } else {
+                self.preferred_browse_cache()
+            };
+            if let Some(directory) = preferred {
                 if let Ok(status) = save(&directory) {
                     return Ok(status);
                 }
@@ -364,7 +502,17 @@ pub(super) async fn build_thumbnail_cache(
                 let source = PreviewSource::resolve(&state, &app, id)?;
                 label = source.asset.name.clone();
                 let directory = source.write_directory(true)?;
-                thumbnail_cache::generate(&source.asset, &directory, size)
+                let status = thumbnail_cache::generate(&source.asset, &directory, size)?;
+                if source.team.as_ref().is_some_and(|team| team.shared_root.is_some())
+                    && matches!(status.state, ThumbnailState::Cached | ThumbnailState::Generated | ThumbnailState::Image)
+                {
+                    if let Ok(Some((mime, bytes))) =
+                        thumbnail_cache::read(&source.asset, &directory, size)
+                    {
+                        source.cache_indexed_thumbnail(size, &mime, &bytes);
+                    }
+                }
+                Ok::<_, String>(status)
             })();
             match result {
                 Ok(status) => match status.state {
@@ -486,16 +634,7 @@ async fn store_thumbnail(
             .decode(encoded)
             .map_err(|_| "缩略图数据无效")?;
         let source = PreviewSource::resolve(&state, &app, &id)?;
-        let status = if video {
-            source.store_video_thumbnail(size, &cache_key, &bytes, batch)?
-        } else {
-            let directory = source.write_directory(batch)?;
-            let status = thumbnail_cache::store_mesh(&source.asset, &directory, size, &cache_key, &bytes)?;
-            if let Ok(Some((mime, image))) = thumbnail_cache::read(&source.asset, &directory, size) {
-                source.cache_indexed_thumbnail(size, &mime, &image);
-            }
-            status
-        };
+        let status = source.store_rendered_thumbnail(size, &cache_key, &bytes, batch, video)?;
         serde_json::to_value(status).map_err(|error| error.to_string())
     })
     .await
@@ -517,8 +656,12 @@ mod tests {
         PreviewSource {
             asset,
             data_dir: root.to_owned(),
-            team: Some((Some(mount.to_owned()), "fixture-library".into())),
-            index_root: root.to_owned(),
+            team: Some(TeamThumbnailCache {
+                source_mount: Some(mount.to_owned()),
+                shared_root: None,
+                namespace: "fixture-library".into(),
+                relative_path: path.file_name().unwrap().to_string_lossy().into_owned(),
+            }),
         }
     }
 
@@ -554,6 +697,46 @@ mod tests {
     }
 
     #[test]
+    fn personal_thumbnails_live_with_the_catalog_and_reuse_the_old_index() {
+        let scratch = tempfile::tempdir().unwrap();
+        let legacy = scratch.path().join("app-data");
+        let sources = scratch.path().join("linked-originals");
+        let data_dir = scratch.path().join("personal-library");
+        let other_data_dir = scratch.path().join("relocated-library");
+        for dir in [&legacy, &sources, &data_dir, &other_data_dir] {
+            fs::create_dir(dir).unwrap();
+        }
+        let path = sources.join("texture.png");
+        RgbImage::new(48, 24).save(&path).unwrap();
+        let catalog = Catalog::open(&data_dir).unwrap();
+        catalog.add_file(&path, "fixture").unwrap();
+        let preview = PreviewSource {
+            asset: catalog.assets().unwrap().remove(0),
+            data_dir: catalog.dir.clone(),
+            team: None,
+        };
+        let expected = preview.thumbnail(256).unwrap().unwrap();
+        assert!(data_dir.join("nexus.sqlite3").is_file());
+        assert!(data_dir.join("thumbnail-cache").is_dir());
+        assert!(!sources.join("thumbnail-cache").exists());
+        assert!(!legacy.join("indexed-thumbnails").exists());
+        assert_eq!(
+            read_personal_thumbnail_index(&preview.asset, &data_dir, &legacy, 256).unwrap(),
+            Some(expected.clone())
+        );
+
+        store_thumbnail_index(&preview.asset, &legacy, 256, &expected.0, &expected.1);
+        assert_eq!(
+            read_personal_thumbnail_index(&preview.asset, &other_data_dir, &legacy, 256).unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            read_thumbnail_index(&preview.asset, &other_data_dir, 256).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
     fn shared_preview_loads_a_same_name_max_cover_without_writing_to_the_mount() {
         let scratch = tempfile::tempdir().unwrap();
         let mount = scratch.path().join("mapped-team-library");
@@ -570,7 +753,7 @@ mod tests {
         let image = image::load_from_memory(&data).unwrap();
         assert_eq!((image.width(), image.height()), (48, 24));
         assert!(!mount.join(".nexus").exists());
-        let indexed = preview.index_root.join("indexed-thumbnails");
+        let indexed = preview.data_dir.join("indexed-thumbnails");
         assert_eq!(
             thumbnail_cache::read_indexed(&preview.asset, &indexed, 256).unwrap(),
             Some((mime, data))
@@ -596,5 +779,104 @@ mod tests {
         );
         assert!(preview.browse_shared_thumbnail(256).unwrap().is_some());
         assert!(!scratch.path().join("team-thumbnail-cache").exists());
+    }
+
+    #[test]
+    fn selected_team_cache_writes_outside_the_source_and_falls_back_safely() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mount = scratch.path().join("originals");
+        let selected = scratch.path().join("shared-cache");
+        let invalid = scratch.path().join("unavailable-cache");
+        for directory in [&mount, &selected, &invalid] {
+            fs::create_dir(directory).unwrap();
+        }
+        let texture = mount.join("texture.png");
+        RgbImage::new(640, 320).save(&texture).unwrap();
+        let mut preview = mounted_fixture(scratch.path(), &mount, &texture);
+        let legacy = preview.write_directory(true).unwrap();
+        thumbnail_cache::generate(&preview.asset, &legacy, 208).unwrap();
+        let old_thumbnail = thumbnail_cache::read(&preview.asset, &legacy, 208).unwrap();
+
+        preview.team.as_mut().unwrap().shared_root = Some(selected.clone());
+        assert_eq!(preview.browse_shared_thumbnail(208).unwrap(), old_thumbnail);
+        let expected_directory = selected
+            .canonicalize()
+            .unwrap()
+            .join(".nexus")
+            .join("thumbnail-cache")
+            .join("fixture-library");
+        assert_eq!(read_thumbnail_index(&preview.asset, &expected_directory, 208).unwrap(), old_thumbnail);
+        assert!(thumbnail_cache::read(&preview.asset, &expected_directory, 208).unwrap().is_none());
+        let generated = preview.thumbnail(256).unwrap();
+        assert_eq!(preview.write_directory(true).unwrap(), expected_directory);
+        assert_eq!(thumbnail_cache::read(&preview.asset, &expected_directory, 256).unwrap(), generated);
+        assert!(thumbnail_cache::read(&preview.asset, &legacy, 256).unwrap().is_none());
+
+        let blocked_key = thumbnail_cache::inspect(&preview.asset, &expected_directory, 320)
+            .unwrap()
+            .key
+            .unwrap();
+        fs::create_dir(expected_directory.join(format!("{blocked_key}.png"))).unwrap();
+        let blocked_write_fallback = preview.thumbnail(320).unwrap();
+        let local = preview.local_directory(false).unwrap().unwrap();
+        assert_eq!(thumbnail_cache::read(&preview.asset, &local, 320).unwrap(), blocked_write_fallback);
+
+        fs::create_dir(invalid.join(".nexus")).unwrap();
+        fs::write(invalid.join(".nexus").join("thumbnail-cache"), b"not a cache directory").unwrap();
+        preview.team.as_mut().unwrap().shared_root = Some(invalid);
+        assert!(preview.write_directory(true).is_err());
+        assert_eq!(preview.browse_shared_thumbnail(208).unwrap(), old_thumbnail);
+        let fallback = preview.thumbnail(360).unwrap();
+        assert_eq!(thumbnail_cache::read(&preview.asset, &local, 360).unwrap(), fallback);
+
+        preview.team.as_mut().unwrap().shared_root = None;
+        assert_eq!(preview.write_directory(true).unwrap(), legacy);
+    }
+
+    #[test]
+    fn shared_team_cache_previews_work_without_the_original_or_local_mount() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mount = scratch.path().join("originals");
+        let shared = scratch.path().join("shared-cache");
+        let viewer = scratch.path().join("unmounted-client");
+        for directory in [&mount, &shared, &viewer] {
+            fs::create_dir(directory).unwrap();
+        }
+        let texture = mount.join("texture.png");
+        RgbImage::new(640, 320).save(&texture).unwrap();
+        let mut writer = mounted_fixture(scratch.path(), &mount, &texture);
+        let modified = texture
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        writer.asset.modified = json!(modified);
+        let team = writer.team.as_mut().unwrap();
+        team.shared_root = Some(shared.clone());
+        team.relative_path = "nested/texture.png".into();
+        let thumbnail = writer.thumbnail(256).unwrap();
+        let directory = writer.shared_directory(false).unwrap().unwrap();
+        let raw_thumbnail = thumbnail_cache::read_or_generate(&writer.asset, &directory, 320).unwrap();
+        let mut indexed = IndexedTeamPreview {
+            asset: writer.asset.clone(),
+            namespace: "fixture-library".into(),
+            thumbnail_cache_root: Some(shared),
+        };
+        indexed.asset.path = "nested/texture.png".into();
+        assert_eq!(read_thumbnail_index(&indexed.asset, &directory, 256).unwrap(), thumbnail);
+        assert!(read_thumbnail_index(&indexed.asset, &directory, 320).unwrap().is_none());
+        fs::remove_file(texture).unwrap();
+
+        indexed.namespace = "another-library".into();
+        assert!(read_team_indexed_thumbnail(&indexed, &viewer, 256).is_none());
+        indexed.namespace = "fixture-library".into();
+        assert_eq!(read_team_indexed_thumbnail(&indexed, &viewer, 256), thumbnail);
+        assert_eq!(read_team_indexed_thumbnail(&indexed, &viewer, 320), raw_thumbnail);
+        assert!(read_team_indexed_thumbnail(&indexed, &viewer, 512).is_none());
+        indexed.thumbnail_cache_root = None;
+        assert_eq!(read_team_indexed_thumbnail(&indexed, &viewer, 256), thumbnail);
     }
 }

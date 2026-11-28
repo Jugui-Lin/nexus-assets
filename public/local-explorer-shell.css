@@ -281,6 +281,12 @@
   background: var(--explorer-hover);
 }
 
+#nexus-workspace-bar #workspace-return[hidden] { display: none; }
+#nexus-workspace-bar #workspace-return { color: var(--accent); }
+@media (max-width: 1180px) {
+  #workspace-return > span { display: none; }
+}
+
 .local-explorer-pin-bar {
   min-block-size: 30px;
   padding-inline: 9px;

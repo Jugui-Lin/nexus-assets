@@ -121,6 +121,20 @@ export function initWhiteboardVideoReview({world,current,visible,mayEdit,commit,
     return true;
   }
 
+  async function locateNote(reference,id,stillCurrent = () => true) {
+    if (!available(reference) || !stillCurrent()) return false;
+    const note = readReviewNotes(current(reference.id).text).notes.find(entry => entry.id === id);
+    if (!note) return false;
+    const key = ++serial;
+    const valid = () => key === serial && available(reference) && stillCurrent();
+    try {
+      return await seekFrame(reference,note.time/1000,valid);
+    } catch (failure) {
+      if (valid()) throw failure;
+      return false;
+    }
+  }
+
   function renderDialog(reference) {
     const {notes} = readReviewNotes(current(reference.id).text);
     const editable = mayEdit();
@@ -214,14 +228,10 @@ export function initWhiteboardVideoReview({world,current,visible,mayEdit,commit,
         renderDialog(reference);
       } catch (failure) { status.textContent = String(failure?.message || failure); }
     } else if (jump) {
-      const note = readReviewNotes(current(reference.id).text).notes.find(item => item.id === jump);
-      if (!note) return;
-      const key = ++serial;
-      const valid = () => key === serial && available(reference);
       status.textContent = '正在定位到标注时间…';
       try {
-        if (await seekFrame(reference,note.time/1000,valid)) close();
-      } catch (failure) { if (valid()) status.textContent = String(failure?.message || failure); }
+        if (await locateNote(reference,jump)) close();
+      } catch (failure) { status.textContent = String(failure?.message || failure); }
     }
   });
   dialog.addEventListener('cancel',event => { event.preventDefault(); close(); });
@@ -371,5 +381,6 @@ export function initWhiteboardVideoReview({world,current,visible,mayEdit,commit,
   return {attach,update,release,close,exportReport,openDispatch:dispatch.open,closeDispatch:dispatch.close,reposition(id) {
     const reference = references.get(id);
     if (reference) paint(reference);
-  }, isOpen:() => dialog.open || dispatch.isOpen() || Boolean(picking)};
+  }, locateNote:(itemId,noteId,stillCurrent) => locateNote(references.get(itemId),noteId,stillCurrent),
+    isOpen:() => dialog.open || dispatch.isOpen() || Boolean(picking)};
 }

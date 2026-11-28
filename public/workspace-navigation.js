@@ -18,11 +18,16 @@ function filterValues(values, legacy = '') {
   return [...new Set(entries.map(value => asString(value).trim().toLowerCase()).filter(Boolean))].sort();
 }
 
+export function normalizeAssetSearchScope(scope, library) {
+  return scope === 'workspace' || scope === 'library' && library ? scope : 'location';
+}
+
 function captureQuery(state, searchText = state.search) {
   const library = asString(state.library) || null;
   const rating = Number(state.rating ?? 0);
   const formatExcludes = filterValues(state.formatExcludes);
   const tagExcludes = filterValues(state.tagExcludes);
+  const search = asString(searchText).trim().toLowerCase().replaceAll('\\', '/');
   return {
     view: views.includes(state.view) ? state.view : 'all',
     library,
@@ -31,8 +36,9 @@ function captureQuery(state, searchText = state.search) {
     recursive: !library || state.recursive !== false,
     kind: normalizeAssetKind(state.kind),
     tag: asString(state.tag) || null,
-    search: asString(searchText).trim().toLowerCase().replaceAll('\\', '/'),
+    search,
     searchText: asString(searchText),
+    searchScope: search ? normalizeAssetSearchScope(state.searchScope, library) : 'location',
     formatIncludes: filterValues(state.formatIncludes, asString(state.format)).filter(value => !formatExcludes.includes(value)),
     formatExcludes,
     tagIncludes: filterValues(state.tagIncludes).filter(value => !tagExcludes.includes(value)),
@@ -248,6 +254,7 @@ function createPinRemovalDialog() {
 export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenPinnedFolder, onLocatePinnedFolder, onApplySearch, onRefreshAssets, onNotify, canMoveFolder, moveFolder, teamQuickAccess}) {
   const mainNav = document.querySelector('#main-nav');
   const selectVisible = document.querySelector('#select-visible');
+  const resultsToggle = document.querySelector('#asset-results-toggle');
   const searchInput = document.querySelector('#search');
   const searchToggle = document.querySelector('#asset-search-toggle');
   const title = document.querySelector('#page-title');
@@ -288,11 +295,9 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
   if (shortcuts) shortcuts.append(pinnedFolders.section, savedSearches.section);
   else mainNav.after(savedSearches.section, pinnedFolders.section);
 
-  const actions = element('div', 'workspace-search-actions');
-  const saveSearch = button('text-button workspace-save-search', '保存当前搜索', 'search');
+  const saveSearch = button('asset-toolbar-menu-item workspace-save-search', '保存当前搜索', 'search');
   saveSearch.append(element('span', '', '保存搜索'));
-  selectVisible.before(actions);
-  actions.append(saveSearch, selectVisible);
+  selectVisible.before(saveSearch);
 
   const folderActions = document.querySelector('#asset-folder-actions');
   const pin = button('icon-button workspace-folder-button workspace-pin-folder', '固定当前文件夹', 'star');
@@ -688,7 +693,7 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
       : (pinned ? '取消固定当前文件夹' : '固定当前文件夹');
     pin.title = pinLabel;
     pin.setAttribute('aria-label', pinLabel);
-    renderShortcuts(savedSearches, searches, applySearch, removeSearch, state.view === 'jobs' ? searchFocusTarget() : saveSearch);
+    renderShortcuts(savedSearches, searches, applySearch, removeSearch, views.includes(state.view) ? resultsToggle : searchFocusTarget());
     renderShortcuts(pinnedFolders, pins, openPin, requestPinRemoval, folder ? pin : searchFocusTarget(), onLocatePinnedFolder, pinFolder);
   }
 
@@ -706,7 +711,10 @@ export function initWorkspaceNavigation({getScope, getState, findFolder, onOpenP
     dialog.dialog.showModal();
     dialog.name.select();
   });
-  dialog.dialog.addEventListener('close', () => { pending = null; });
+  dialog.dialog.addEventListener('close', () => {
+    pending = null;
+    if (resultsToggle.getClientRects().length) resultsToggle.focus({preventScroll:true});
+  });
   dialog.name.addEventListener('input', () => dialog.error.classList.add('hidden'));
   dialog.form.addEventListener('submit', event => {
     event.preventDefault();

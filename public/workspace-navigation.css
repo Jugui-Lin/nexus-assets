@@ -122,14 +122,6 @@
   white-space: nowrap;
 }
 
-.workspace-search-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px 9px;
-}
-
 .workspace-folder-actions {
   display: inline-flex;
   align-items: center;

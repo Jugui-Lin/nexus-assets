@@ -46,7 +46,6 @@ export function initWorkspaceSettingsSearch(menu, closeMenu) {
   function entries() {
     const tools = [...panel.querySelectorAll(':scope > button, .workspace-tools-section-actions > button')]
       .filter(button => !button.hidden && !button.classList.contains('hidden') && !button.disabled &&
-        button.dataset.fileWorkspaceCommand !== 'quit' &&
         (menu.id !== 'top-tools' || !button.hasAttribute('data-file-workspace-command')))
       .map(button => ({
         label: textOf(button),

@@ -100,9 +100,9 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
   viewControls.append(toggles.inspector);
   const inspectorDock = document.createElement('button');
   inspectorDock.type = 'button';
-  inspectorDock.className = 'icon-button workspace-inspector-dock';
-  inspectorDock.innerHTML = '<svg aria-hidden="true"><use href="#i-compare"/></svg>';
-  viewControls.append(inspectorDock);
+  inspectorDock.className = 'asset-toolbar-menu-item workspace-inspector-dock';
+  inspectorDock.innerHTML = '<svg aria-hidden="true"><use href="#i-compare"/></svg>详情放在底部';
+  workArea.querySelector('#asset-display-panel').append(inspectorDock);
 
   const preferred = readLayout(preferences);
   const { collapsed } = preferred;

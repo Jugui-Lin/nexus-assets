@@ -7,6 +7,8 @@ export function initFavoriteExpiry({scope,ensureFavorite,refresh}) {
   const duration = form.elements.duration;
   const project = form.elements.project;
   const status = dialog.querySelector('[data-favorite-expiry-status]');
+  const filterToggle = document.getElementById('asset-favorites-toggle');
+  const filterLabel = filterToggle.querySelector('span');
   const toolbar = document.getElementById('favorite-expiry-tools');
   const projectFilter = toolbar.querySelector('select');
   const historyFilter = toolbar.querySelector('button');
@@ -73,8 +75,14 @@ export function initFavoriteExpiry({scope,ensureFavorite,refresh}) {
 
   function render(visible,assets) {
     sync();
+    filterToggle.hidden = !visible;
     toolbar.hidden = !visible;
     if (!visible) return;
+    const label = history ? '到期历史' : selectedProject || '收藏筛选';
+    filterLabel.textContent = label;
+    filterToggle.title = label === '收藏筛选' ? label : '收藏筛选 · ' + label;
+    filterToggle.setAttribute('aria-label',filterToggle.title);
+    filterToggle.classList.toggle('is-active',history || Boolean(selectedProject));
     const projects = new Set();
     let expired = 0;
     const now = Date.now();

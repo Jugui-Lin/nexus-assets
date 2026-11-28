@@ -41,7 +41,7 @@ const defaultPreferences = {startLocation:'computer',showFrequent:true,showHidde
   showStatus:true,showExtensions:true,showNavigation:true,openMode:'double',compact:false,
   startMode:'new',startupPaths:[],showToolbar:true,showBookmarks:true,openBookmarkInNewTab:false,
   doubleClickUp:true,ctrlDoubleClickTab:true,doubleClickCloseTab:true,wheelSwitchTabs:false,quickPreview:true,
-  stackSequences:false,showUnindexed:false};
+  stackSequences:true,showUnindexed:false};
 
 const placeIcons = {
   home:'home', desktop:'explorer-computer', downloads:'download', documents:'notes',
@@ -166,10 +166,10 @@ function createTab() {
   };
 }
 
-function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isActive) {
+function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,sequenceThumbnail,fileIcon},isActive) {
   const owner = tbody.ownerDocument;
   const Observer = owner.defaultView.IntersectionObserver;
-  if (!(thumbnail || folderThumbnail || fileIcon) || !Observer) return () => {};
+  if (!(thumbnail || folderThumbnail || sequenceThumbnail || fileIcon) || !Observer) return () => {};
 
   const candidates = new Map();
   const queued = new Map();
@@ -179,6 +179,7 @@ function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isAc
   let revision = 0;
   let currentSize = 0;
   let currentFolderSize = 0;
+  let currentSequenceSize = 0;
   let currentPreviews = true;
   let currentFirstRow;
 
@@ -203,6 +204,10 @@ function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isAc
 
   async function folderPreview({path,size}) {
     return {source:imageSource(await folderThumbnail({path,size}))};
+  }
+
+  async function sequencePreview({path,size}) {
+    return {source:imageSource(await sequenceThumbnail({path,size:Math.max(size,128)}))};
   }
 
   function previewBytes(preview) {
@@ -244,7 +249,7 @@ function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isAc
   }
 
   function clearPreview(row) {
-    row.querySelector('.local-explorer-file-thumbnail, .local-explorer-folder-thumbnail')?.remove();
+    row.querySelector('.local-explorer-file-thumbnail, .local-explorer-folder-thumbnail, .local-explorer-sequence-thumbnail')?.remove();
     row.removeAttribute('data-has-thumbnail');
   }
 
@@ -256,6 +261,12 @@ function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isAc
     clearPreview(row);
     const image = main || badge;
     if (!image) return;
+    if (job.isSequence) {
+      image.className = 'local-explorer-sequence-thumbnail';
+      row.querySelector('.local-explorer-sequence-toggle').append(image);
+      row.setAttribute('data-has-thumbnail','');
+      return;
+    }
     image.className = 'local-explorer-entry-thumbnail';
     image.classList.toggle('local-explorer-folder-thumbnail',job.isDirectory);
     const button = row.querySelector('.local-explorer-entry');
@@ -294,13 +305,14 @@ function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isAc
     pump();
   },{root:scroller,rootMargin:'64px 0px'});
 
-  return (entries,size = 0,refresh = false,folderSize = 0,showPreviews = true) => {
+  return (entries,size = 0,refresh = false,folderSize = 0,showPreviews = true,sequenceSize = 0) => {
     const firstRow = tbody.firstElementChild;
     if (!refresh && currentSize === size && currentFolderSize === folderSize && currentFirstRow === firstRow &&
-        currentPreviews === showPreviews) return;
+        currentPreviews === showPreviews && currentSequenceSize === sequenceSize) return;
     const removePreviews = currentPreviews && !showPreviews;
     currentSize = size;
     currentFolderSize = folderSize;
+    currentSequenceSize = sequenceSize;
     currentFirstRow = firstRow;
     currentPreviews = showPreviews;
     observer.disconnect();
@@ -312,21 +324,23 @@ function gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isAc
       cacheBytes = 0;
       return;
     }
-    if (!size || !folderSize || removePreviews) {
+    if (!size || !folderSize || !sequenceSize || removePreviews) {
       for (const row of tbody.querySelectorAll('[data-has-thumbnail]')) {
         const entry = entries[Number(row.dataset.entryIndex)];
-        if (removePreviews || !(entry?.isDirectory ? folderSize : size)) clearPreview(row);
+        const hasSize = row.dataset.sequenceCoverIndex !== undefined ? sequenceSize : entry?.isDirectory ? folderSize : size;
+        if (removePreviews || !hasSize) clearPreview(row);
       }
-      if (!size && !folderSize) return;
+      if (!size && !folderSize && !sequenceSize) return;
     }
-    for (const row of tbody.querySelectorAll('[data-entry-index]')) {
-      const entry = entries[Number(row.dataset.entryIndex)];
+    for (const row of tbody.querySelectorAll('[data-entry-index], [data-sequence-cover-index]')) {
+      const isSequence = row.dataset.sequenceCoverIndex !== undefined;
+      const entry = entries[Number(row.dataset.sequenceCoverIndex ?? row.dataset.entryIndex)];
       if (!entry) continue;
-      const load = entry.isDirectory ? folderThumbnail && folderPreview : filePreview;
-      const previewSize = entry.isDirectory ? folderSize : size;
+      const load = isSequence ? sequenceThumbnail && sequencePreview : entry.isDirectory ? folderThumbnail && folderPreview : filePreview;
+      const previewSize = isSequence ? sequenceSize : entry.isDirectory ? folderSize : size;
       if (!load || !previewSize) continue;
-      candidates.set(row,{path:entry.path,isDirectory:entry.isDirectory,size:previewSize,load,showPreviews,revision,
-        key:JSON.stringify([revision,pathKey(entry.path),entry.isDirectory,entry.modified,entry.size,previewSize,showPreviews])});
+      candidates.set(row,{path:entry.path,isDirectory:entry.isDirectory,isSequence,size:previewSize,load,showPreviews,revision,
+        key:JSON.stringify([revision,pathKey(entry.path),entry.isDirectory,isSequence,entry.modified,entry.size,previewSize,showPreviews])});
       observer.observe(row);
     }
   };
@@ -418,9 +432,10 @@ function visibleEntryDetails(scroller,tbody,entryDetails,isActive,applyDetails) 
 
 export function initLocalExplorer({
   root,tabBar,browse,open,reveal,contextMenu,computer,driveDetails,thumbnail,columns,
-  folderThumbnail,fileIcon,entryDetails,selectAllEntries,clipboard,pasteConflicts,fileAction,onOpenAssetLibrary,onOpenFiles,treeChildren,
+  folderThumbnail,sequenceThumbnail,fileIcon,entryDetails,selectAllEntries,clipboard,pasteConflicts,fileAction,onOpenAssetLibrary,onOpenFiles,treeChildren,
   onBrowseAssets,onAddToAssets,onOpenAssetPane,onOpenAssetDetails,onSelectionChange,onQuickPreview,onDetachTab,onInspectRenderSequence,onCompareExrChannels,
-  lookupAssets,onLoadAssets,onToggleFavorite,onAddToCollection,onAddToBasket,onSendToC4d,onAddToWhiteboard,
+  canCloseLastTab,
+  lookupAssets,onLoadAssets,onToggleFavorite,assetRating,onAddToCollection,onAddToBasket,onSendToC4d,onAddToWhiteboard,
   canMoveIndexedFiles,onMoveIndexedFiles,onProjectDependencies,onCreateFolderShortcut,onInspectCleanup,onOpenShotBoard,searchAssets,assetSearchKey,
   projectFiltersEnabled = false,
   checkFolderPaths,detachedWindow = false,deferInitialTab = false,preferences,
@@ -432,7 +447,7 @@ export function initLocalExplorer({
       revealSource:() => false,revealSources:() => false,show:() => false,
       restoreDetachedTab:() => false,
       getCurrentDirectory:() => null,getDirectorySearch:() => '',getFileActionDirectory:() => null,getSelectedPath:() => null,getSelectedEntry:() => null,
-      getSelectedEntries:() => [],getTabCount:() => 0,getTabLocations:() => [],applyPreferences:() => {},clearRecentFolders:() => {},refreshAssetDetails:() => {},
+      getSelectedEntries:() => [],getTabCount:() => 0,applyPreferences:() => {},clearRecentFolders:() => {},refreshAssetDetails:() => {},
       getTabIdentity:() => null,showTabIdentity:() => false,canDuplicateActive:() => false,duplicateActive:() => false,
       findManagedTab:() => null,setTabPinned:() => false,closeOtherTabs:() => false,canCloseOtherTabs:() => false,
       closeManagedTab:() => false,restoreClosedTab:() => false,hasClosedTabs:() => false,
@@ -558,12 +573,10 @@ export function initLocalExplorer({
     read:treeChildren && (params => treeChildren({...params,...(prefs.showHidden && {showHidden:true})})),
     isActive:() => isActive() && !tab.request && !tab.fileAction,
   });
-  const showThumbnails = gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,fileIcon},isActive);
+  const showThumbnails = gridThumbnails(scroller,tbody,{thumbnail,folderThumbnail,sequenceThumbnail,fileIcon},isActive);
   const tabPath = item => item.history[item.index] ?? item.initialPath ?? '';
   const tabLocation = item => item.request?.destination ?? item.snapshot?.directory ?? tabPath(item);
   const getTabCount = () => tabs.length;
-  const getTabLocations = () => startupPending && !tab.snapshot && !tab.request && !tabs.length
-    ? startupTabs().paths : tabs.map(tabLocation).filter(Boolean);
   const getTabIdentity = () => tabs.includes(tab) ? tab.identity : null;
   const canDuplicateActive = () => isActive() && Boolean(tab.snapshot) && tabs.includes(tab) && tabs.length < tabLimit;
   const catalogOnly = () => tab.searchScope === 'library' && Boolean(tab.catalogQuery);
@@ -1038,8 +1051,7 @@ export function initLocalExplorer({
     node.dataset.explorerDropLabel = label;
   }
 
-  function locationButton(item,className,icon,rail,onOpen = () => rail && prefs.openBookmarkInNewTab
-    ? addTab(item.path) : navigate(item.path,{focusList:true})) {
+  function locationButton(item,className,icon,rail,onOpen) {
     const button = element('button',className);
     button.append(svg(icon),element('span','',item.name));
     button.title = addressText(item.path);
@@ -1053,7 +1065,12 @@ export function initLocalExplorer({
         button.append(marker);
       }
     }
-    button.addEventListener('click',onOpen);
+    button.addEventListener('click',onOpen || (() => {
+      const revealTree = !sidebar?.contains(button);
+      if (rail && prefs.openBookmarkInNewTab) {
+        addTab(item.path,revealTree ? undefined : {navigation:{revealTree}});
+      } else void navigate(item.path,{focusList:true,revealTree});
+    }));
     if (pathKey(item.path) === pathKey(tabPath(tab))) button.setAttribute('aria-current','page');
     return button;
   }
@@ -1185,8 +1202,9 @@ export function initLocalExplorer({
     return tree;
   }
 
-  function renderSystemTree() {
+  function renderSystemTree(revealTree = true) {
     if (!prefs.showNavigation || !sidebarSystem.isConnected) return;
+    if (!tab.snapshot && tab.request?.revealTree === false) return;
     const current = getCurrentDirectory() || tab.snapshot?.directory || '';
     const next = treePathKey(current);
     const unc = next.startsWith('\\\\');
@@ -1195,7 +1213,8 @@ export function initLocalExplorer({
     const syncIndex = parts.findLastIndex(({path}) => syncLocation(path));
     if (next !== activeTreeKey) {
       closedTreeBranches.clear();
-      activeTreeKey = treeRevealKey = next;
+      activeTreeKey = next;
+      treeRevealKey = revealTree ? next : null;
       if (unc || current === networkLocation) networkExpanded = true;
       else if (current && syncIndex === -1) drivesExpanded = true;
     }
@@ -1237,7 +1256,7 @@ export function initLocalExplorer({
     }
   }
 
-  function renderLinks(frequentItems = prefs.showFrequent ? frequent.list(isFrequentLocation) : []) {
+  function renderLinks(frequentItems = prefs.showFrequent ? frequent.list(isFrequentLocation) : [],revealTree = true) {
     pinHost.replaceChildren(...pins.map(pin => locationButton(pin,'local-explorer-pin','folder','top')));
     const folders = places?.folders || [];
     frequentShown = frequentItems.map(item => pathKey(item.path));
@@ -1260,7 +1279,7 @@ export function initLocalExplorer({
     const previous = placesHost.querySelector('.local-explorer-sidebar-personal');
     if (previous) previous.replaceWith(personal);
     else placesHost.append(personal,sidebarSystem);
-    renderSystemTree();
+    renderSystemTree(revealTree);
   }
 
   function isFrequentLocation(path) {
@@ -1577,6 +1596,7 @@ export function initLocalExplorer({
 
   function sequenceRow(sequence,group,collapsed,open) {
     const row = element('tr','local-explorer-sequence-stack');
+    row.dataset.sequenceCoverIndex = sequence.frames[0].index;
     if (group !== null) row.dataset.explorerDateGroup = group;
     row.hidden = collapsed;
     const cell = row.insertCell();
@@ -1762,7 +1782,10 @@ export function initLocalExplorer({
     const iconPixels = iconView ? thumbnailSizes[tab.iconSize] || 0 : tab.view === 'tiles' ? 128 : 0;
     const folderSize = fileRowsVisible && iconView && prefs.showThumbnails ? iconPixels : 0;
     const size = fileRowsVisible && (fileIcon || (prefs.showThumbnails && iconPixels)) ? iconPixels || 24 : 0;
-    showThumbnails(tab.snapshot?.entries,size,false,folderSize,prefs.showThumbnails);
+    const sequenceSize = fileRowsVisible && prefs.showThumbnails && sequenceThumbnail
+      ? iconView ? iconPixels || 24 : tab.view === 'tiles' ? 128 : 0
+      : 0;
+    showThumbnails(tab.snapshot?.entries,size,false,folderSize,prefs.showThumbnails,sequenceSize);
     showEntryDetails(tab.snapshot?.entries,fileRowsVisible && tab.view === 'details' ? columnLayout?.detailColumns : []);
     assetDetails.observe(tab.snapshot?.entries,fileRowsVisible);
     catalogSearch.set(isActive() && tab.searchScope !== 'folder' && tab.catalogQuery
@@ -1773,7 +1796,7 @@ export function initLocalExplorer({
     updateControls();
   }
 
-  function render(previous = null) {
+  function render(previous = null,{revealTree = true} = {}) {
     const {snapshot} = tab;
     const directory = tabPath(tab);
     const sameLocation = previous && previous.directory === snapshot?.directory;
@@ -1786,7 +1809,8 @@ export function initLocalExplorer({
       renderLocations(directory);
       renderTabs();
     }
-    if (!sameLocation || (driveView && !directory && !places)) renderLinks();
+    if (!revealTree) treeRevealKey = null;
+    if ((revealTree || snapshot) && (!sameLocation || (driveView && !directory && !places))) renderLinks(undefined,revealTree);
     if (!sameLocation || owner.activeElement !== address) address.value = addressText(directory);
     const term = searchText();
     if (search.value !== term && (!sameLocation || owner.activeElement !== search)) search.value = term;
@@ -1890,7 +1914,7 @@ export function initLocalExplorer({
   function persistTabSession() {
     if (detachedWindow) return;
     const open = tabs.filter(item => item.sessionPath !== undefined);
-    if (!open.length) return;
+    if (!open.length && tabs.length) return;
     const session = JSON.stringify({paths:open.map(item => item.sessionPath),active:Math.max(0,open.indexOf(tab)),
       ...(open.some(item => item.pinned) && {pinned:open.map(item => item.pinned)})});
     if (session === lastTabSession) return;
@@ -1966,7 +1990,7 @@ export function initLocalExplorer({
   }
 
   async function navigate(destination, {index,offset,force = false,focusList = false,query,restored,locate,clearCatalog = false,
-    projectFilterBypass = tab.projectFilterBypass} = {}) {
+    revealTree = true,projectFilterBypass = tab.projectFilterBypass} = {}) {
     finishMarquee(true);
     clearTimeout(searchTimer);
     startupPending = false;
@@ -1988,10 +2012,11 @@ export function initLocalExplorer({
     let rememberedPath = locate?.lead || (canRemember(destination) ? directorySelections.get(destination) : undefined);
     force ||= Boolean(staleRevision);
     const {sortBy,descending,groupBy} = orderFor(item,destination);
-    const request = {destination,offset,force,query,staleRevision,sortBy,descending,groupBy,restored,locate,clearCatalog,
+    const request = {destination,offset,force,query,staleRevision,sortBy,descending,groupBy,restored,locate,clearCatalog,revealTree,
       projectFilter,projectFilterBypass,rememberedPath};
     if (item.request && Object.keys(request).every(key => item.request[key] === request[key])) return;
     if (destinationKey !== pathKey(item.snapshot?.directory)) cancelFrequentVisit();
+    if (!revealTree) treeRevealKey = null;
     item.request = request;
     item.recovery = null;
     let committed = false;
@@ -2036,7 +2061,6 @@ export function initLocalExplorer({
       if (!Array.isArray(result?.entries)) throw Error('无法读取这个位置。');
       const {matchedEntries,...page} = result;
       if (locate && !Array.isArray(matchedEntries)) throw Error('无法确认所选原件。');
-      if (locate?.directoryMatches && !locate.directoryMatches(result.directory)) throw Error('无法确认原件所在文件夹。');
       if (pathKey(result.directory) !== destinationKey) checkedRevision = 0;
       else if (item.stalePaths.get(destinationKey) === staleRevision) item.stalePaths.delete(destinationKey);
       const previous = item.snapshot;
@@ -2106,7 +2130,7 @@ export function initLocalExplorer({
       persistTabSession();
       report(item);
       if (item === tab) {
-        render(previous);
+        render(previous,{revealTree});
         if (restored) scroller.scrollTop = item.scrollTop;
         if (focusList && isActive()) {
           const primary = itemButton(entryItem(result.entries.indexOf(item.selected)));
@@ -2161,7 +2185,7 @@ export function initLocalExplorer({
     tab.scrollTop = scroller.scrollTop;
     tab = item;
     persistTabSession();
-    render();
+    render(null,navigation);
     beginFrequentVisit();
     if (focusTab) tabsHost.querySelector('[aria-current="page"]')?.focus({preventScroll:true});
     if (navigation && isActive()) return navigate(address,navigation);
@@ -2207,15 +2231,21 @@ export function initLocalExplorer({
     return true;
   }
 
-  function showTabIdentity(identity,expectedPath) {
+  function tabWithIdentity(identity,expectedPath) {
     const item = tabs.find(candidate => candidate.identity === identity);
-    if (!item) return false;
+    if (!item) return null;
     if (expectedPath) {
       const key = assetSearchKey || treePathKey;
       const expected = key(expectedPath);
       const actual = item.request?.destination ?? item.snapshot?.directory ?? tabPath(item);
-      if (!expected || key(actual) !== expected) return false;
+      if (!expected || key(actual) !== expected) return null;
     }
+    return item;
+  }
+
+  function showTabIdentity(identity,expectedPath) {
+    const item = tabWithIdentity(identity,expectedPath);
+    if (!item) return false;
     onOpenFiles?.();
     void activateTab(item,true);
     tabsHost.querySelector('[aria-current="page"]')?.focus({preventScroll:true});
@@ -2235,21 +2265,31 @@ export function initLocalExplorer({
     if (closedTabs.length > closedTabLimit) closedTabs.shift();
   }
 
-  function finishClosingTabs(keep) {
+  function finishClosingTabs(keep,{preserveWorkspace = false} = {}) {
     if (!tabs.includes(lastTabClick)) lastTabClick = null;
-    if (!tabs.length) return addTab('',{emptyFallback:true});
+    if (!tabs.length) {
+      if (preserveWorkspace || !canCloseLastTab?.()) return addTab('',{emptyFallback:true});
+      exit();
+      clearTimeout(searchTimer);
+      startupPending = false;
+      startupRequest = null;
+      tab = createTab();
+      persistTabSession();
+      render();
+      return;
+    }
     if (!tabs.includes(tab)) return activateTab(keep,isActive());
     persistTabSession();
     renderTabs();
     updateControls();
   }
 
-  function closeTab(item,{record = true} = {}) {
+  function closeTab(item,{record = true,preserveWorkspace = false} = {}) {
     const index = tabs.indexOf(item);
     if (index < 0) return false;
     if (record) rememberClosedTab(item,index);
     tabs.splice(index,1);
-    finishClosingTabs(tabs[Math.min(index,tabs.length - 1)]);
+    finishClosingTabs(tabs[Math.min(index,tabs.length - 1)],{preserveWorkspace});
     return true;
   }
 
@@ -2448,15 +2488,15 @@ export function initLocalExplorer({
     return openPath(path,{force:stale});
   }
 
-  async function revealSources(paths,{directory,lead,preferredTab,keepTabs = false,pathIdentity,keepSelection = false} = {}) {
-    const key = pathIdentity || assetSearchKey || treePathKey;
+  async function revealSources(paths,{directory,lead,preferredTab,keepTabs = false,keepSelection = false} = {}) {
+    const key = assetSearchKey || treePathKey;
     const location = key(directory);
     if (!isActive() || !location) return false;
     void loadPlaces();
     seedStartupTabs();
     const item = sourceTabFor(location,preferredTab,key);
     if (!item && keepTabs && tabs.length >= tabLimit && !unusedFallback(tab)) return {unavailable:'tab-limit'};
-    const currentDirectory = item?.snapshot?.directory || (pathIdentity && item && tabLocation(item));
+    const currentDirectory = item?.snapshot?.directory;
     const destination = key(currentDirectory) === location ? currentDirectory : directory;
     const windows = /^(?:[a-z]:|[\\/]{2})/i.test(destination);
     const prefix = windows ? destination.replace(/[\\/]+$/,'') + '\\' : destination.replace(/\/+$/,'') + '/';
@@ -2473,8 +2513,7 @@ export function initLocalExplorer({
     let failed = false;
     const preserveSelection = keepSelection && !paths.length;
     const offset = preserveSelection && key(item?.snapshot?.directory) === location ? item.snapshot.offset : undefined;
-    const navigation = {offset,locate:{paths:selected,lead:selected[0],preserveSelection,
-      ...(pathIdentity && {directoryMatches:path => key(path) === location}),onFailure:() => { failed = true; }},
+    const navigation = {offset,locate:{paths:selected,lead:selected[0],preserveSelection,onFailure:() => { failed = true; }},
       focusList:!preserveSelection,clearCatalog:item?.searchScope === 'library'};
     let opening;
     let created = !tabs.length;
@@ -2488,7 +2527,7 @@ export function initLocalExplorer({
     const opened = await opening;
     if (target !== tab || !isActive()) return false;
     if (!opened && keepTabs && failed) {
-      if (created && !target.snapshot && !target.request) closeTab(target,{record:false});
+      if (created && !target.snapshot && !target.request) closeTab(target,{record:false,preserveWorkspace:true});
       return {unavailable:'directory'};
     }
     if (!opened || key(getCurrentDirectory()) !== location) return false;
@@ -2916,6 +2955,13 @@ export function initLocalExplorer({
       case 'open': return openEntry(entry);
       case 'open-tab': return addTab(path);
       case 'copy-path': return performFileAction(copy,formatExplorerPaths(paths),'路径已复制。');
+      case 'copy-names': {
+        const remaining = new Map(paths.map(path => [pathKey(path),tab.selection.get(pathKey(path)) || entry]));
+        const names = visibleEntries().filter(item => remaining.delete(pathKey(item.path))).map(item => item.name);
+        for (const item of remaining.values()) if (item) names.push(item.name);
+        if (names.length) return performFileAction(copy,names.join('\n'),`已复制 ${names.length} 个项目名称。`);
+        break;
+      }
       case 'copy-visible-names': {
         const names = [...tbody.querySelectorAll('[data-entry-index]:not([hidden])')]
           .map((item,index) => (index + 1) + '. ' + current.entries[Number(item.dataset.entryIndex)].name);
@@ -3041,7 +3087,7 @@ export function initLocalExplorer({
     }
   }
 
-  function contextItems(entry,current) {
+  function contextItems(entry,current,ratingTarget) {
     const driveView = isDriveView(current);
     const directory = !driveView && current.directory;
     const path = entry?.path || directory;
@@ -3050,14 +3096,22 @@ export function initLocalExplorer({
     const row = (id,label,shortcut,disabled = false,checked) => ({id,label,shortcut,disabled,checked});
     const separator = {separator:true};
     const tools = [];
+    let ratingItem;
+    if (ratingTarget) {
+      const {assets} = ratingTarget;
+      ratingItem = {id:'asset-rating',label:assets.length === 1 ? '资产评分' : '批量资产评分',children:
+        [5,4,3,2,1,0].map(rating => row('asset-rating-' + rating,rating ? '★'.repeat(rating) + ' ' + rating + ' 星' : '清除评分',
+          undefined,false,assets.every(asset => asset.rating === rating)))};
+    }
     if (entry && tab.selection.size > 1) {
       const move = onMoveIndexedFiles && canMoveIndexedFiles?.(getSelectedEntries());
       if (directory && clipboard) tools.push(row('cut','剪切','Ctrl+X'),row('copy','复制','Ctrl+C'));
-      tools.push(row('copy-path','复制路径'),copyPathFormats(row));
+      tools.push(row('copy-path','复制路径','Ctrl+Shift+C'),copyPathFormats(row),row('copy-names','复制所选项目名称'));
       if (directory && fileAction) tools.push(row('batch-rename','批量重命名…','F2'));
       if (directory && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
-      if (directory && hasSelectedFiles() && (onAddToCollection || onSendToC4d || onAddToWhiteboard || move)) {
+      if (directory && hasSelectedFiles() && (onAddToCollection || onSendToC4d || onAddToWhiteboard || move || ratingItem)) {
         tools.push(separator);
+        if (ratingItem) tools.push(ratingItem);
         if (onAddToCollection) tools.push(row('add-to-collection','将所选文件加入合集…'));
         if (onAddToWhiteboard) tools.push(row('add-to-whiteboard','添加到白板…'));
         if (onSendToC4d) tools.push(row('send-to-c4d','发送到 Cinema 4D…'));
@@ -3117,6 +3171,7 @@ export function initLocalExplorer({
         const file = entry && !entry.isDirectory;
         const asset = file ? assetDetails.get(path) : null;
         if (asset && onToggleFavorite) tools.push(row('favorite-asset',asset.favorite ? '移出资产收藏' : '添加到资产收藏',undefined,favoriteRequests.has(asset.id)));
+        if (ratingItem) tools.push(ratingItem);
         if (file && onAddToCollection) tools.push(row('add-to-collection','加入合集…'));
         if (file && onAddToWhiteboard) tools.push(row('add-to-whiteboard','添加到白板…'));
         if (file && onSendToC4d) tools.push(row('send-to-c4d','发送到 Cinema 4D…'));
@@ -3128,9 +3183,10 @@ export function initLocalExplorer({
           tools.push(row('inspect-render-sequence','检查渲染序列…'));
         if (file && onCompareExrChannels && /\.exr$/i.test(entry.name))
           tools.push(row('compare-exr-channels','对比 OpenEXR 通道…'));
-        if (onBrowseAssets || onAddToAssets || asset && onToggleFavorite || file && onAddToCollection) tools.push(separator);
+        if (onBrowseAssets || onAddToAssets || asset && onToggleFavorite || file && onAddToCollection || ratingItem) tools.push(separator);
       }
-      tools.push(row('copy-path','复制路径'),copyPathFormats(row));
+      tools.push(row('copy-path','复制路径','Ctrl+Shift+C'),copyPathFormats(row));
+      if (entry) tools.push(row('copy-names',entry.isDirectory ? '复制文件夹名称' : '复制原文件名'));
       if (reveal) tools.push(row('reveal','在资源管理器中显示'));
       if (entry && directory && fileAction) {
         tools.push(row('rename','重命名','F2'),row('trash','移到回收站','Delete'));
@@ -3150,11 +3206,19 @@ export function initLocalExplorer({
     const item = tab;
     const current = item.snapshot;
     if (!entry || !tab.selection.has(pathKey(entry.path))) selectEntry(entry);
-    const items = contextItems(entry,current);
+    const revision = item.selectionRevision;
+    const ratingTarget = entry && !entry.isDirectory && current.directory && assetRating?.lookup(getSelectedEntries());
+    const items = contextItems(entry,current,ratingTarget);
     menuOpen = true;
     try {
       const action = await contextMenu({...position,items});
-      if (action && item === tab && current === tab.snapshot && isActive()) void applyAction(action,entry,current);
+      if (!action || item !== tab || current !== tab.snapshot || !isActive()) return;
+      const rating = /^asset-rating-([0-5])$/.exec(action);
+      if (rating) {
+        const stillSelected = () => item === tab && current === tab.snapshot && isActive() && item.selectionRevision === revision;
+        if (ratingTarget && stillSelected()) void performFileAction(
+          () => assetRating.save({...ratingTarget,rating:Number(rating[1]),stillSelected}),current.directory);
+      } else void applyAction(action,entry,current);
     } catch (failure) {
       if (item.snapshot === current) report(item,String(failure?.message || failure),true);
     } finally {
@@ -3997,6 +4061,9 @@ export function initLocalExplorer({
     if (!shortcut && !assetSearchResult && !editing && !event.repeat && current && !tab.request && !tab.fileAction) {
       if (modified && !event.altKey && !event.shiftKey && key === 'a') {
         shortcut = selectAll;
+      } else if (modified && event.shiftKey && !event.altKey && key === 'c' && !sequence && (tab.selected || physical) &&
+          owner.getSelection()?.isCollapsed) {
+        shortcut = () => applyAction('copy-path',tab.selected,current);
       } else if (event.altKey && key === 'enter' && !multiple && fileAction && (selected || physical)) {
         shortcut = () => applyAction('properties',selected,current);
       } else if (physical && fileAction && modified && event.shiftKey && key === 'n') {
@@ -4026,8 +4093,9 @@ export function initLocalExplorer({
     renderLinks();
   }
 
-  return {refresh,focusAddress,exit,openPath,openShellPath,revealSource,revealSources,restoreDetachedTab,show,addTab,getTabCount,getTabLocations,getCurrentDirectory,getDirectorySearch,getFileActionDirectory,getSelectedPath,getSelectedEntry,getSelectedEntries,applyPreferences,
-    getTabIdentity,showTabIdentity,canDuplicateActive,duplicateActive,refreshAssetDetails,
+  return {refresh,focusAddress,exit,openPath,openShellPath,revealSource,revealSources,restoreDetachedTab,show,addTab,getTabCount,getCurrentDirectory,getDirectorySearch,getFileActionDirectory,getSelectedPath,getSelectedEntry,getSelectedEntries,applyPreferences,
+    getTabIdentity,showTabIdentity,hasTabIdentity:(identity,path) => Boolean(tabWithIdentity(identity,path)),
+    canDuplicateActive,duplicateActive,refreshAssetDetails,
     findManagedTab,setTabPinned,canCloseOtherTabs,closeOtherTabs,closeManagedTab,restoreClosedTab,hasClosedTabs,openBatchPaths,
     getDropTarget,getSidebarPinTarget,getFolderTabsDropTarget,classifyDroppedFolders,openDroppedFolderTabs,
     expandDropFolder,clearDropFolders,getVolumeLabel,getDragSource,useAlternateMenu,

@@ -28,6 +28,12 @@
 .team-library-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .team-library-actions:empty { display: none; }
 .team-form { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.team-storage-help { margin: 4px 0 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.team-thumbnail-storage h3 { margin: 0; }
+.team-thumbnail-storage-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#team-thumbnail-cache-path { flex: 1 1 190px; margin: 0; overflow-wrap: anywhere; user-select: text; }
+#team-thumbnail-cache-status { margin: 6px 0 0; }
+#team-thumbnail-cache-status:empty { display: none; }
 .team-path-field { display: flex; gap: 8px; }
 .team-path-field input { min-width: 0; }
 .team-dialog-status { color: var(--accent); line-height: 1.6; overflow-wrap: anywhere; margin-bottom: 0; }

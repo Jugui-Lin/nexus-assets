@@ -39,6 +39,7 @@ const BUILD_FILES: &[(&str, &[u8])] = &[
     source_file!("ies_preview.rs"),
     source_file!("linear_preview.rs"),
     source_file!("max_preview.rs"),
+    source_file!("png_preview.rs"),
     source_file!("team.rs"),
     source_file!("team_organization.rs"),
     source_file!("thumbnail_cache.rs"),

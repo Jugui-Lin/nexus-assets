@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Nexus · 资产工作台</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/team.css"><link rel="stylesheet" href="/studio.css"><link rel="stylesheet" href="/workspace-layout.css"><link rel="stylesheet" href="/workspace-drag.css"><link rel="stylesheet" href="/workspace-navigation.css"><link rel="stylesheet" href="/asset-compare.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/asset-masonry.css"><link rel="stylesheet" href="/dcc-connections.css"><link rel="stylesheet" href="/quick-filters.css"><link rel="stylesheet" href="/sidebar-zones.css"><link rel="stylesheet" href="/creative-subscriptions.css"><link rel="stylesheet" href="/browser-sites.css"><link rel="stylesheet" href="/asset-recycle.css"><link rel="stylesheet" href="/asset-filter-toolbar.css"><link rel="stylesheet" href="/workspace-tabs.css"><link rel="stylesheet" href="/local-explorer-base.css"><link rel="stylesheet" href="/whiteboard.css"><link rel="stylesheet" href="/whiteboard-projects.css"><link rel="stylesheet" href="/asset-type-preferences.css"><link rel="stylesheet" href="/asset-ai.css"><link rel="stylesheet" href="/dotin-themes.css"><link rel="stylesheet" href="/local-explorer-shell.css"><link rel="stylesheet" href="/local-explorer-columns.css"><link rel="stylesheet" href="/local-explorer-assets.css"><link rel="stylesheet" href="/local-explorer-preferences.css"><link rel="stylesheet" href="/window-controls.css"><script src="/appearance.js"></script><link rel="stylesheet" href="/workspace-handoff.css"><link rel="stylesheet" href="/nas-folder-sync.css"></head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Nexus · 资产工作台</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/team.css"><link rel="stylesheet" href="/studio.css"><link rel="stylesheet" href="/workspace-layout.css"><link rel="stylesheet" href="/workspace-drag.css"><link rel="stylesheet" href="/workspace-navigation.css"><link rel="stylesheet" href="/asset-compare.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/asset-masonry.css"><link rel="stylesheet" href="/dcc-connections.css"><link rel="stylesheet" href="/quick-filters.css"><link rel="stylesheet" href="/sidebar-zones.css"><link rel="stylesheet" href="/creative-subscriptions.css"><link rel="stylesheet" href="/browser-sites.css"><link rel="stylesheet" href="/asset-recycle.css"><link rel="stylesheet" href="/asset-filter-toolbar.css"><link rel="stylesheet" href="/workspace-tabs.css"><link rel="stylesheet" href="/local-explorer-base.css"><link rel="stylesheet" href="/whiteboard.css"><link rel="stylesheet" href="/whiteboard-projects.css"><link rel="stylesheet" href="/asset-type-preferences.css"><link rel="stylesheet" href="/asset-ai.css"><link rel="stylesheet" href="/dotin-themes.css"><link rel="stylesheet" href="/local-explorer-shell.css"><link rel="stylesheet" href="/local-explorer-columns.css"><link rel="stylesheet" href="/local-explorer-assets.css"><link rel="stylesheet" href="/local-explorer-preferences.css"><link rel="stylesheet" href="/window-controls.css"><script src="/appearance.js"></script><link rel="stylesheet" href="/nas-folder-sync.css"></head>
 <body>
 <svg class="icon-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
 <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
@@ -21,6 +21,7 @@
 <symbol id="i-link" viewBox="0 0 24 24"><path d="m9 15 6-6m-8 4-2 2a4 4 0 0 0 6 6l4-4a4 4 0 0 0 0-6m2 0 2-2a4 4 0 0 0-6-6L9 7a4 4 0 0 0 0 6"/></symbol>
 <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 5h12M9 12h12M9 19h12M3 5h1M3 12h1M3 19h1"/></symbol>
 <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></symbol>
 <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
 <symbol id="i-window-minimize" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
 <symbol id="i-window-maximize" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
@@ -99,6 +100,7 @@
       </div>
       <div data-window-drag aria-hidden="true" hidden></div>
       <div class="local-explorer-workspace-actions">
+        <button type="button" id="workspace-return" class="local-explorer-asset-switch" hidden><svg aria-hidden="true"><use href="#i-undo"/></svg><span>返回原视图</span></button>
         <button type="button" id="workspace-tab-overview-open" class="explorer-icon-button" aria-label="搜索标签页" title="搜索标签页 (Ctrl+Shift+A)" aria-haspopup="dialog" aria-controls="workspace-tab-overview" aria-keyshortcuts="Control+Shift+A" hidden><svg aria-hidden="true"><use href="#i-search"/></svg></button>
         <details id="file-workspace-menu" class="top-tools" hidden>
           <summary class="explorer-icon-button" id="file-workspace-settings" title="设置与工具" aria-label="设置与工具"><svg aria-hidden="true"><use href="#i-list"/></svg></summary>
@@ -161,9 +163,6 @@
               <button id="team-folder-settings" type="button" class="nav-item hidden" aria-haspopup="dialog" aria-controls="team-dialog"><svg aria-hidden="true"><use href="#i-link"/></svg>团队文件夹设置</button>
               <button id="team-profile-option" type="button" class="nav-item hidden" aria-haspopup="dialog"><svg aria-hidden="true"><use href="#i-person"/></svg>我的团队资料</button>
               <button id="open-recycle-bin" type="button" class="nav-item hidden" aria-haspopup="dialog" aria-controls="recycle-bin-dialog" data-asset-workspace-required><svg aria-hidden="true"><use href="#i-trash"/></svg>回收站</button>
-              <button id="workspace-handoff-export" type="button" class="nav-item" aria-haspopup="dialog" aria-controls="workspace-handoff-dialog"><svg aria-hidden="true"><use href="#i-drag-out"/></svg>导出工作交接…</button>
-              <button id="delivery-template" type="button" class="nav-item" aria-haspopup="dialog" aria-controls="delivery-template-dialog" hidden><svg aria-hidden="true"><use href="#i-folder"/></svg>从模板创建交付目录…</button>
-              <button id="workspace-handoff-import" type="button" class="nav-item" aria-haspopup="dialog" aria-controls="workspace-handoff-dialog"><svg aria-hidden="true"><use href="#i-download"/></svg>打开工作交接…</button>
               <button type="button" class="nav-item" data-open-temporary-basket aria-haspopup="dialog" aria-controls="temporary-asset-basket"><svg aria-hidden="true"><use href="#i-stack"/></svg>临时素材篮</button>
             </div>
           </details>
@@ -183,11 +182,10 @@
               <button type="button" class="nav-item" data-file-workspace-command="updates"><svg aria-hidden="true"><use href="#i-refresh"/></svg>检查更新</button>
               <button type="button" class="nav-item" data-file-workspace-command="feedback"><svg aria-hidden="true"><use href="#i-mail"/></svg>反馈</button>
               <button type="button" class="nav-item" data-workspace-guide aria-haspopup="dialog" aria-controls="workspace-guide-dialog"><svg aria-hidden="true"><use href="#i-notes"/></svg>使用指南</button>
-              <button id="about-button" type="button" class="nav-item" aria-haspopup="dialog" aria-controls="about-dialog"><svg aria-hidden="true"><use href="#i-info"/></svg>关于 Nexus</button>
             </div>
           </details>
-          <hr data-desktop-menu-divider>
-          <button type="button" class="nav-item" data-file-workspace-command="quit"><svg aria-hidden="true"><use href="#i-drag-out"/></svg>退出</button>
+          <hr>
+          <button id="about-button" type="button" class="nav-item" aria-haspopup="dialog" aria-controls="about-dialog"><svg aria-hidden="true"><use href="#i-info"/></svg>关于 Nexus</button>
         </div>
       </details>
     </div>
@@ -291,22 +289,38 @@
             <button type="button" data-view="recent" class="nav-item" title="最近入库" aria-label="最近入库"><svg aria-hidden="true"><use href="#i-clock"/></svg><span class="folder-label">最近入库</span></button>
             <button type="button" data-view="jobs" class="nav-item" title="导入任务" aria-label="导入任务"><svg aria-hidden="true"><use href="#i-download"/></svg><span class="folder-label">导入任务</span><span id="job-count" class="nav-count"></span></button>
           </nav>
-          <div id="favorite-expiry-tools" role="group" aria-label="收藏项目与历史" hidden>
-            <select aria-label="按项目筛选收藏"><option value="">全部项目</option></select>
-            <button class="button subtle" aria-pressed="false" type="button">到期历史</button>
-          </div>
+          <button id="asset-favorites-toggle" type="button" class="asset-filter-trigger asset-toolbar-toggle" data-asset-toolbar-panel aria-controls="asset-favorites-panel" aria-expanded="false" aria-label="收藏筛选" title="收藏筛选" hidden><svg aria-hidden="true"><use href="#i-tag"/></svg><span>收藏筛选</span></button>
           <button id="asset-search-toggle" type="button" class="icon-button asset-search-toggle" aria-controls="asset-search-field" aria-expanded="false" aria-label="搜索资产" title="搜索资产 (/)"><svg aria-hidden="true"><use href="#i-search"/></svg></button>
-          <select id="view-density" aria-label="缩略图尺寸" title="按 Ctrl 滚动鼠标滚轮可连续调节"><option value="compact">小缩略图</option><option value="normal">标准缩略图</option><option value="large">大缩略图</option><option value="custom" hidden>自定</option></select>
-          <select id="asset-thumbnail-fit" aria-label="缩略图显示方式" title="缩略图显示方式"><option value="contain">完整显示</option><option value="cover">居中裁切</option><option value="scale-down">原比例</option></select>
-          <div class="view-switch" role="group" aria-label="资产显示方式">
-            <button id="grid-view" type="button" class="icon-button active" aria-label="网格视图" title="网格视图" aria-pressed="true"><svg aria-hidden="true"><use href="#i-grid"/></svg></button>
-            <button id="masonry-view" type="button" class="icon-button" aria-label="瀑布流" title="瀑布流" aria-pressed="false"><svg aria-hidden="true"><use href="#i-masonry"/></svg></button>
-            <button id="list-view" type="button" class="icon-button" aria-label="列表视图" title="列表视图" aria-pressed="false"><svg aria-hidden="true"><use href="#i-list"/></svg></button>
-          </div>
+          <button id="asset-display-toggle" type="button" class="asset-filter-trigger asset-toolbar-toggle" data-asset-toolbar-panel aria-controls="asset-display-panel" aria-expanded="false" aria-label="视图设置" title="视图设置"><svg aria-hidden="true"><use href="#i-grid"/></svg><span>视图</span></button>
         </div>
         <div class="toolbar-connection"><button id="connection-summary" type="button" aria-label="DCC 连接中心，0 个创作工具实例在线" title="DCC 连接中心，0 个创作工具实例在线"><svg aria-hidden="true"><use href="#i-link"/></svg><span id="connection-count" aria-hidden="true">0</span></button></div>
+        <button id="asset-results-toggle" type="button" class="asset-filter-trigger asset-toolbar-toggle" data-asset-toolbar-panel aria-controls="asset-results-panel" aria-expanded="false" aria-label="更多资产操作" title="更多资产操作"><svg aria-hidden="true"><use href="#i-more"/></svg></button>
       </div>
-      <label id="asset-search-field" class="search asset-search" hidden><input id="search" type="search" placeholder="搜索名称、路径、标签或备注…" aria-label="搜索资产"><kbd>/</kbd></label>
+      <div id="asset-search-field" class="search asset-search" role="search" aria-label="搜索资产" hidden>
+        <select id="asset-search-scope" class="asset-search-scope" aria-label="资产搜索范围" hidden>
+          <option value="location">当前目录</option><option value="library">当前库</option><option value="workspace">全部库</option>
+        </select>
+        <input id="search" type="search" placeholder="搜索名称、路径、标签或备注…" aria-label="搜索资产"><kbd>/</kbd>
+      </div>
+      <div id="asset-favorites-panel" class="asset-filter-panel asset-toolbar-panel" aria-label="收藏筛选" data-pane-transient hidden>
+        <div id="favorite-expiry-tools" role="group" aria-label="收藏项目与历史" hidden>
+          <label class="asset-toolbar-field"><span>收藏项目</span><select aria-label="按项目筛选收藏"><option value="">全部项目</option></select></label>
+          <button class="asset-toolbar-menu-item" data-asset-toolbar-action aria-pressed="false" type="button">到期历史</button>
+        </div>
+      </div>
+      <div id="asset-display-panel" class="asset-filter-panel asset-toolbar-panel" aria-label="视图设置" data-pane-transient hidden>
+        <div class="asset-toolbar-view-modes" role="group" aria-label="资产显示方式">
+          <button id="grid-view" type="button" class="active" aria-label="网格视图" title="网格视图" aria-pressed="true"><svg aria-hidden="true"><use href="#i-grid"/></svg>网格</button>
+          <button id="masonry-view" type="button" aria-label="瀑布流" title="瀑布流" aria-pressed="false"><svg aria-hidden="true"><use href="#i-masonry"/></svg>瀑布流</button>
+          <button id="list-view" type="button" aria-label="列表视图" title="列表视图" aria-pressed="false"><svg aria-hidden="true"><use href="#i-list"/></svg>列表</button>
+        </div>
+        <label class="asset-toolbar-field"><span>缩略图尺寸</span><select id="view-density" aria-label="缩略图尺寸" title="按 Ctrl 滚动鼠标滚轮可连续调节"><option value="compact">小缩略图</option><option value="normal">标准缩略图</option><option value="large">大缩略图</option><option value="custom" hidden>自定</option></select></label>
+        <label class="asset-toolbar-field"><span>缩略图显示</span><select id="asset-thumbnail-fit" aria-label="缩略图显示方式"><option value="contain">完整显示</option><option value="cover">居中裁切</option><option value="scale-down">原比例</option></select></label>
+      </div>
+      <div id="asset-results-panel" class="asset-filter-panel asset-toolbar-panel asset-toolbar-operation-list" aria-label="更多资产操作" data-pane-transient hidden>
+        <button id="check-files" type="button" class="asset-toolbar-menu-item hidden" data-asset-toolbar-action><svg aria-hidden="true"><use href="#i-check"/></svg>检查文件</button>
+        <button id="select-visible" type="button" class="asset-toolbar-menu-item" data-asset-toolbar-action><svg aria-hidden="true"><use href="#i-grid"/></svg>选择已显示项</button>
+      </div>
       <div id="asset-type-panel" class="asset-filter-panel" hidden>
       <div id="type-tabs" class="type-tabs" role="group" aria-label="资产类型">
         <button type="button" data-kind="all" aria-pressed="true"><svg aria-hidden="true"><use href="#i-grid"/></svg><span class="asset-filter-label" data-filter-label>全部</span><span data-filter-count>0</span></button>
@@ -354,7 +368,11 @@
       </div>
     </section>
     <div class="results-line">
-      <div><span id="result-count">0</span> 项资产 <span id="active-filter"></span>
+      <div><span id="result-count">0</span> 项资产
+        <select id="asset-search-results-scope" class="asset-search-scope asset-search-results-scope" aria-label="搜索结果范围" hidden>
+          <option value="location">当前目录</option><option value="library">当前库</option><option value="workspace">全部库</option>
+        </select>
+        <span id="active-filter"></span>
         <button id="show-linked-asset-selection" type="button" class="text-button asset-browse-exit" hidden>查看文件夹选区</button>
         <button id="exit-asset-focus" type="button" class="text-button asset-browse-exit" title="退出聚焦 (Esc)" aria-keyshortcuts="Escape" hidden><span>退出聚焦</span><svg aria-hidden="true"><use href="#i-close"/></svg></button>
       </div>
@@ -365,8 +383,7 @@
         <label id="folder-options" class="folder-options hidden"><input id="include-descendants" type="checkbox" checked>包含子文件夹</label>
         <button id="show-material-sets" type="button" class="text-button" aria-haspopup="dialog" aria-controls="pbr-material-sets-dialog" hidden>材质套图</button>
         <button id="group-search-locations" type="button" class="text-button" aria-pressed="false" hidden>按原件位置分组</button>
-        <button id="check-files" type="button" class="text-button hidden">检查文件</button>
-        <button id="select-visible" class="text-button">选择已显示项</button>
+        <button id="collapse-search-locations" type="button" class="text-button" aria-label="折叠全部原件位置" hidden>折叠全部</button>
         <div id="asset-browse-marker" class="asset-browse-marker" role="group" aria-label="资产返回标记" hidden>
           <button id="return-to-asset-marker" type="button" class="text-button"><svg aria-hidden="true"><use href="#i-pin"/></svg><span>返回标记</span></button>
           <button id="clear-asset-marker" type="button" class="text-button" title="清除返回标记" aria-label="清除返回标记"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
@@ -554,7 +571,7 @@
             <button type="button" data-file-view-option="status" aria-pressed="true"><svg aria-hidden="true"><use href="#i-check"/></svg>状态栏</button>
             <button type="button" data-file-view-option="extensions" aria-pressed="true"><svg aria-hidden="true"><use href="#i-check"/></svg>文件扩展名</button>
             <button type="button" data-file-view-option="hidden" aria-pressed="false"><svg aria-hidden="true"><use href="#i-check"/></svg>隐藏的项目</button>
-            <button type="button" data-file-view-option="sequences" aria-pressed="false"><svg aria-hidden="true"><use href="#i-check"/></svg>堆叠序列帧</button>
+            <button type="button" data-file-view-option="sequences" aria-pressed="true"><svg aria-hidden="true"><use href="#i-check"/></svg>堆叠序列帧</button>
             <button type="button" data-file-view-option="unindexed" aria-pressed="false"><svg aria-hidden="true"><use href="#i-check"/></svg>未入库标记</button>
             <button type="button" data-explorer-asset-action="load" hidden><svg aria-hidden="true"><use href="#i-stack"/></svg>显示资产状态</button>
           </div>
@@ -850,7 +867,7 @@
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-status" checked>显示状态栏</label>
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-extensions" checked>显示文件扩展名</label>
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-hidden">显示隐藏的项目</label>
-      <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-stack-sequences">堆叠序列帧</label>
+      <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-stack-sequences" checked>堆叠序列帧</label>
       <label class="folder-preferences-choice"><input type="checkbox" id="file-workspace-show-unindexed">显示未入库标记</label>
     </section>
     <section id="file-preferences-shortcuts" class="folder-preferences-panel" data-file-preferences-panel="shortcuts" role="tabpanel" aria-labelledby="file-preferences-shortcuts-tab" hidden>
@@ -936,39 +953,6 @@
     </form>
   </div>
   <p id="shot-dashboard-status" class="modal-description" role="status"></p>
-</dialog>
-<dialog id="delivery-template-dialog" class="modal delivery-template-dialog" aria-labelledby="delivery-template-title">
-  <div class="modal-header"><h2 id="delivery-template-title">交付目录模板</h2><button type="button" class="icon-button" data-delivery-close aria-label="关闭"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
-  <form data-delivery-form>
-    <label class="field-label">已保存的模板<select class="text-field" data-delivery-preset></select></label>
-    <div class="asset-inventory-inline">
-      <label class="field-label asset-inventory-root">保存模板名称<input class="text-field" type="text" maxlength="48" data-delivery-name></label>
-      <button class="button subtle" type="button" data-delivery-save>保存模板</button>
-    </div>
-    <div class="asset-inventory-inline">
-      <label class="field-label asset-inventory-root">上级文件夹<input class="text-field" type="text" maxlength="4096" dir="ltr" required data-delivery-destination></label>
-      <button class="button subtle" type="button" data-delivery-pick>选择目录…</button>
-    </div>
-    <div class="asset-inventory-maps">
-      <label class="field-label">项目名称<input type="text" maxlength="80" class="text-field" data-delivery-project required autofocus></label>
-      <label class="field-label">日期<input type="date" class="text-field" data-delivery-date required></label>
-    </div>
-    <label class="field-label">最外层文件夹名称<input type="text" maxlength="120" class="text-field" data-delivery-pattern required></label>
-    <label class="field-label">子目录（每行一个，可用 / 表示层级）
-      <textarea class="text-field" data-delivery-paths rows="6" maxlength="4800" required aria-describedby="delivery-template-help"></textarea>
-    </label>
-    <p id="delivery-template-help" class="modal-description">目录名称支持 {项目} 与 {日期}。</p>
-    <button class="button subtle" type="submit">预览目录</button>
-  </form>
-  <div data-delivery-preview hidden>
-    <p class="modal-description" dir="ltr" data-delivery-root></p>
-    <ol class="asset-inventory-rows" data-delivery-rows aria-label="将新建的子目录"></ol>
-  </div>
-  <p data-delivery-status class="modal-description" role="status"></p>
-  <div class="modal-footer">
-    <button type="button" class="button subtle" data-delivery-open hidden>打开新目录</button>
-    <button type="button" class="button primary" data-delivery-create disabled>创建新目录</button>
-  </div>
 </dialog>
 <dialog id="asset-inventory-dialog" class="modal asset-inventory-dialog" aria-labelledby="asset-inventory-title">
   <div class="modal-header"><h2 id="asset-inventory-title">资产清单与标注</h2><button type="button" class="icon-button" data-inventory-close aria-label="关闭"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
@@ -1364,7 +1348,10 @@
   <div class="modal-header"><h2 id="about-title">关于 Nexus</h2><button type="button" class="icon-button close-modal" aria-label="关闭"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
   <p class="about-version"><span>客户端版本</span> <strong id="about-version">正在读取…</strong></p>
   <p class="about-version about-team-version" id="about-team-version-row" hidden><span>团队服务版本</span> <strong id="about-team-version" role="status"></strong></p>
-  <p class="about-version about-team-version" id="about-team-latest-row" hidden><span>NAS 最新镜像</span> <strong id="about-team-latest" role="status"></strong></p>
+  <p class="about-version about-repository">
+    <span>GitHub 仓库</span>
+    <a id="about-github-repository" class="text-button" href="https://github.com/Jugui-Lin/nexus-assets" target="_blank" rel="noopener noreferrer">https://github.com/Jugui-Lin/nexus-assets</a>
+  </p>
   <section id="nexus-updater" class="about-updates" aria-label="应用更新" hidden>
     <span role="status">从 GitHub 获取应用更新</span>
     <div class="about-update-actions">
@@ -1585,7 +1572,8 @@
   <form id="workspace-quick-create" class="workspace-quick-create hidden">
     <label class="field-label" for="workspace-create-name">个人库名称</label>
     <input type="text" id="workspace-create-name" class="text-field" maxlength="90" required>
-    <div class="workspace-settings-actions"><button type="button" data-workspace-action="cancel-create" class="button subtle">取消</button><button type="submit" class="button primary">选择保存位置…</button></div>
+    <p id="workspace-create-location" class="workspace-create-location">选择一个空文件夹存放数据库和缩略图缓存。素材目录可稍后分别导入或链接。</p>
+    <div class="workspace-settings-actions"><button type="button" data-workspace-action="cancel-create" class="button subtle">取消</button><button type="submit" class="button primary" aria-describedby="workspace-create-location">选择数据目录…</button></div>
   </form>
 </div>
 <dialog id="workspace-dialog" class="modal workspace-dialog" aria-labelledby="workspace-dialog-title">
@@ -1599,7 +1587,11 @@
     <select id="creator-work-default-layout" class="text-field"><option value="cards">卡片</option><option value="list">列表</option></select>
   </section>
   <section class="workspace-settings-row">
-    <div><h3 id="workspace-current-name">个人工作空间</h3><p id="workspace-current-path"></p></div>
+    <div>
+      <h3 id="workspace-current-name">个人工作空间</h3>
+      <p>数据目录 <span id="workspace-current-path"></span></p>
+      <p id="workspace-current-storage" hidden>数据库 <code>nexus.sqlite3</code> · 缩略图缓存 <code>thumbnail-cache</code>、<code>indexed-thumbnails</code></p>
+    </div>
     <button id="workspace-migrate" type="button" class="button subtle">迁移数据库…</button>
   </section>
   <section class="workspace-settings-row">
@@ -1699,7 +1691,7 @@
     </div>
   </section>
   <section id="team-nas-setup" class="hidden">
-    <p class="modal-description">把已有团队导出到 NAS 的部署目录，在 Docker 中启动后切换到 NAS 地址。</p>
+    <p class="modal-description">把已有团队导出到 NAS 的部署目录，在 Docker 中启动后切换到 NAS 地址。数据库由 Docker 的数据目录保存，素材目录可分别挂载。</p>
     <form id="team-nas-form">
       <label class="field-label" for="team-nas-url">NAS 团队地址</label>
       <input id="team-nas-url" class="text-field" type="url" placeholder="http://192.168.1.20:47822" autocomplete="off" spellcheck="false" required>
@@ -1715,8 +1707,21 @@
   </section>
   <section id="team-manage" class="hidden">
     <p id="team-member" class="modal-description"></p>
-    <div class="team-library-heading"><h3>团队文件夹</h3><button id="team-link-directory" class="button subtle" type="button">链接文件夹…</button></div>
+    <p class="team-storage-help">索引和元数据保存在团队服务的数据目录。链接素材时，原件保留在各自的 NAS 共享目录。</p>
+    <div class="team-library-heading"><h3>团队素材目录</h3><button id="team-link-directory" class="button subtle" type="button">链接素材目录…</button></div>
     <div id="team-library-list"></div>
+    <section class="team-form team-thumbnail-storage" aria-labelledby="team-thumbnail-storage-title">
+      <h3 id="team-thumbnail-storage-title">团队共享缩略图缓存</h3>
+      <p class="team-storage-help">此设置保存在本机。成员选择同一个可写 NAS 目录即可共用缓存。未挂载素材目录时也可浏览已缓存的缩略图。</p>
+      <div class="team-thumbnail-storage-row">
+        <p id="team-thumbnail-cache-path">默认缓存位置</p>
+        <div class="team-library-actions">
+          <button id="team-thumbnail-cache-pick" type="button" class="button subtle">选择文件夹…</button>
+          <button id="team-thumbnail-cache-reset" type="button" class="button subtle hidden">恢复默认</button>
+        </div>
+      </div>
+      <p id="team-thumbnail-cache-status" class="team-dialog-status" role="status"></p>
+    </section>
     <form id="team-publish-form" class="team-form hidden">
       <h3>发布团队库</h3>
       <label class="field-label" for="team-publish-name">资产库名称</label>

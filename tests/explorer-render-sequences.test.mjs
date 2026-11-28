@@ -62,3 +62,30 @@ test('matches native frame name rules and keeps singletons ungrouped', () => {
   const rows = [entry('D:/renders/shot_0001.png'),entry('D:/renders/shot_0001.exr')];
   assert.equal(groupExplorerRenderSequences(rows,pathKey).size,0);
 });
+
+test('stacks directly appended frame numbers without combining dates or formats', () => {
+  const rows = [
+    entry('D:/Renders/S04_11180031.exr'),
+    entry('D:/Renders/S04_11180000.exr'),
+    entry('D:/Renders/S04_11180002.exr'),
+    entry('D:/Renders/S04_11190000.exr'),
+    entry('D:/Renders/S04_11190001.exr'),
+    entry('D:/Renders/S04_11180000.png'),
+    entry('D:/Renders/S04_11180031.png'),
+    entry('D:/Renders/S04_202611180003.exr'),
+    entry('D:/Renders/S04_202611180004.exr'),
+    entry('D:/Renders/S04_20261118.exr'),
+    entry('D:/Renders/S04_20261119.exr'),
+    entry('D:/Renders/S04_UDIM_1001.exr'),
+    entry('D:/Renders/S04_UDIM_1002.exr'),
+  ];
+  const groups = groupExplorerRenderSequences(rows,pathKey);
+  assert.equal(groups.size,9);
+  assert.equal(groups.get(0).label,'S04_1118####.exr');
+  assert.deepEqual(groups.get(0).frames.map(frame => frame.number),[0,2,31]);
+  assert.equal(groups.get(3).label,'S04_1119####.exr');
+  assert.equal(groups.get(5).label,'S04_1118####.png');
+  assert.equal(groups.get(7).label,'S04_20261118####.exr');
+  assert.equal(isExplorerRenderFrame('S04_13320001.exr'),false);
+  assert.equal(isExplorerRenderFrame('S04_1001.exr'),true);
+});

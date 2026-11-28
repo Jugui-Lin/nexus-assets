@@ -187,7 +187,7 @@
   overscroll-behavior: contain;
 }
 .top-tools:not([open]) > .workspace-tools-panel,
-#top-tools :is([data-file-workspace-command], [data-desktop-menu-divider]),
+#top-tools [data-file-workspace-command],
 .workspace-tools-panel button[hidden],
 .workspace-tools-section:not([open]) > .workspace-tools-section-actions { display: none; }
 .workspace-tools-panel :is(button:not([hidden]), .workspace-tools-section > summary) {
@@ -282,6 +282,8 @@
 .about-team-version { margin-top: 8px; }
 .about-team-version[hidden] { display: none; }
 .about-team-version strong { font-size: 14px; }
+.about-repository { flex-wrap: wrap; gap: 5px 10px; margin-top: 8px; }
+.about-repository a { min-width: 0; overflow-wrap: anywhere; }
 .about-updates { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 11px; }
 .about-updates[hidden] { display: none; }
 .about-update-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-inline-start: auto; }
@@ -791,6 +793,9 @@
 .workspace-switcher-actions, .workspace-quick-create { border-top: 1px solid var(--line); margin-top: 6px; padding: 4px; }
 .workspace-switcher-actions button { padding: 7px; }
 .workspace-quick-create .workspace-settings-actions { margin-top: 9px; justify-content: end; }
+.workspace-create-location { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+#workspace-current-path { user-select: text; }
+#workspace-current-storage code { overflow-wrap: anywhere; }
 #workspace-switcher-status { margin: 6px 8px; color: var(--muted); overflow-wrap: anywhere; }
 #workspace-switcher-status:empty { display: none; }
 .workspace-dialog .modal-header { margin-bottom: 13px; }
@@ -991,6 +996,3 @@ dialog.modal::backdrop { backdrop-filter: none; background: #080b0dae; }
 .asset-inventory-rows { max-height:min(30vh,260px); overflow:auto; }
 .asset-inventory-rows li { padding:6px 0; border-bottom:1px solid var(--line); }
 .asset-inventory-rows small { display:block; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; margin-inline-start:22px; }
-.delivery-template-dialog { width:min(640px,calc(100vw - 32px)); }
-.delivery-template-dialog :is([data-delivery-root],[data-delivery-status]) { overflow-wrap:anywhere; margin-block:8px; }
-.delivery-template-dialog [data-delivery-status]:empty { display:none; }

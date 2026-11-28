@@ -73,7 +73,6 @@ mod thumbnail_desktop;
 mod workspace_asset_deletion;
 mod workspace_data;
 mod catalog_health;
-mod delivery_template;
 mod shot_delivery;
 mod workspace_files;
 mod workspace_folder_move;
@@ -268,8 +267,8 @@ async fn pick_folder(purpose: Option<String>) -> Result<Option<String>, String> 
         let title = match purpose.as_deref() {
             Some("c4d-project") => "选择 Cinema 4D 工程的输出目录",
             Some("c4d-cache") => "选择 Cinema 4D 导入缓存位置",
+            Some("team-thumbnail-cache") => "选择团队共享缩略图缓存目录",
             Some("inventory-root") => "选择清单使用的项目根目录",
-            Some("delivery-template") => "选择交付目录的上级文件夹",
             Some("asset-original-move") => "选择原件的新位置",
             _ => "选择资产文件夹（只建立索引，不移动原文件）",
         };
@@ -1283,8 +1282,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             catalog_health::inspect_personal_catalog_health,
-            delivery_template::preview_delivery_template,
-            delivery_template::create_delivery_template,
             team_network_paths::workspace_network_path,
             team_network_paths::search_network_paths,
             shot_delivery::lock_shot_preview,
@@ -1490,6 +1487,7 @@ fn main() {
             team_desktop::team_catalog,
             team_desktop::team_set_folder_visibility,
             team_desktop::team_set_mount,
+            team_desktop::team_set_thumbnail_cache_root,
             team_desktop::team_link_folders,
             team_desktop::classify_team_drop,
             team_desktop::team_import_paths,
