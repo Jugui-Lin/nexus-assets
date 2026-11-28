@@ -33,6 +33,7 @@ _CHANNELS = {
 _COLOR_CHANNELS = {"base_color", "emission"}
 _HDR_TYPES = {".hdr", ".exr"}
 _IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".webp", ".psd", ".dds"} | _HDR_TYPES
+_ALPHA_IMAGE_TYPES = {".png", ".tga", ".tif", ".tiff", ".webp", ".psd", ".dds", ".exr"}
 _TEXTURE_FOLDERS = ("tex", "texture", "textures", "maps", "maps_baked")
 _MAX_TEXTURE_SCAN_ENTRIES = 8192
 _RS_CORE = "com.redshift3d.redshift4c4d.nodes.core."
@@ -50,6 +51,8 @@ _OCT_LIGHT = 1029526
 _OCT_EMISSION = 1029642
 _OCT_ENVIRONMENT = 1029643
 _OCT_DISPLACEMENT = 1031901
+_OCT_SIDE = 1034143
+_OCT_GRAPH_CHANNELS = {"base_color", "roughness", "glossiness", "normal", "bump", "opacity", "specular", "metallic"}
 # Plugin resources expose these IDs even when Cinema 4D's Python module does
 # not publish the third-party symbols. See OctaneMaterial.h and ImageTexture.h.
 _OCT_SYMBOLS = {
@@ -70,10 +73,12 @@ _OCT_SYMBOLS = {
     "OCT_MAT_SPECULAR_MAP_FLOAT": 2613,
     "UNIVMAT_TRANSMISSION_TYPE": 2632, "UNIVMAT_TRANSMISSION_TYPE_THINWALL_DIF": 3,
     "IMAGETEXTURE_FILE": 1100, "IMAGETEXTURE_INVERT": 1104, "IMAGETEXTURE_POWER_FLOAT": 1109,
+    "IMAGETEXTURE_MODE": 1105, "IMAGETEXTURE_MODE2": 1, "IMAGETEXTURE_MODE3": 2,
     "IMAGETEX_COLOR_SPACE": 1118, "IMAGETEX_CS_NONE": 0, "IMAGETEX_CS_SRGB": 1,
     "IMAGETEX_CS_LINEAR_SRGB": 2, "MULTIPLY_TEXTURE1": 1140, "MULTIPLY_TEXTURE2": 1141,
     "RGBSPECTRUMSHADER_COLOR": 1200, "MIXTEX_TEXTURE1_LNK": 1131,
-    "MIXTEX_TEXTURE2_LNK": 1132, "MIXTEX_AMOUNT_FLOAT": 1133,
+    "MIXTEX_TEXTURE2_LNK": 1132, "MIXTEX_AMOUNT_FLOAT": 1133, "MIXTEX_AMOUNT_LNK": 1130,
+    "SIDE_INVERT": 3020,
     "TEXEMISSION_EFFIC_OR_TEX": 2170, "DISPLACEMENT_TEXTURE": 2050,
 }
 
@@ -430,12 +435,14 @@ def _oct_scalar(c4d, element, name, value):
         raise RuntimeError(f"Octane 无法设置参数 {name}。")
 
 
-def _oct_image(c4d, owner, path, color_space, invert=False, *, power=None):
+def _oct_image(c4d, owner, path, color_space, invert=False, *, power=None, mode=None):
     shader = _created(c4d.BaseShader(_OCT_IMAGE), "Octane 图像纹理")
     _oct_param(c4d, shader, "IMAGETEXTURE_FILE", path)
     _oct_param(c4d, shader, "IMAGETEX_COLOR_SPACE", _oct_symbol(c4d, color_space))
     if invert:
         _oct_param(c4d, shader, "IMAGETEXTURE_INVERT", True)
+    if mode is not None:
+        _oct_param(c4d, shader, "IMAGETEXTURE_MODE", _oct_symbol(c4d, mode))
     if power is not None and power != 1.0:
         _oct_scalar(c4d, shader, "IMAGETEXTURE_POWER_FLOAT", power)
     owner.InsertShader(shader)
@@ -478,6 +485,57 @@ def _oct_normal(c4d, mat, path, strength):
     return mix
 
 
+def _oct_texture(c4d, owner, key, texture, notes, *, power=None, normal=None, invert=False, alpha=False):
+    if isinstance(texture, str):
+        if key == "normal":
+            if normal is not None and normal > 1.0:
+                notes.append("已连接法线贴图，超过 100% 的原始法线强度需在 Octane 中调整")
+            if _directx_normal(texture):
+                notes.append("检测到 DirectX 法线，需在 Octane 中检查 Y 轴方向")
+            return _oct_normal(c4d, owner, texture, normal)
+        mode = ("IMAGETEXTURE_MODE3" if alpha else "IMAGETEXTURE_MODE2") if key == "opacity" else None
+        return _oct_image(c4d, owner, texture, _oct_color_space(key, texture), invert, power=power, mode=mode)
+    kind, *inputs = texture
+
+    def branch(parent, value):
+        return _oct_texture(c4d, parent, key, value, notes, power=power, normal=normal, invert=invert, alpha=alpha)
+
+    if kind == "image":
+        path, strength = inputs
+        value = _scalar(strength, maximum=100.0)
+        return _oct_texture(c4d, owner, key, path, notes, power=power,
+                            normal=normal if value is None else value, invert=invert, alpha=alpha)
+    if kind == "side":
+        front, back = inputs
+        try:
+            side = _created(c4d.BaseShader(_OCT_SIDE), "Octane 多边形正反面")
+            if not side.CheckType(_OCT_SIDE):
+                raise RuntimeError("Octane 多边形正反面节点不可用")
+            _oct_param(c4d, side, "SIDE_INVERT", False)
+            mix = _created(c4d.BaseShader(_OCT_MIX), "Octane 双面贴图混合")
+            mix.InsertShader(side)
+            _oct_param(c4d, mix, "MIXTEX_AMOUNT_LNK", side)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            notes.append("当前 Octane 版本无法连接双面贴图，已使用正面贴图")
+            return branch(owner, front)
+        # The Side node outputs 1 on a front face and 0 on a back face.
+        first, second = back, front
+    elif kind == "mix":
+        first, second, amount = inputs
+        amount = _scalar(amount)
+        if amount is None:
+            notes.append("未能读取原始贴图混合比例，已使用第一张贴图")
+            return branch(owner, first)
+        mix = _created(c4d.BaseShader(_OCT_MIX), "Octane 贴图混合")
+        _oct_scalar(c4d, mix, "MIXTEX_AMOUNT_FLOAT", amount)
+    else:
+        raise ValueError(f"Octane 不支持此贴图节点 {kind}")
+    _oct_param(c4d, mix, "MIXTEX_TEXTURE1_LNK", branch(mix, first))
+    _oct_param(c4d, mix, "MIXTEX_TEXTURE2_LNK", branch(mix, second))
+    owner.InsertShader(mix)
+    return mix
+
+
 def _oct_material(c4d, name, channels, *, base_color=None, roughness=None, settings=None):
     mat = _created(c4d.BaseMaterial(_OCT_MATERIAL), "Octane 材质")
     mat.SetName(name)
@@ -502,13 +560,9 @@ def _oct_material(c4d, name, channels, *, base_color=None, roughness=None, setti
     for key in channels.keys() & fields.keys():
         enabled, slot = fields[key]
         _oct_param(c4d, mat, "OCT_MAT_USE_" + enabled, True)
-        if key == "normal":
-            shader = _oct_normal(c4d, mat, channels[key], normal)
-            if normal is not None and normal > 1.0:
-                notes.append("已连接法线贴图，超过 100% 的原始法线强度需在 Octane 中调整")
-        else:
-            power = specular if key == "specular" else settings.get("bump_strength") if key == "bump" else None
-            shader = _oct_image(c4d, mat, channels[key], "IMAGETEX_CS_NONE", power=power)
+        power = specular if key == "specular" else settings.get("bump_strength") if key == "bump" else None
+        shader = _oct_texture(c4d, mat, key, channels[key], notes, power=power, normal=normal,
+                              alpha=settings.get("opacity_alpha", False))
         _oct_param(c4d, mat, slot, shader)
     if "metallic" not in channels and (metallic is not None or specular is not None):
         _oct_param(c4d, mat, "OCT_MAT_USE_SPECULAR_MAP", True)
@@ -522,15 +576,13 @@ def _oct_material(c4d, name, channels, *, base_color=None, roughness=None, setti
     if opacity is not None and opacity < 1.0 and "opacity" not in channels:
         _oct_param(c4d, mat, "OCT_MAT_USE_OPACITY", True)
         _oct_scalar(c4d, mat, "OCT_MATERIAL_OPACITY_FLOAT", opacity)
-    if "normal" in channels and _directx_normal(channels["normal"]):
-        notes.append("检测到 DirectX 法线，需在 Octane 中检查 Y 轴方向")
     if "glossiness" in channels:
         if "roughness" in channels:
-            _oct_image(c4d, mat, channels["glossiness"], "IMAGETEX_CS_NONE").SetName(_unconnected_name("glossiness"))
+            _oct_texture(c4d, mat, "glossiness", channels["glossiness"], notes).SetName(_unconnected_name("glossiness"))
         else:
             _oct_param(c4d, mat, "OCT_MAT_USE_ROUGHNESS", True)
-            _oct_param(c4d, mat, "OCT_MATERIAL_ROUGHNESS_LINK", _oct_image(
-                c4d, mat, channels["glossiness"], "IMAGETEX_CS_NONE", invert=True
+            _oct_param(c4d, mat, "OCT_MATERIAL_ROUGHNESS_LINK", _oct_texture(
+                c4d, mat, "glossiness", channels["glossiness"], notes, invert=True
             ))
     elif roughness is not None and "roughness" not in channels:
         _oct_param(c4d, mat, "OCT_MAT_USE_ROUGHNESS", True)
@@ -540,15 +592,15 @@ def _oct_material(c4d, name, channels, *, base_color=None, roughness=None, setti
     base, occlusion = channels.get("base_color"), channels.get("ao")
     if base and occlusion:
         combined = _created(c4d.BaseShader(_OCT_MULTIPLY), "Octane 纹理乘法节点")
-        _oct_param(c4d, combined, "MULTIPLY_TEXTURE1", _oct_image(
-            c4d, combined, base, _oct_color_space("base_color", base), power=diffuse
+        _oct_param(c4d, combined, "MULTIPLY_TEXTURE1", _oct_texture(
+            c4d, combined, "base_color", base, notes, power=diffuse
         ))
         _oct_param(c4d, combined, "MULTIPLY_TEXTURE2", _oct_image(c4d, combined, occlusion, "IMAGETEX_CS_NONE"))
         mat.InsertShader(combined)
     elif base or occlusion:
         path = base or occlusion
-        combined = _oct_image(c4d, mat, path, _oct_color_space("base_color" if base else "ao", path),
-                              power=diffuse if base else None)
+        combined = _oct_texture(c4d, mat, "base_color" if base else "ao", path, notes,
+                                power=diffuse if base else None)
     else:
         combined = None
     if combined is not None:
@@ -713,18 +765,20 @@ def _relink_bitmap_paths(c4d, material, resolve):
     return linked
 
 
-def _fill_standard_map_channels(c4d, material, channels, resolve):
+def _fill_standard_map_channels(c4d, material, channels, resolve, *, opacity_alpha_map=None):
     linked = 0
     for key, (enabled, parameter) in _classic_texture_slots(c4d).items():
         path = channels.get(key)
         if not path:
             continue
+        use_image_alpha = (key == "opacity"
+                           and _matches_source_texture({"opacity_map": opacity_alpha_map}, key, path))
         shader = material[parameter]
         if shader is not None:
             if not shader.CheckType(c4d.Xbitmap):
                 continue
             reference = str(shader[c4d.BITMAPSHADER_FILENAME] or "")
-            if "://" in reference or resolve(reference):
+            if "://" in reference or (not use_image_alpha and resolve(reference)):
                 continue
             shader[c4d.BITMAPSHADER_FILENAME] = path
         else:
@@ -733,7 +787,7 @@ def _fill_standard_map_channels(c4d, material, channels, resolve):
         if key == "normal":
             material[c4d.MATERIAL_NORMAL_REVERSEY] = _directx_normal(path)
         elif key == "opacity":
-            material[c4d.MATERIAL_ALPHA_IMAGEALPHA] = False
+            material[c4d.MATERIAL_ALPHA_IMAGEALPHA] = use_image_alpha
         linked += 1
 
     reflection_maps = [(channels[key], parameter) for key, parameter in (
@@ -760,6 +814,7 @@ def link_standard_scene_textures(c4d, doc, imported_materials, plan, family_key=
     resolve = _texture_resolver(Path(plan["path"]), plan.get("source_path"), doc.GetDocumentPath())
     named_maps = plan.get("named_material_maps", {})
     source_maps = plan.get("scene_material_maps", {})
+    source_settings = plan.get("max_batch_material_settings", {})
     names = Counter(material.GetName() for material in imported_materials)
     baked_maps = _baked_material_channels(plan, names.elements())
     linked = 0
@@ -780,7 +835,10 @@ def link_standard_scene_textures(c4d, doc, imported_materials, plan, family_key=
                     if existing is not None:
                         maps[channel] = str(existing)
         channels = {key: path for key, path in maps.items() if Path(path).suffix.lower() in _IMAGE_TYPES}
-        repaired += _fill_standard_map_channels(c4d, material, channels, resolve) if channels else 0
+        if channels:
+            source = source_settings.get(name, {}) if names[name] == 1 else {}
+            repaired += _fill_standard_map_channels(c4d, material, channels, resolve,
+                                                    opacity_alpha_map=source.get("opacity_alpha_map"))
         if repaired:
             material.Message(c4d.MSG_UPDATE)
             linked += repaired
@@ -954,6 +1012,16 @@ def _matches_source_texture(source, channel, path):
     return Path(path).name.casefold() == filename.casefold()
 
 
+def _imported_opacity_alpha(c4d, original, selected, resolve_texture):
+    if not (_material_parameter(c4d, original, "MATERIAL_USE_ALPHA")
+            and _material_parameter(c4d, original, "MATERIAL_ALPHA_IMAGEALPHA")):
+        return False
+    shader = _material_parameter(c4d, original, "MATERIAL_ALPHA_SHADER")
+    if shader is None or not shader.CheckType(c4d.Xbitmap):
+        return False
+    return resolve_texture(str(shader[c4d.BITMAPSHADER_FILENAME] or "")) == selected
+
+
 def _imported_octane_settings(c4d, original, channels, source):
     settings = {}
     for channel, key, parameter, maximum in (
@@ -1016,6 +1084,16 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
     include_source = (plan.get("scene_import") or {}).get("textures", True)
     resolve_texture = _texture_resolver(Path(plan["path"]), plan.get("source_path") if include_source else None,
                                         doc.GetDocumentPath())
+
+    @lru_cache(maxsize=_MAX_TEXTURE_SCAN_ENTRIES)
+    def bitmap_has_alpha(path):
+        try:
+            bitmap = c4d.bitmaps.BaseBitmap()
+            result, is_movie = bitmap.InitWith(path)
+            return result == c4d.IMAGERESULT_OK and not is_movie and bitmap.GetInternalChannel() is not None
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            return False
+
     bindings = [(tag, tag.GetMaterial()) for obj in imported_objects
                 for tag in obj.GetTags() if tag.CheckType(c4d.Ttexture)]
     originals = [material for material in imported_materials if material.CheckType(c4d.Mmaterial)]
@@ -1051,17 +1129,35 @@ def convert_octane(c4d, doc, imported_materials, imported_objects, plan):
             if "normal" not in channels and (same_bitmap or _matches_source_texture(source, "normal", bump_path)):
                 channels["normal"] = channels.pop("bump")
             source_supplements = {key: path for key, path in authored.items() if key not in channels}
+            graphs = source.get("texture_graphs") if include_source and isinstance(source, dict) else None
+            if isinstance(graphs, dict):
+                source_supplements.update({key: graph for key, graph in graphs.items()
+                                           if key in _OCT_GRAPH_CHANNELS and isinstance(graph, (tuple, list)) and graph})
+                if "glossiness" in graphs and "roughness" not in graphs and "roughness" not in authored:
+                    channels.pop("roughness", None)
             channels.update(source_supplements)
             supplements = {key: path for key, path in baked.get(name, {}).items()
                            if key not in channels and not (key == "bump" and "normal" in channels)}
             channels.update(supplements)
             settings = _imported_octane_settings(c4d, original, channels, source)
+            opacity = channels.get("opacity")
+            if isinstance(opacity, str) and Path(opacity).suffix.lower() in _ALPHA_IMAGE_TYPES:
+                authored_alpha = source.get("opacity_alpha_map") if include_source and isinstance(source, dict) else None
+                if isinstance(authored_alpha, str) and Path(authored_alpha).is_absolute() and Path(authored_alpha) == Path(opacity):
+                    settings["opacity_alpha"] = True
+                elif _imported_opacity_alpha(c4d, original, opacity, resolve_texture) and bitmap_has_alpha(opacity):
+                    settings["opacity_alpha"] = True
             rgb = source.get("base_color") if isinstance(source, dict) else None
             if ("base_color" not in channels and isinstance(rgb, (list, tuple)) and len(rgb) == 3
                     and all(_scalar(component) is not None for component in rgb)):
                 color = c4d.Vector(*rgb)
             replacement, warnings = _oct_material(c4d, name, channels, base_color=color, roughness=roughness,
                                                  settings=settings)
+            approximate = source.get("approximate_texture_channels", ()) if isinstance(source, dict) else ()
+            if isinstance(approximate, (tuple, list)) and any(
+                channel in source_supplements for channel in approximate if isinstance(channel, str)
+            ):
+                warnings.append("部分复杂贴图节点缺少可还原参数，已使用可识别的原贴图近似")
         except (AttributeError, RuntimeError, TypeError, ValueError) as error:
             failed.append(str(error) or name)
             continue

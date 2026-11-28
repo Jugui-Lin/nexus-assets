@@ -275,6 +275,12 @@ class ConversionTests(TestCase):
             for option in ("missingExtFilesAction", "missingDLLsAction", "missingXRefsAction"):
                 self.assertIn(option + ":#logmsg", load)
             self.assertIn("useFileUnits:true", load)
+            verified = load.index("NEXUS_MAX_SAFE_SCENE_VERIFIED")
+            disambiguation = load.index("nexusDisambiguateMaterialNames materials")
+            capture = load.index("nexusCaptureMaterials")
+            export = load.index("exportFile")
+            self.assertEqual([verified, disambiguation, capture, export],
+                             sorted((verified, disambiguation, capture, export)))
 
     def test_max_timeout_has_a_size_based_budget_and_cap(self):
         mib = 1024 * 1024
@@ -692,6 +698,100 @@ class MaxBatchTextureTests(TestCase):
                     fbx.write_bytes(CONVERSION._FBX_HEADER + struct.pack("<IQQQB", version, length, 0, 0, 7)
                                     + b"Objects")
                     self.assertEqual(CONVERSION.max_texture_bindings(fbx, source), {})
+
+    def test_batch_restores_corona_two_sided_maps_and_ignores_procedural_mix_masks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scene.max"
+            fbx = root / "scene.fbx"
+            names = ("front.jpg", "back.jpg", "front-normal.jpg", "back-normal.jpg", "mask.jpg")
+            paths = {name: root / name for name in names}
+            for item in [source, *paths.values()]:
+                item.touch()
+            front_back = {"3dsMax|ClassIDa": -1412620185, "3dsMax|ClassIDb": -2027727779,
+                          "3dsMax|CoronaFrontBackPb|frontTexmapOn": 1,
+                          "3dsMax|CoronaFrontBackPb|backTexmapOn": 1}
+            mix = {"3dsMax|ClassIDa": 560, "3dsMax|ClassIDb": 0, "3dsMax|parameters|mixAmount": 0.25,
+                   "3dsMax|parameters|map1Enabled": 1, "3dsMax|parameters|map2Enabled": 1,
+                   "3dsMax|parameters|maskEnabled": 1, "3dsMax|parameters|useCurve": 0}
+            physical = {"3dsMax|ClassIDa": 1762831241, "3dsMax|ClassIDb": -2028660960,
+                        "3dsMax|CoronaPhysicalMtlPb|baseTexmapOn": 1,
+                        "3dsMax|CoronaPhysicalMtlPb|baseMapAmount": 1.0,
+                        "3dsMax|CoronaPhysicalMtlPb|baseBumpTexmapOn": 1}
+            normal = {"3dsMax|ClassIDa": 678481578, "3dsMax|ClassIDb": -870825092}
+            nodes = [self._object("Texture", idx, name, name) for idx, name in enumerate(names, 20)]
+            nodes.extend((
+                self._object("Material", 1, "Two sided", **physical),
+                self._object("Material", 2, "Scalar Mix"),
+                self._object("Material", 3, "Masked Mix"),
+                self._object("Texture", 4, "Side color", **front_back),
+                self._object("Texture", 5, "Side normal", **front_back),
+                self._object("Texture", 6, "Masked front color", **mix),
+                self._object("Texture", 7, "Scalar blend", **mix),
+                self._object("Texture", 8, "Front Corona normal",
+                             **dict(normal, **{"3dsMax|CoronaNormalPb|multiplier": 0.25})),
+                self._object("Texture", 9, "Back Corona normal",
+                             **dict(normal, **{"3dsMax|CoronaNormalPb|multiplier": 0.75})),
+            ))
+            self._fbx(fbx, nodes, [
+                ("OP", 4, 1, "3dsMax|CoronaPhysicalMtlPb|baseTexmap"),
+                ("OP", 5, 1, "3dsMax|CoronaPhysicalMtlPb|baseBumpTexmap"),
+                ("OP", 7, 2, "DiffuseColor"), ("OP", 6, 3, "DiffuseColor"),
+                ("OP", 6, 4, "3dsMax|CoronaFrontBackPb|frontTexmap"),
+                ("OP", 21, 4, "3dsMax|CoronaFrontBackPb|backTexmap"),
+                ("OP", 8, 5, "3dsMax|CoronaFrontBackPb|frontTexmap"),
+                ("OP", 9, 5, "3dsMax|CoronaFrontBackPb|backTexmap"),
+                ("OP", 22, 8, "3dsMax|CoronaNormalPb|normalMap"),
+                ("OP", 23, 9, "3dsMax|CoronaNormalPb|normalMap"),
+                ("OP", 20, 6, "3dsMax|parameters|map1"), ("OP", 21, 6, "3dsMax|parameters|map2"),
+                ("OP", 24, 6, "3dsMax|parameters|mask"),
+                ("OP", 20, 7, "3dsMax|parameters|map1"), ("OP", 21, 7, "3dsMax|parameters|map2"),
+            ])
+
+            def image(name, strength=None):
+                return "image", str(paths[name].resolve()), strength
+
+            maps, values = CONVERSION.max_material_data(fbx, source)
+            self.assertEqual(maps, {"Masked Mix": {"base_color": str(paths["front.jpg"].resolve())}})
+            self.assertEqual(values, {
+                "Two sided": {"texture_graphs": {
+                    "base_color": ("side", image("front.jpg"), image("back.jpg")),
+                    "normal": ("side", image("front-normal.jpg", 0.25), image("back-normal.jpg", 0.75)),
+                }, "approximate_texture_channels": ("base_color",)},
+                "Masked Mix": {"approximate_texture_channels": ("base_color",)},
+                "Scalar Mix": {"texture_graphs": {
+                    "base_color": ("mix", image("front.jpg"), image("back.jpg"), 0.25),
+                }},
+            })
+
+    def test_batch_keeps_alpha_when_fbx_reuses_the_diffuse_bitmap_for_opacity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scene.max"
+            fbx = root / "scene.fbx"
+            source.touch()
+            png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">IIB", 1, 1, 8)
+            rgba = root / "petal.png"
+            rgb = root / "mask.png"
+            rgba.write_bytes(png_header + b"\x06")
+            rgb.write_bytes(png_header + b"\x02")
+
+            def texture(key, image):
+                kind, props, children = self._object("Texture", key, image.stem, image.name)
+                return kind, props, [*children, ("Texture_Alpha_Source", ("Alpha_Black",), ())]
+
+            self._fbx(fbx, [
+                self._object("Material", 1, "Cutout"),
+                self._object("Material", 2, "Grayscale"),
+                texture(3, rgba), texture(4, rgb),
+            ], [
+                ("OP", 3, 1, "DiffuseColor"), ("OP", 3, 1, "TransparentColor"),
+                ("OP", 4, 2, "DiffuseColor"), ("OP", 4, 2, "TransparentColor"),
+            ])
+            maps, settings = CONVERSION.max_material_data(fbx, source)
+            self.assertEqual(maps["Cutout"], {"base_color": str(rgba.resolve()), "opacity": str(rgba.resolve())})
+            self.assertEqual(maps["Grayscale"]["opacity"], str(rgb.resolve()))
+            self.assertEqual(settings, {"Cutout": {"opacity_alpha_map": str(rgba.resolve())}})
 
     def test_native_batch_capture_fills_missing_fbx_data_and_rejects_duplicate_names(self):
         with tempfile.TemporaryDirectory() as directory:

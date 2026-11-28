@@ -28,6 +28,7 @@ _FBX_TEXTURE_EXTENSIONS = frozenset({
 })
 _FBX_MATERIAL_SLOTS = {
     "diffusecolor": "base_color", "basecolor": "base_color", "opacity": "opacity",
+    "transparentcolor": "opacity",
     "bump": "bump", "normalmap": "normal", "roughness": "roughness", "metalness": "metallic",
     "specularcolor": "specular", "emissivecolor": "emission",
 }
@@ -56,6 +57,17 @@ _MAX_FBX_WRAPPERS = {
     (1858302732, 0): {"3dsmax|parameters|map1", "3dsmax|parameters|map2"},  # Falloff
     _MAX_FBX_NORMAL_WRAPPER: {"3dsmax|vraynormalmap parameters|normal_map"},
     _MAX_FBX_CORONA_NORMAL: {"3dsmax|coronanormalpb|normalmap"},
+}
+_MAX_FBX_CORONA_FRONT_BACK = (-1412620185, -2027727779)
+_MAX_FBX_FRONT_BACK_PREFIX = "3dsMax|CoronaFrontBackPb|"
+_MAX_FBX_PARAMETERS_PREFIX = "3dsMax|parameters|"
+_MAX_FBX_MIX_TEXTURE = (560, 0)
+_MAX_FBX_NOISE_TEXTURE = (564, 0)
+_MAX_FBX_GRAPH_FIELDS = {
+    *(_MAX_FBX_FRONT_BACK_PREFIX + field for field in ("frontTexmapOn", "backTexmapOn")),
+    *(_MAX_FBX_PARAMETERS_PREFIX + field for field in (
+        "map1Enabled", "map2Enabled", "maskEnabled", "mixAmount", "useCurve",
+    )),
 }
 _MAX_FBX_CORONA_LEGACY = (1891525894, 1149841885)
 _MAX_FBX_CORONA_LEGACY_PREFIX = "3dsMax|CoronaMtlPb|"
@@ -257,8 +269,8 @@ _MAX_MATERIAL_CAPTURE = r"""
         )
     )
 
-    fn nexusWriteMaterials stream = (
-        if sceneMaterials.count >= 8192 then return false
+    fn nexusCollectMaterials = (
+        if sceneMaterials.count >= 8192 then return undefined
         local queue = #()
         for idx = 1 to sceneMaterials.count do appendIfUnique queue sceneMaterials[idx]
         local cursor = 1
@@ -268,22 +280,54 @@ _MAX_MATERIAL_CAPTURE = r"""
             cursor += 1
             local count = try (getNumSubMtls item) catch 0
             examined += count
-            if examined > 30000 then return false
+            if examined > 30000 then return undefined
             for idx = 1 to count do (
                 local child = try (getSubMtl item idx) catch undefined
                 if child != undefined do appendIfUnique queue child
-                if queue.count >= 8192 then return false
+                if queue.count >= 8192 then return undefined
             )
         )
+        queue
+    )
+
+    fn nexusDisambiguateMaterialNames materials = (
+        -- The same temporary names identify materials in the capture and the FBX.
+        local reserved = Dictionary #string
+        local nextSuffix = Dictionary #string
+        for item in materials do (
+            local label = nexusProp item #name
+            if nexusSafeText label 256 do reserved[(toLower label)] = true
+        )
+        for item in materials do (
+            local label = nexusProp item #name
+            if nexusSafeText label 256 do (
+                if nextSuffix[label] == undefined then nextSuffix[label] = 2
+                else (
+                    local number = nextSuffix[label]
+                    local stem = (substring label 1 (amin label.count 230)) + "_Nexus_"
+                    local candidate = stem + (number as string)
+                    while reserved[(toLower candidate)] != undefined do (
+                        number += 1
+                        candidate = stem + (number as string)
+                    )
+                    try (setProperty item #name candidate) catch undefined
+                    reserved[(toLower candidate)] = true
+                    nextSuffix[label] = number + 1
+                )
+            )
+        )
+    )
+
+    fn nexusWriteMaterials stream materials = (
         local names = Dictionary #string
-        for item in queue do (
+        for item in materials do (
             local label = nexusProp item #name
             if nexusSafeText label 256 do names[label] = if names[label] == undefined then 1 else 2
         )
         local rowCount = 1
         local charCount = 0
         format "NEXUS_MAX_MATERIALS_V1\n" to:stream
-        for item in queue do (
+        for item in materials do (
             local kind = classOf item
             local family = if kind == VRayMtl then "vray" else (
                 if kind == CoronaLegacyMtl then "corona_legacy" else (
@@ -306,11 +350,12 @@ _MAX_MATERIAL_CAPTURE = r"""
         true
     )
 
-    fn nexusCaptureMaterials destination = (
+    fn nexusCaptureMaterials destination materials = (
+        if materials == undefined then return false
         local temporary = destination + ".tmp"
         local stream = createFile temporary encoding:#utf8 writeBOM:false
         if stream == undefined then return false
-        local complete = try (nexusWriteMaterials stream) catch false
+        local complete = try (nexusWriteMaterials stream materials) catch false
         close stream
         if complete then renameFile temporary destination else false
     )
@@ -346,7 +391,9 @@ _MAX_EXPORT = r"""
     requireSafeScene()
     logsystem.logEntry "NEXUS_MAX_SAFE_SCENE_VERIFIED" broadcast:true
     format "NEXUS_MAX_MISSING % % %\n" missingFiles.count missingPlugins.count missingReferences.count
-    if not (try (nexusCaptureMaterials ((getFilenamePath output) + "max-material-data.tsv")) catch false) do (
+    local materials = try (nexusCollectMaterials()) catch undefined
+    if materials != undefined do (try (nexusDisambiguateMaterialNames materials) catch undefined)
+    if not (try (nexusCaptureMaterials ((getFilenamePath output) + "max-material-data.tsv") materials) catch false) do (
         format "NEXUS_MAX_MATERIAL_CAPTURE_FAILED\n"
     )
     logsystem.logEntry "NEXUS_MAX_STAGE configure-fbx" broadcast:true
@@ -603,6 +650,9 @@ class _FbxTextureReader:
         for name, count, prop_end, node_end in self.nodes(end):
             if name in {b"FileName", b"Filename", b"RelativeFilename"}:
                 paths.extend(value for value in self.properties(count, prop_end) if isinstance(value, str) and value)
+            elif name == b"Texture_Alpha_Source":
+                if self.properties(count, prop_end) == ["Alpha_Black"]:
+                    native["image_alpha"] = True
             elif name == b"Properties70":
                 self.file.seek(prop_end)
                 for field, count, field_end, _ in self.nodes(node_end):
@@ -612,7 +662,7 @@ class _FbxTextureReader:
                     if len(values) < 5 or not isinstance(values[0], str):
                         continue
                     key, value = values[0], values[4]
-                    if key in _MAX_FBX_VRAY_FIELDS or key in _MAX_FBX_CORONA_FIELDS:
+                    if key in _MAX_FBX_VRAY_FIELDS or key in _MAX_FBX_CORONA_FIELDS or key in _MAX_FBX_GRAPH_FIELDS:
                         native[key] = value if len(values) == 5 else tuple(values[4:])
                     if len(values) != 5:
                         continue
@@ -693,6 +743,18 @@ def _fbx_number(value, minimum=0.0, maximum=1.0):
     if type(value) in (int, float) and minimum <= value <= maximum:
         return float(value)
     return None
+
+
+def _png_has_alpha(path):
+    if Path(path).suffix.lower() != ".png":
+        return False
+    try:
+        with Path(path).open("rb") as image:
+            header = image.read(26)
+    except OSError:
+        return False
+    return (len(header) == 26 and header[:16] == b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            and header[25] in (4, 6))
 
 
 def _fbx_rgb(value):
@@ -824,6 +886,7 @@ def _max_fbx_material_data(output, source, *, include_textures=True):
     def verified(reference, embedded_only=False):
         return _fbx_texture_path(reference, None if embedded_only else root, embedded if embedded_only else None)
 
+    @lru_cache(maxsize=8192)
     def map_texture(node, channel, depth=0, normal_amount=None):
         kind, _, (paths, class_id, _, native) = objects[node]
         if kind != b"Texture" or depth >= 8:
@@ -850,11 +913,52 @@ def _max_fbx_material_data(output, source, *, include_textures=True):
             files.update(file for reference in references if PureWindowsPath(reference).name.casefold() not in original_names
                          and (file := verified(reference, embedded_only=True)))
         if len(files) == 1:
-            return channel, files.pop(), normal_amount
+            return channel, ("image", str(files.pop()), normal_amount), False
+        if files:
+            return None
         slots = _MAX_FBX_WRAPPERS.get(class_id)
         upstream = {child for child, slot in links if slot}
-        if not files and slots and len(upstream) == 1 and {slot for _, slot in links if slot} == slots:
-            return map_texture(upstream.pop(), channel, depth + 1, normal_amount)
+        if slots and len(upstream) == 1 and {slot for _, slot in links if slot} == slots:
+            result = map_texture(upstream.pop(), channel, depth + 1, normal_amount)
+            # Color Correction forwards its original image, without reproducing the color adjustment.
+            if class_id == (720, 0) and result:
+                return result[0], result[1], True
+            return result
+
+        def child_texture(prefix, name, enable):
+            if native.get(prefix + enable) != 1:
+                return None
+            children = {child for child, slot in links if slot == (prefix + name).lower()}
+            if len(children) == 1:
+                return map_texture(children.pop(), channel, depth + 1, normal_amount)
+            return None
+
+        if class_id == _MAX_FBX_CORONA_FRONT_BACK:
+            prefix = _MAX_FBX_FRONT_BACK_PREFIX
+            front = child_texture(prefix, "frontTexmap", "frontTexmapOn")
+            back = child_texture(prefix, "backTexmap", "backTexmapOn")
+            if front and back and front[0] == back[0]:
+                graph = ("side", front[1], back[1]) if front[1] != back[1] else front[1]
+                return front[0], graph, front[2] or back[2]
+            if channel == "base_color" and (one_side := front or back):
+                return one_side[0], one_side[1], True
+        elif class_id in {_MAX_FBX_MIX_TEXTURE, _MAX_FBX_NOISE_TEXTURE}:
+            prefix = _MAX_FBX_PARAMETERS_PREFIX
+            first = child_texture(prefix, "map1", "map1Enabled")
+            second = child_texture(prefix, "map2", "map2Enabled")
+            if class_id == _MAX_FBX_MIX_TEXTURE:
+                has_mask = native.get(prefix + "maskEnabled") != 0 and any(
+                    slot == (prefix + "mask").lower() for _, slot in links
+                )
+                amount = _fbx_number(native.get(prefix + "mixAmount"))
+                if not has_mask and native.get(prefix + "useCurve") == 0 and amount is not None:
+                    if amount in (0.0, 1.0):
+                        return first if amount == 0.0 else second
+                    if first and second and first[0] == second[0]:
+                        graph = ("mix", first[1], second[1], amount) if first[1] != second[1] else first[1]
+                        return first[0], graph, first[2] or second[2]
+            if channel == "base_color" and (fallback := first or second):
+                return fallback[0], fallback[1], True
         return None
 
     texture_bindings = {}
@@ -883,20 +987,31 @@ def _max_fbx_material_data(output, source, *, include_textures=True):
 
         channels = defaultdict(set)
         normal_amounts = defaultdict(set)
+        graphs = defaultdict(set)
+        approximated = set()
         for channel, textures in slots.items():
             bindings = {map_texture(texture, channel) for texture in textures}
             if None in bindings:
                 continue
-            paths = {(mapped_channel, path) for mapped_channel, path, _ in bindings}
-            if len(paths) != 1:
-                continue
-            mapped_channel, path = paths.pop()
-            channels[mapped_channel].add(path)
-            if mapped_channel == "normal":
-                normal_amounts[path].update(amount for _, _, amount in bindings if amount is not None)
+            if all(expr[0] == "image" for _, expr, _ in bindings):
+                paths = {(mapped_channel, expr[1]) for mapped_channel, expr, _ in bindings}
+                if len(paths) != 1:
+                    continue
+                mapped_channel, path = paths.pop()
+                channels[mapped_channel].add(path)
+                if mapped_channel == "normal":
+                    normal_amounts[path].update(expr[2] for _, expr, _ in bindings if expr[2] is not None)
+            else:
+                candidates = {(mapped_channel, expr) for mapped_channel, expr, _ in bindings}
+                if len(candidates) != 1:
+                    continue
+                mapped_channel, expression = candidates.pop()
+                graphs[mapped_channel].add(expression)
+            if any(approximate for _, _, approximate in bindings):
+                approximated.add(mapped_channel)
         resolved = {channel: paths.pop() for channel, paths in channels.items() if len(paths) == 1}
         if resolved:
-            texture_bindings[name] = {channel: str(path) for channel, path in resolved.items()}
+            texture_bindings[name] = resolved
         if class_id == _MAX_FBX_VRAY_MATERIAL:
             settings = _vray_material_settings(native, resolved)
         elif class_id == _MAX_FBX_CORONA_LEGACY:
@@ -909,9 +1024,22 @@ def _max_fbx_material_data(output, source, *, include_textures=True):
             settings = _corona_physical_settings(native, has_metalness_map)
         else:
             settings = {}
+        opacity = resolved.get("opacity")
+        if (opacity and opacity == resolved.get("base_color")
+                and any(objects[texture][2][3].get("image_alpha")
+                        for texture in slots["base_color"] & slots["opacity"])
+                and _png_has_alpha(opacity)):
+            settings["opacity_alpha_map"] = str(opacity)
         if "normal" in resolved and len(normal_amounts[resolved["normal"]]) == 1:
             strength, = normal_amounts[resolved["normal"]]
             settings.update(normal_map=str(resolved["normal"]), normal_strength=strength)
+        resolved_graphs = {channel: choices.pop() for channel, choices in graphs.items()
+                           if len(choices) == 1 and channel not in resolved}
+        if resolved_graphs:
+            settings["texture_graphs"] = resolved_graphs
+        approximated.intersection_update(resolved.keys() | resolved_graphs.keys())
+        if approximated:
+            settings["approximate_texture_channels"] = tuple(sorted(approximated))
         if settings:
             material_settings[name] = settings
     return texture_bindings, material_settings

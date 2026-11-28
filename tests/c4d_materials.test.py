@@ -325,6 +325,119 @@ class OctaneScalarTests(unittest.TestCase):
     def value(self, node, name):
         return node[self.ids[name]]
 
+    def test_corona_front_back_graph_keeps_color_and_cutout_separate(self):
+        front = ("mix", ("image", "front.jpg", None), ("image", "tint.jpg", None), 0.35)
+        back = ("image", "back.jpg", None)
+        channels = {"base_color": ("side", front, back), "opacity": "cutout.png",
+                    "glossiness": ("side", ("image", "gloss_front.png", None),
+                                   ("image", "gloss_back.png", None))}
+        mat, notes = MATERIALS._oct_material(self.c4d, "Leaves", channels)
+        self.assertEqual(notes, [])
+        albedo = self.value(mat, "OCT_MATERIAL_DIFFUSE_LINK")
+        side = self.value(albedo, "MIXTEX_AMOUNT_LNK")
+        self.assertEqual(side.kind, MATERIALS._OCT_SIDE)
+        self.assertIs(self.value(side, "SIDE_INVERT"), False)
+        self.assertEqual(self.value(self.value(albedo, "MIXTEX_TEXTURE1_LNK"), "IMAGETEXTURE_FILE"), "back.jpg")
+        front_mix = self.value(albedo, "MIXTEX_TEXTURE2_LNK")
+        self.assertAlmostEqual(self.value(front_mix, "MIXTEX_AMOUNT_FLOAT"), 0.35)
+        front_image = self.value(front_mix, "MIXTEX_TEXTURE1_LNK")
+        self.assertEqual(self.value(front_image, "IMAGETEXTURE_FILE"), "front.jpg")
+        self.assertEqual(self.value(front_image, "IMAGETEX_COLOR_SPACE"), self.ids["IMAGETEX_CS_SRGB"])
+        cutout = self.value(mat, "OCT_MATERIAL_OPACITY_LINK")
+        self.assertEqual(self.value(cutout, "IMAGETEXTURE_FILE"), "cutout.png")
+        self.assertEqual(self.value(cutout, "IMAGETEX_COLOR_SPACE"), self.ids["IMAGETEX_CS_NONE"])
+        self.assertEqual(self.value(cutout, "IMAGETEXTURE_MODE"), self.ids["IMAGETEXTURE_MODE2"])
+        roughness = self.value(mat, "OCT_MATERIAL_ROUGHNESS_LINK")
+        for slot in ("MIXTEX_TEXTURE1_LNK", "MIXTEX_TEXTURE2_LNK"):
+            self.assertIs(self.value(self.value(roughness, slot), "IMAGETEXTURE_INVERT"), True)
+
+    def test_octane_without_polygon_side_uses_the_source_front_image(self):
+        self.c4d.BaseShader = lambda kind: None if kind == MATERIALS._OCT_SIDE else Node(kind)
+        graph = ("side", ("image", "front.jpg", None), ("image", "back.jpg", None))
+        mat, notes = MATERIALS._oct_material(self.c4d, "Leaves", {"base_color": graph})
+        self.assertIn("已使用正面贴图", notes[0])
+        albedo = self.value(mat, "OCT_MATERIAL_DIFFUSE_LINK")
+        self.assertEqual(self.value(albedo, "IMAGETEXTURE_FILE"), "front.jpg")
+
+    def test_octane_applies_authored_graph_and_honors_texture_option(self):
+        self.c4d.Mmaterial = "classic"
+        self.c4d.Ttexture = "texture"
+        material = Node("classic", "huahuatan0099.1")
+        produced = []
+        doc = SimpleNamespace(InsertMaterial=produced.append, GetDocumentPath=lambda: "")
+        graph = ("side", ("image", "front.jpg", None), ("image", "back.jpg", None))
+        plan = {"path": "plants.fbx", "renderer": "octane", "max_batch_material_settings": {
+            "huahuatan0099.1": {"texture_graphs": {"base_color": graph},
+                                 "approximate_texture_channels": ("base_color",)},
+        }}
+        with patch.object(MATERIALS, "wants_octane", return_value=True), patch.object(MATERIALS, "_renderer"), \
+                patch.object(MATERIALS, "_imported_octane_settings", return_value={}), \
+                patch.object(MATERIALS, "_imported_standard_channels", side_effect=lambda *_: (
+                    {"opacity": "f7129.jpg"}, None, None, 0,
+                )):
+            report = MATERIALS.convert_octane(self.c4d, doc, [material], [], plan)
+            self.assertIn("已使用可识别的原贴图近似", report)
+            self.assertIsNotNone(self.value(produced[-1], "OCT_MATERIAL_DIFFUSE_LINK"))
+            self.assertEqual(self.value(self.value(produced[-1], "OCT_MATERIAL_OPACITY_LINK"), "IMAGETEXTURE_FILE"),
+                             "f7129.jpg")
+            plan["scene_import"] = {"textures": False}
+            report = MATERIALS.convert_octane(self.c4d, doc, [material], [], plan)
+        self.assertNotIn("已使用可识别的原贴图近似", report)
+        self.assertIsNone(self.value(produced[-1], "OCT_MATERIAL_DIFFUSE_LINK"))
+
+    def test_octane_uses_authored_image_alpha_only_on_the_exact_opacity_file(self):
+        self.c4d.Mmaterial = "classic"
+        self.c4d.Ttexture = "texture"
+        original = Node("classic", "Flower1")
+        produced = []
+        doc = SimpleNamespace(InsertMaterial=produced.append, GetDocumentPath=lambda: "")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            albedo = str(root / "albedo" / "f7186.png")
+            alpha = str(root / "alpha" / "f7186.png")
+            other = str(root / "other" / "f7186.png")
+            plan = {"path": str(root / "plants.fbx"), "renderer": "octane", "max_batch_material_settings": {
+                "Flower1": {"opacity_alpha_map": alpha},
+            }}
+            for chosen, mode in ((alpha, "IMAGETEXTURE_MODE3"), (other, "IMAGETEXTURE_MODE2")):
+                with self.subTest(chosen=chosen), patch.object(MATERIALS, "wants_octane", return_value=True), \
+                        patch.object(MATERIALS, "_renderer"), \
+                        patch.object(MATERIALS, "_imported_octane_settings", side_effect=lambda *_: {}), \
+                        patch.object(MATERIALS, "_imported_standard_channels", return_value=(
+                            {"base_color": albedo, "opacity": chosen}, None, None, 0,
+                        )):
+                    MATERIALS.convert_octane(self.c4d, doc, [original], [], plan)
+                    mat = produced[-1]
+                    self.assertIsNone(self.value(self.value(mat, "OCT_MATERIAL_DIFFUSE_LINK"), "IMAGETEXTURE_MODE"))
+                    self.assertEqual(self.value(self.value(mat, "OCT_MATERIAL_OPACITY_LINK"), "IMAGETEXTURE_MODE"),
+                                     self.ids[mode])
+
+    def test_octane_preserves_explicit_c4d_image_alpha_when_the_file_has_it(self):
+        for key in ("Mmaterial", "Ttexture", "MATERIAL_USE_ALPHA", "MATERIAL_ALPHA_IMAGEALPHA",
+                    "MATERIAL_ALPHA_SHADER", "BITMAPSHADER_FILENAME", "Xbitmap"):
+            setattr(self.c4d, key, key)
+        self.c4d.IMAGERESULT_OK = 0
+        produced = []
+        doc = SimpleNamespace(InsertMaterial=produced.append, GetDocumentPath=lambda: "")
+        with tempfile.TemporaryDirectory() as directory:
+            path = (Path(directory) / "cutout.png").resolve()
+            path.touch()
+            original = Node(self.c4d.Mmaterial, "Flower1", MATERIAL_USE_ALPHA=True, MATERIAL_ALPHA_IMAGEALPHA=True,
+                            MATERIAL_ALPHA_SHADER=Node(self.c4d.Xbitmap, BITMAPSHADER_FILENAME=str(path)))
+            image = SimpleNamespace(InitWith=lambda _path: (0, False))
+            self.c4d.bitmaps = SimpleNamespace(BaseBitmap=lambda: image)
+            plan = {"path": str(path.parent / "plants.fbx"), "renderer": "octane"}
+            for alpha, mode in ((object(), "IMAGETEXTURE_MODE3"), (None, "IMAGETEXTURE_MODE2")):
+                image.GetInternalChannel = lambda: alpha
+                with patch.object(MATERIALS, "wants_octane", return_value=True), patch.object(MATERIALS, "_renderer"), \
+                        patch.object(MATERIALS, "_imported_octane_settings", side_effect=lambda *_: {}), \
+                        patch.object(MATERIALS, "_imported_standard_channels", return_value=(
+                            {"opacity": str(path)}, None, None, 0,
+                        )):
+                    MATERIALS.convert_octane(self.c4d, doc, [original], [], plan)
+                self.assertEqual(self.value(self.value(produced[-1], "OCT_MATERIAL_OPACITY_LINK"), "IMAGETEXTURE_MODE"),
+                                 self.ids[mode])
+
     def test_scalar_and_image_inputs_preserve_albedo_bump_and_specular_levels(self):
         mat, _ = MATERIALS._oct_material(
             self.c4d, "room", {"base_color": "albedo.jpg", "bump": "bump.png", "normal": "normal.png"},

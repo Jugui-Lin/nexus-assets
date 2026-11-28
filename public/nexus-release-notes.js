@@ -1,6 +1,12 @@
 const cacheKey = 'nexus-release-notes-v1';
 const releasesUrl = 'https://github.com/Jugui-Lin/nexus-assets/releases';
 const bundledNotes = new Map([
+  ['0.10.64', [
+    '3ds Max Batch 将同名材质分开导出，保留各自的贴图和对象绑定。',
+    '导入到 Octane 时，可恢复 Corona 双面材质可识别的正反面底色、光泽度和法线贴图。',
+    '不透明度贴图按来源选择 Alpha 或 Float 模式，分别读取图像 Alpha 和黑白遮罩。',
+    '已重新导出原花坛并在模拟 Cinema 4D 环境核对 14 个材质的接线。部分程序混合使用原有贴图近似还原，实际 Octane 渲染待验证。',
+  ]],
   ['0.10.63', [
     '文件夹详细列表整列表头可点，按名称、修改日期、类型、大小或已启用的创建日期切换升降序。',
     '从 Blender 直接导入 MAX，或通过 Blender 直接解析到 Cinema 4D 时，可补接更多材质贴图。',

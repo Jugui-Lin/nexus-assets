@@ -4,7 +4,7 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 [下载 Windows x64 最新版](https://github.com/Jugui-Lin/nexus-assets/releases/latest) · [团队部署与使用](团队版部署与使用.md) · [NAS 镜像更新](nas/README.md#github-镜像自动更新)
 
-本页对应 Windows 客户端 v0.10.63。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.63)
+本页对应 Windows 客户端 v0.10.64。 [版本更新说明](https://github.com/Jugui-Lin/nexus-assets/releases/tag/v0.10.64)
 
 ![Nexus 资产库演示，左侧文件夹树，中间是模型与图片的预览卡片](docs/screenshots/asset-library.png)
 
@@ -39,7 +39,7 @@ Nexus 把本地磁盘和 NAS 上的模型、贴图、材质与视频放在同一
 
 切到团队库即可浏览已同步的索引和资料，也可查看能访问的缓存缩略图。打开原件、全尺寸预览和向 DCC 发送素材都需要访问原件目录。要启用 NAS 自动扫描，在容器中另行挂载要扫描的素材目录。 [NAS 部署与扫描](nas/README.md#服务器自动扫描素材)
 
-Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未信任的共享路径时，可在「当前团队」核对路径并点「允许此共享路径」。未设置或无法访问共享路径时，客户端可以使用本机缓存。对应的团队服务镜像为 `ghcr.io/jugui-lin/nexus-team:0.10.63`。 [NAS 镜像更新](nas/README.md#github-镜像自动更新)
+Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未信任的共享路径时，可在「当前团队」核对路径并点「允许此共享路径」。未设置或无法访问共享路径时，客户端可以使用本机缓存。对应的团队服务镜像为 `ghcr.io/jugui-lin/nexus-team:0.10.64`。 [NAS 镜像更新](nas/README.md#github-镜像自动更新)
 
 <details>
 <summary>打开已有库、预览和缓存</summary>
@@ -99,12 +99,13 @@ Windows 成员通过 SMB 访问缩略图缓存。首次遇到这台电脑尚未�
 - 发送 MAX 时可沿用工作区保存的读取方式，也可为本次导入选择读取方式。「Blender 直接解析」需要 Blender 4.2 或更新版本。「调用 3ds Max Batch」需要 Windows 上已安装并完成授权的 3ds Max Batch。
 - Blender 直接导入 MAX 和 Cinema 4D 的「Blender 直接解析」可补接部分 V-Ray 和 Corona 材质引用的贴图。
 - 「调用 3ds Max Batch」会在导出 FBX 前记录可识别的 V-Ray、Corona Legacy 和 Corona Physical 原生材质数值与贴图引用。导入时可从原生记录或 FBX 恢复底色、粗糙度、金属度、折射率 (IOR)、不透明度和法线等通道。光泽度贴图可反相接入 Octane 的粗糙度。混合和分层材质只恢复可识别的部分。
+- 批量导出时，同名材质会在临时场景中取得不同名称，各自保留贴图和对象绑定。Octane 可按面方向恢复 Corona 双面材质的底色、光泽度和法线贴图。已明确引用图像 Alpha 的不透明度贴图使用 Alpha 模式，黑白遮罩使用 Float 模式。
 - 更新 Cinema 4D 桥接并重开后，MAX 智能导入默认生成 Octane 材质。点发送按钮旁的「MAX 导入偏好」可修改工作区默认值，也可在导入对话框里为本次选择。「按场景使用 Octane 或标准材质」会读取当前工程的渲染器。当前实例未加载 Octane 时使用标准材质。
 - Windows 上可把 MAX 拖进 Blender 4.5 或更新版本的 3D 视口。桥接安装或更新后，重开 Blender 即可使用。
 
 在 Blender 视口放置时用 `S` 缩放、`R` 旋转。在 Cinema 4D 用 `T` 缩放、`R` 旋转，再按住左键拖动调整。左键确认放置，`Esc` 取消。导入任务收到 DCC 回执后会显示结果。
 
-已用原始 MAX 场景验证 Blender 直接导入，并用 3ds Max Batch 验证 V-Ray、Corona Legacy 和 Corona Physical 材质记录。Cinema 4D 智能导入与 Octane 通道映射通过桥接测试，实际宿主渲染待验证。
+已用原始 MAX 场景验证 Blender 直接导入及 3ds Max Batch 的材质记录。重新导出原花坛后，在模拟 Cinema 4D 环境核对了 14 个材质的节点接线。部分程序混合使用原有贴图近似还原，实际 Octane 渲染待验证。
 
 ## 从源码运行
 
