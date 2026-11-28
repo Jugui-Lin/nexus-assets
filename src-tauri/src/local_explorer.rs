@@ -12,7 +12,6 @@ use std::{
 };
 use url::Url;
 
-pub(crate) mod paths;
 mod places;
 
 #[tauri::command]

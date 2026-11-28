@@ -7,6 +7,7 @@ function absoluteDirectory(value) {
 
 export function initFolderBrowser({api, onSelect}) {
   const dialog = document.querySelector('#folder-browser-dialog');
+  const heading = dialog.querySelector('#folder-browser-title');
   const path = dialog.querySelector('#folder-browser-path');
   const status = dialog.querySelector('#folder-browser-status');
   const summary = dialog.querySelector('#folder-browser-summary');
@@ -25,12 +26,14 @@ export function initFolderBrowser({api, onSelect}) {
   let loading = false;
   let systemBusy = false;
   let limit = pageSize;
+  let choose = onSelect;
+  let action = '使用';
 
   function updateButtons() {
     up.disabled = systemBusy || !current?.directory;
     roots.disabled = systemBusy || (!current?.directory && !loading);
     use.disabled = systemBusy || (!selected.size && (loading || !current?.directory));
-    use.textContent = selected.size ? '使用所选文件夹' : '使用当前文件夹';
+    use.textContent = action + (selected.size ? '所选文件夹' : '当前文件夹');
     summary.textContent = selected.size ? '已选 ' + selected.size + ' 个文件夹' : '';
     summary.title = selected.size ? [...selected].join('\n') : '';
     clear.classList.toggle('hidden', !selected.size);
@@ -97,7 +100,7 @@ export function initFolderBrowser({api, onSelect}) {
 
   function finish(files) {
     if (!files.length) return;
-    onSelect(files);
+    choose(files);
     dialog.close();
   }
 
@@ -156,9 +159,12 @@ export function initFolderBrowser({api, onSelect}) {
   });
 
   return {
-    show(paths, startDirectory = null) {
+    show(paths, startDirectory = null, {onChoose = onSelect, actionLabel = '使用', title = '选择文件夹'} = {}) {
       if (dialog.open) return;
       ++dialogId;
+      choose = onChoose;
+      action = actionLabel;
+      heading.textContent = title;
       current = null;
       selected = new Set(paths);
       path.value = '';

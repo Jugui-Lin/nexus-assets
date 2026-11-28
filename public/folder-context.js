@@ -368,7 +368,6 @@ export function initFolderContext({
     removedDialog.showModal();
     render();
   }
-  showHidden.addEventListener('click', openRemoved);
   close.addEventListener('click', () => removedDialog.close());
   removedDialog.addEventListener('close', () => {
     if (!hiddenFolders().length) document.querySelector('#sidebar-folder-toggle')?.focus();

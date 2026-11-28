@@ -1372,7 +1372,6 @@ fn main() {
             pick_asset_folders,
             folder_browser::list_import_folders,
             local_explorer::list_local_files,
-            local_explorer::paths::local_explorer_check_folder_paths,
             local_explorer::local_explorer_tree_children,
             local_explorer_new::local_explorer_new_templates,
             local_explorer_new::local_explorer_create_item,

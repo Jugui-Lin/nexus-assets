@@ -68,7 +68,7 @@ function hasFileFolder(libraries, {libraryId, folder}) {
   return libraries.some(library => library.id === libraryId && (folder === '' || library.folders.includes(folder)));
 }
 
-export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAssetImage, openLink, locateAsset, openVideoSource,reviewAssignees,copyReviewText,
+export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAssetImage, openLink, locateAsset, openVideoSource,reviewAssignees,
   searchReplacementImages,loadPresenceAvatar, getFileFolders, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles, copyCachedImages}) {
   const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const assetReferences = initTeamWhiteboardAssetReferences(api);
@@ -93,8 +93,6 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
       <div class="whiteboard-project-actions whiteboard-project-editor-actions">
         <select data-project-color-filter aria-label="按卡片颜色筛选" title="按卡片颜色筛选，切回全部颜色可恢复显示"></select>
         <button type="button" class="button subtle" data-project-regions aria-haspopup="dialog">${icon('pin')}区域…</button>
-        <button type="button" class="button subtle" data-project-dispatch-reviews>${icon('list')}分发镜头意见…</button>
-        <button type="button" class="button subtle" data-project-export-repair>${icon('download')}导出返修单</button>
         <button type="button" class="button subtle" data-project-cache aria-haspopup="dialog" aria-controls="whiteboard-cache-dialog" hidden>${icon('stack')}${cacheLabel}</button>
       </div>
     </header>
@@ -111,11 +109,9 @@ export function initWhiteboardProjects({panel, api, notify = () => {}, resolveAs
   const retry = $('[data-project-retry]');
   const status = $('.whiteboard-project-status');
   const statusText = status.querySelector('span');
-  const board = initWhiteboard({panel:canvas, api, notify, resolveAssetImage, openLink, locateAsset, openVideoSource,projectName:() => editorName.textContent,
-    reviewAssignees,copyReviewText,searchReplacementImages,loadPresenceAvatar, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles,
+  const board = initWhiteboard({panel:canvas, api, notify, resolveAssetImage, openLink, locateAsset, openVideoSource,
+    reviewAssignees,searchReplacementImages,loadPresenceAvatar, importPastedFiles, revealPastedFile, loadFilePreview, handleDroppedFiles,
     colorFilter:$('[data-project-color-filter]')});
-  $('[data-project-export-repair]').addEventListener('click',() => board.exportRepairList());
-  $('[data-project-dispatch-reviews]').addEventListener('click',() => board.dispatchReviewNotes());
   $('[data-project-regions]').addEventListener('click',() => board.showRegions());
 
   const dialog = document.createElement('dialog');

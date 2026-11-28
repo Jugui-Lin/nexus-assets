@@ -33,7 +33,7 @@ function dragSummary(count,entries) {
   return [counts,size].filter(Boolean).join(' · ');
 }
 
-export function initExplorerFileDrop({root, explorer, transfer, report, assetDragSource, dragOut, waitForExit}) {
+export function initExplorerFileDrop({root, explorer, transfer, report, assetDragSource, basket, dragOut, waitForExit}) {
   const hint = root.querySelector('[data-explorer-drop-hint]');
   const pinBar = root.querySelector('.local-explorer-pin-bar');
   const pinItems = pinBar.querySelector('[data-explorer-pins]');
@@ -89,6 +89,8 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
   function describe(hit, paths, modifiers) {
     if (root.hidden || busy || !hit) return null;
     const entries = dragged?.entries;
+    const basketTarget = basket?.target(hit);
+    if (basketTarget) return entries?.length ? {element:basketTarget,basketEntries:entries} : null;
     const tabTarget = explorer.getFolderTabsDropTarget?.(hit);
     if (tabTarget && paths.length && (!dragged || entries?.some(entry => entry.isDirectory)))
       return {element:tabTarget,openTabs:true,folders:entries?.filter(entry => entry.isDirectory)};
@@ -141,14 +143,16 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
     if (topPin) positionPinMarker();
     const summary = dragged ? draggedSummary : dragSummary(nativePaths.length);
     const volumeLabel = summary && target.path && explorer.getVolumeLabel?.(target.path);
-    const description = target.openTabs ? '在新标签页打开文件夹' : target.pins ? (target.sidebar ? '固定到左侧快速访问' : '固定到快速访问') :
+    const description = target.basketEntries ? '松开加入素材篮' : target.openTabs ? '在新标签页打开文件夹' :
+      target.pins ? (target.sidebar ? '固定到左侧快速访问' : '固定到快速访问') :
       (target.effect === 'move' ? '移动到 ' : '复制到 ') + target.label;
     const text = [description,summary,volumeLabel && volumeLabel !== target.label && '目标卷 ' + volumeLabel]
       .filter(Boolean).join(' · ');
     if (hint.textContent !== text) hint.textContent = text;
     hint.hidden = false;
-    hint.toggleAttribute('data-follow-pointer',Boolean(target.pins && point));
-    if (target.pins && point) {
+    const followsPointer = Boolean((target.pins || target.basketEntries) && point);
+    hint.toggleAttribute('data-follow-pointer',followsPointer);
+    if (followsPointer) {
       hint.style.left = Math.max(4,Math.min(point.clientX + 16,window.innerWidth - hint.offsetWidth - 6)) + 'px';
       hint.style.top = Math.max(4,Math.min(point.clientY + 20,window.innerHeight - hint.offsetHeight - 6)) + 'px';
     } else {
@@ -160,6 +164,10 @@ export function initExplorerFileDrop({root, explorer, transfer, report, assetDra
   async function drop(paths,target) {
     clear();
     if (!target || busy) return;
+    if (target.basketEntries) {
+      basket.add(target.basketEntries);
+      return;
+    }
     if (target.openTabs) {
       busy = true;
       try {

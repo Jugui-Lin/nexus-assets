@@ -43,25 +43,43 @@ export function initExplorerContextMenu(root) {
 
   function focusItem(button) {
     (button || popup).focus({preventScroll:true});
-    button?.scrollIntoView({block:'nearest'});
+    if (!button) return;
+    const bounds = button.getBoundingClientRect();
+    const top = popup.getBoundingClientRect().top + popup.clientTop;
+    const bottom = top + popup.clientHeight;
+    if (bounds.top < top) popup.scrollTop += bounds.top - top;
+    else if (bounds.bottom > bottom) popup.scrollTop += bounds.bottom - bottom;
   }
 
   function position() {
     const margin = 6;
-    const previous = pending?.anchor?.getBoundingClientRect();
+    const {x,y,anchor} = pending;
+    const previous = anchor?.getBoundingClientRect();
     const {clientWidth,clientHeight} = owner.documentElement;
+    const edge = (value,size) => Math.max(margin,Math.min(size - margin,value));
+    const startX = edge(x ?? previous?.left ?? margin,clientWidth);
+    const below = edge(y ?? previous?.bottom ?? margin,clientHeight);
+    const above = edge(y ?? previous?.top ?? margin,clientHeight);
+    const belowSpace = clientHeight - margin - below;
+    const aboveSpace = above - margin;
+    popup.style.maxHeight = '';
+    const opensAbove = popup.offsetHeight > belowSpace && aboveSpace > belowSpace;
+    popup.style.maxHeight = Math.max(0,opensAbove ? aboveSpace : belowSpace) + 'px';
+
     const maxLeft = clientWidth - popup.offsetWidth - margin;
-    const maxTop = clientHeight - popup.offsetHeight - margin;
-    popup.style.left = Math.max(margin,Math.min(maxLeft,pending?.x ?? previous?.left ?? margin)) + 'px';
-    popup.style.top = Math.max(margin,Math.min(maxTop,pending?.y ?? previous?.bottom ?? margin)) + 'px';
+    const flippedLeft = startX - popup.offsetWidth;
+    const left = startX <= maxLeft ? startX : flippedLeft >= margin ? flippedLeft : maxLeft;
+    popup.style.left = Math.max(margin,left) + 'px';
+    popup.style.top = (opensAbove ? above - popup.offsetHeight : below) + 'px';
   }
 
   function openChildren(button) {
     const item = frame.find(entry => entry.id === button?.dataset.explorerMenuItem);
     if (!item?.children?.length) return false;
-    parents.push({items:frame,focus:item.id});
+    parents.push({items:frame,focus:item.id,scrollTop:popup.scrollTop});
     frame = item.children;
     popup.replaceChildren(menuItems(frame));
+    popup.scrollTop = 0;
     position();
     focusItem(enabledItems()[0]);
     return true;
@@ -73,6 +91,7 @@ export function initExplorerContextMenu(root) {
     frame = previous.items;
     popup.replaceChildren(menuItems(frame));
     position();
+    popup.scrollTop = previous.scrollTop;
     focusItem(enabledItems().find(button => button.dataset.explorerMenuItem === previous.focus));
     return true;
   }
@@ -198,6 +217,7 @@ export function initExplorerContextMenu(root) {
     return new Promise(resolve => {
       pending = {resolve,anchor,x,y};
       position();
+      popup.scrollTop = 0;
       focusItem(enabledItems()[0]);
     });
   }

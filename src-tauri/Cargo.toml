@@ -1,6 +1,6 @@
 [package]
 name = "nexus-assets"
-version = "0.10.57"
+version = "0.10.58"
 edition = "2021"
 default-run = "nexus-assets"
 description = "Cross-platform local DCC asset manager"

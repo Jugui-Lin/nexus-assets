@@ -1,7 +1,6 @@
 import {imageLocalPoint,normalizeImageTransform} from './whiteboard-image-transform.js';
-import {readReviewNotes,writeReviewNotes,reviewTime,repairListHtml,reviewShotCode} from './whiteboard-review-notes.js';
-import {copyVideoFrame,videoFrameUrl,readVideoCover,loadVideoCoverFrame} from './whiteboard-video-cover.js';
-import {initWhiteboardReviewDispatch} from './whiteboard-review-dispatch.js';
+import {readReviewNotes,writeReviewNotes,reviewTime,reviewShotCode} from './whiteboard-review-notes.js';
+import {readVideoCover} from './whiteboard-video-cover.js';
 
 function readyFor(video, events, valid, update) {
   return new Promise((resolve,reject) => {
@@ -23,8 +22,7 @@ function readyFor(video, events, valid, update) {
   });
 }
 
-export function initWhiteboardVideoReview({world,current,visible,mayEdit,commit,items,projectName,notify,scope,
-  assignees = () => [],copyText = value => navigator.clipboard.writeText(value)}) {
+export function initWhiteboardVideoReview({world,current,visible,mayEdit,commit,assignees = () => []}) {
   const references = new Map();
   const dialog = document.createElement('dialog');
   dialog.className = 'modal compact-dialog whiteboard-video-review-dialog';
@@ -50,8 +48,6 @@ export function initWhiteboardVideoReview({world,current,visible,mayEdit,commit,
   let selectionPoint;
   let picking;
   let serial = 0;
-  let activeExport;
-  const dispatch = initWhiteboardReviewDispatch({key:scope,list:reportEntries,projectName,exportSelected:exportReport,copyText});
 
   function available(reference) {
     return Boolean(reference?.active() && visible() && current(reference.id)?.assetId === reference.assetId);
@@ -314,73 +310,9 @@ export function initWhiteboardVideoReview({world,current,visible,mayEdit,commit,
     references.delete(id);
   }
 
-  function reportEntries() {
-    const result = [];
-    for (const item of items().values()) {
-      if (item.kind !== 'image' || !item.assetId) continue;
-      const reference = references.get(item.id);
-      const {notes} = readReviewNotes(item.text);
-      const title = readVideoCover(item.text).title || reference?.asset.name || '未命名视频';
-      for (const note of notes.filter(item => !item.resolved)) {
-        result.push({...note,title,source:reference?.asset.name,key:`${item.id}:${note.id}`,itemId:item.id});
-      }
-    }
-    return result;
-  }
-
-  async function exportReport(selected,heading) {
-    if (!visible() || activeExport) {
-      if (selected) throw Error('导出正在处理或白板已切换');
-      return;
-    }
-    const result = (selected || reportEntries()).map(note => ({...note}));
-    if (!result.length) { notify('当前白板没有未解决的审片标注'); return; }
-    const name = heading || projectName() || '白板';
-    const images = [];
-    let imageBytes = 0;
-    for (const entry of result) {
-      const reference = references.get(entry.itemId);
-      const video = reference?.video;
-      if (video && !video.hidden && video.paused && Math.abs(video.currentTime*1000-entry.time) < 50 && imageBytes < 2_000_000) {
-        entry.frame = videoFrameUrl(copyVideoFrame(video));
-        imageBytes += entry.frame?.length || 0;
-      }
-      if (!entry.frame && available(reference) && images.length < 4) images.push({entry,reference});
-    }
-    if (images.length) {
-      const request = new AbortController();
-      activeExport = request;
-      const timeout = setTimeout(() => request.abort(),4500);
-      try {
-        await Promise.all([0,1].map(async () => {
-          while (images.length && !request.signal.aborted && imageBytes < 2_000_000) {
-            const {entry,reference} = images.shift();
-            if (!available(reference)) continue;
-            try {
-              const shot = await loadVideoCoverFrame(reference.asset.playback,entry.time/1000,request.signal);
-              if (shot && imageBytes + shot.length < 2_000_000) {
-                entry.frame = shot;
-                imageBytes += shot.length;
-              }
-            } catch { /* The text and coordinates remain in the report. */ }
-          }
-        }));
-      } finally {
-        clearTimeout(timeout);
-        activeExport = null;
-      }
-    }
-    const url = URL.createObjectURL(new Blob([repairListHtml(name,result)],{type:'text/html;charset=utf-8'}));
-    const download = document.createElement('a');
-    download.href = url;
-    download.download = `${name.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_')}-返修单.html`;
-    download.click();
-    setTimeout(() => URL.revokeObjectURL(url),30000);
-  }
-
-  return {attach,update,release,close,exportReport,openDispatch:dispatch.open,closeDispatch:dispatch.close,reposition(id) {
+  return {attach,update,release,close,reposition(id) {
     const reference = references.get(id);
     if (reference) paint(reference);
   }, locateNote:(itemId,noteId,stillCurrent) => locateNote(references.get(itemId),noteId,stillCurrent),
-    isOpen:() => dialog.open || dispatch.isOpen() || Boolean(picking)};
+    isOpen:() => dialog.open || Boolean(picking)};
 }

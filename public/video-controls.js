@@ -119,7 +119,10 @@ export function initVideoControls(player, video) {
   video.addEventListener('ratechange', () => { speed.value = String(video.playbackRate); });
   document.addEventListener('fullscreenchange', syncFullscreen);
   play.addEventListener('click', togglePlay);
-  video.addEventListener('click', togglePlay);
+  video.addEventListener('click', () => {
+    play.focus({preventScroll:true});
+    togglePlay();
+  });
   seek.addEventListener('input', () => {
     scrubbing = true;
     syncTime();
@@ -142,7 +145,7 @@ export function initVideoControls(player, video) {
     video.playbackRate = video.defaultPlaybackRate;
   });
   fullscreen.addEventListener('click', toggleFullscreen);
-  video.addEventListener('keydown', event => {
+  play.addEventListener('keydown', event => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const action = {
       ' ': togglePlay,
@@ -161,6 +164,7 @@ export function initVideoControls(player, video) {
   syncFullscreen();
   return {
     refresh: syncPlay,
+    togglePlay,
     reset() {
       scrubbing = false;
       syncPlay();

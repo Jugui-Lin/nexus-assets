@@ -15,7 +15,7 @@ function referenceKey(item) {
   return JSON.stringify(item.kind === 'asset' ? ['asset',item.scope,item.id] : ['file',item.path]);
 }
 
-export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,send,open,report}) {
+export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,send,preview,locate,report,triggers = []}) {
   const owner = dialog.ownerDocument;
   const storage = owner.defaultView.localStorage;
   const list = dialog.querySelector('[data-basket-list]');
@@ -23,6 +23,9 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
   const chooser = dialog.querySelector('[data-basket-targets]');
   const choices = chooser.querySelector('select');
   const chooserSubmit = chooser.querySelector('[data-basket-send]');
+  const badgeTriggers = Array.from(triggers, button => ({
+    button,label:button.getAttribute('aria-label') || button.textContent.trim(),
+  }));
   const selected = new Set();
   function read() {
     try {
@@ -42,12 +45,30 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
   let dragging;
   let externalAction = false;
 
-  const visibleItems = () => items.filter(item => item.kind === 'file' || item.scope === scope());
+  const visibleItems = () => {
+    const activeScope = scope();
+    return items.filter(item => item.kind === 'file' || item.scope === activeScope);
+  };
   const selection = () => visibleItems().filter(item => selected.has(referenceKey(item)));
-  const labelFor = item => resolve(item)?.name || item.name;
+  let displayedCount;
+
+  function refreshCount() {
+    if (!badgeTriggers.length) return;
+    const count = visibleItems().length;
+    if (count === displayedCount) return;
+    displayedCount = count;
+    for (const {button,label} of badgeTriggers) {
+      if (count) button.dataset.basketCount = String(count);
+      else delete button.dataset.basketCount;
+      button.title = `${label} · ${count} 项引用`;
+      button.setAttribute('aria-label',button.title);
+    }
+  }
+  refreshCount();
 
   function save() {
     try { storage.setItem(storageKey,JSON.stringify(items)); } catch {}
+    refreshCount();
   }
 
   function hideChooser() {
@@ -68,9 +89,10 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
   }
 
   function updateButtons() {
-    const rows = selection();
+    const rows = selection().map(resolve);
     for (const action of ['board','c4d']) dialog.querySelector(`[data-basket-action="${action}"]`).disabled =
-      !rows.some(item => resolve(item)?.[action]);
+      !rows.some(item => item?.[action]);
+    dialog.querySelector('[data-basket-action="preview-selected"]').disabled = !rows.some(item => item?.preview);
     dialog.querySelector('[data-basket-action="clear"]').disabled = !visibleItems().length;
   }
 
@@ -79,16 +101,17 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
     list.replaceChildren(...visible.map((item,index) => {
       const key = referenceKey(item);
       const result = resolve(item);
+      const label = result?.name || item.name;
       const row = owner.createElement('li');
       row.dataset.basketItem = key;
       row.draggable = true;
       const check = owner.createElement('input');
       check.type = 'checkbox';
       check.checked = selected.has(key);
-      check.setAttribute('aria-label','选中 ' + labelFor(item));
+      check.setAttribute('aria-label','选中 ' + label);
       const description = owner.createElement('div');
       const title = owner.createElement('strong');
-      title.textContent = labelFor(item);
+      title.textContent = label;
       const origin = owner.createElement('small');
       origin.textContent = item.kind === 'file' ? item.path : result?.origin || '当前目录库中的资产引用';
       origin.dir = item.kind === 'file' ? 'ltr' : 'auto';
@@ -100,7 +123,7 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
       row.append(check,description,controls);
       return row;
     }));
-    if (!visible.length) status.textContent = '素材篮为空。可从文件夹或资产卡片的右键菜单加入引用。';
+    if (!visible.length) status.textContent = '素材篮为空。拖入文件，或从右键菜单加入引用。';
     else status.textContent = visible.length + ' 项引用';
     updateButtons();
   }
@@ -122,8 +145,9 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
   }
 
   owner.defaultView.addEventListener('storage',event => {
-    if (event.storageArea !== storage || event.key !== storageKey) return;
+    if (event.storageArea !== storage || (event.key !== null && event.key !== storageKey)) return;
     items = read();
+    refreshCount();
     if (dialog.open) { hideChooser(); paint(); }
   });
 
@@ -140,6 +164,26 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
   function closeForAction() {
     externalAction = true;
     dialog.close();
+  }
+
+  function previewItems(items,lead,trigger) {
+    const rows = items.filter(item => resolve(item)?.preview);
+    if (!rows.length) return;
+    const collection = scope();
+    const key = trigger.closest('[data-basket-item]')?.dataset.basketItem;
+    try {
+      const player = preview(rows,lead,collection);
+      if (!player?.open) return;
+      player.addEventListener('close',() => {
+        if (!dialog.open || scope() !== collection || [...owner.querySelectorAll('dialog[open]')].some(open => open !== dialog)) return;
+        const row = key && [...list.children].find(item => item.dataset.basketItem === key);
+        const control = trigger.isConnected && !trigger.disabled ? trigger :
+          row?.querySelector('[data-basket-action="preview"]:enabled') ||
+          dialog.querySelector('[data-basket-action="preview-selected"]:enabled') ||
+          dialog.querySelector('[data-basket-action="close"]');
+        control?.focus({preventScroll:true});
+      },{once:true});
+    } catch (failure) { status.textContent = String(failure?.message || failure); }
   }
 
   async function chooseTarget(action) {
@@ -168,6 +212,7 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
     if (!button || button.disabled) return;
     const action = button.dataset.basketAction;
     if (action === 'close') { dialog.close(); return; }
+    if (action === 'preview-selected') { previewItems(selection(),null,button); return; }
     if (action === 'board' || action === 'c4d') { void chooseTarget(action); return; }
     const visible = visibleItems();
     if (action === 'clear') {
@@ -192,10 +237,24 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
       save();
       hideChooser();
       paint();
-    } else if (action === 'preview' || action === 'locate') {
+    } else if (action === 'preview') {
+      previewItems(visible,item,button);
+    } else if (action === 'locate') {
       closeForAction();
-      void Promise.resolve().then(() => open(action,item)).catch(failure => report(String(failure?.message || failure),true));
+      void Promise.resolve().then(() => locate(item)).catch(failure => report(String(failure?.message || failure),true));
     }
+  });
+  dialog.addEventListener('keydown',event => {
+    if (event.defaultPrevented || event.isComposing || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey ||
+        event.key.toLowerCase() !== 'a' || event.target.closest('select, textarea, input:not([type="checkbox"]), [contenteditable]')) return;
+    event.preventDefault();
+    if (event.repeat) return;
+    for (const row of list.children) {
+      selected.add(row.dataset.basketItem);
+      row.querySelector('input[type="checkbox"]').checked = true;
+    }
+    hideChooser();
+    updateButtons();
   });
   list.addEventListener('change',event => {
     if (!event.target.matches('input[type="checkbox"]')) return;
@@ -235,6 +294,7 @@ export function initTemporaryAssetBasket({dialog,scope,mount,resolve,targets,sen
 
   return {
     add,
+    refreshCount,
     show(trigger) {
       if (dialog.open || owner.querySelector('dialog[open]')) return;
       opener = trigger || owner.activeElement;

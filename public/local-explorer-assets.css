@@ -53,6 +53,22 @@
   translate: 0 -50%;
 }
 
+[data-open-temporary-basket][data-basket-count]::after {
+  content: attr(data-basket-count);
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  min-inline-size: 16px;
+  block-size: 16px;
+  padding-inline: 3px;
+  border-radius: 8px;
+  background: color-mix(in srgb,var(--accent) 13%,var(--panel));
+  color: var(--accent);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.workspace-tools-section-actions [data-open-temporary-basket]::after { margin-inline-start: auto; }
+
 .temporary-asset-basket { inline-size: min(710px,calc(100vw - 24px)); }
 .temporary-asset-basket [data-basket-list] {
   max-block-size: min(46dvh,410px);
@@ -751,29 +767,3 @@
 .explorer-paste-row p { margin: 2px 0; color: var(--muted); }
 .explorer-paste-row select { grid-column: 2; grid-row: 1 / 3; }
 .explorer-paste-errors { max-block-size: 14dvh; overflow: auto; overflow-wrap: anywhere; }
-
-.explorer-batch-tabs { inline-size: min(680px, calc(100vw - 26px)); }
-.explorer-batch-tabs form { display: grid; gap: 8px; }
-.explorer-batch-tabs form > label { display: grid; gap: 5px; }
-.explorer-batch-tabs textarea { resize: vertical; min-block-size: 5rem; max-block-size: 28dvh; }
-.explorer-batch-tabs-controls { display: flex; flex-wrap: wrap; gap: 6px; }
-.explorer-batch-tabs [role="status"] { margin: 0; color: var(--muted); }
-.explorer-batch-tabs [role="status"]:empty { display: none; }
-.explorer-batch-tabs .modal-footer { margin-block-start: 4px; flex-wrap: wrap; }
-.explorer-batch-tabs-list {
-  list-style: none;
-  max-block-size: min(35dvh, 310px);
-  margin: 0;
-  padding: 0;
-  overflow: auto;
-}
-.explorer-batch-tabs-list li {
-  display: grid;
-  grid-template-columns: minmax(0,1fr) auto;
-  gap: 6px;
-  padding: 5px 0;
-  border-block-end: 1px solid var(--line);
-}
-.explorer-batch-tabs-list bdi { overflow-wrap: anywhere; }
-.explorer-batch-tabs-list span { color: var(--muted); }
-.explorer-batch-tabs-list [data-path-status="directory"] span { color: var(--accent); }

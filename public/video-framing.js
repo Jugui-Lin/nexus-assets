@@ -139,4 +139,5 @@ export function initVideoFraming({video,player,dialog}) {
   video.addEventListener('emptied',reset);
   dialog.addEventListener('close',reset);
   new ResizeObserver(paint).observe(video);
+  return {reset};
 }

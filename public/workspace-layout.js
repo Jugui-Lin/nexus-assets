@@ -185,6 +185,7 @@ export function initWorkspaceLayout(preferences = localStorage, sharedSidebar) {
     const bottom = preferred.inspectorDock === 'bottom';
     sidebar.toggleAttribute('data-sidebar-peek',sidebarPeek);
     workArea.toggleAttribute('data-inspector-bottom',bottom && !context.split && inspectorExpanded());
+    inspector.toggleAttribute('data-dock-bottom',bottom);
     inspectorDock.hidden = !context.assetView;
     inspectorDock.setAttribute('aria-pressed',String(bottom));
     inspectorDock.title = bottom ? '将资产详情移到右侧' : '将资产详情移到底部';

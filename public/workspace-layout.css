@@ -132,6 +132,9 @@
 .workspace-pane[data-pane-inspector-bottom] {
   grid-template-rows: auto minmax(0,1fr) minmax(0,min(37%,245px));
 }
+.workspace-pane[data-pane-inspector-bottom]:has(#inspector-empty:not(.hidden)) {
+  grid-template-rows: auto minmax(0,1fr) minmax(0,min(25%,140px));
+}
 :is(.work-area[data-inspector-bottom],.workspace-pane[data-pane-inspector-bottom]) > .inspector:not([hidden]) {
   display: block;
   grid-column: 1;
@@ -145,8 +148,92 @@
   box-shadow: 0 -6px 18px #0002;
 }
 .workspace-pane[data-pane-inspector-bottom] > .inspector { grid-row: 3; }
-:is(.work-area[data-inspector-bottom],.workspace-pane[data-pane-inspector-bottom]) .preview-stage { height: 140px; }
-:is(.work-area[data-inspector-bottom],.workspace-pane[data-pane-inspector-bottom]) .inspector-empty { padding: 5px 0; }
+
+#inspector[data-dock-bottom] {
+  container: asset-details / inline-size;
+}
+
+#inspector[data-dock-bottom] .inspector-empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  text-align: start;
+  line-height: 1.5;
+}
+
+#inspector[data-dock-bottom] .inspector-empty svg { width: 30px; height: 30px; }
+#inspector[data-dock-bottom] .inspector-empty p { margin: 0; }
+
+#inspector[data-dock-bottom] #inspector-content {
+  display: grid;
+  grid-template-areas: "preview" "overview" "editor" "send";
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 16px;
+}
+
+#inspector[data-dock-bottom] .inspector-preview { grid-area: preview; }
+#inspector[data-dock-bottom] .inspector-overview { grid-area: overview; }
+#inspector[data-dock-bottom] .inspector-editor { grid-area: editor; }
+#inspector[data-dock-bottom] .send-panel { grid-area: send; margin: 0; }
+#inspector[data-dock-bottom] #inspector-content > * { min-width: 0; }
+
+#inspector[data-dock-bottom] .preview-stage { height: clamp(112px, 11cqi, 148px); }
+#inspector[data-dock-bottom] .preview-help { margin: 5px 0 0; overflow-wrap: anywhere; }
+#inspector[data-dock-bottom] .asset-title-row h2 { font-size: 15px; line-height: 1.3; }
+#inspector[data-dock-bottom] .asset-tags:empty { display: none; }
+#inspector[data-dock-bottom] .inspector-tools { margin-top: 7px; }
+#inspector[data-dock-bottom] .metadata { margin: 8px 0 0; padding-top: 8px; row-gap: 4px; }
+#inspector[data-dock-bottom] .metadata dd.path-value { padding: 4px 7px; }
+
+#inspector[data-dock-bottom] .inspector-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#inspector[data-dock-bottom] .inspector-editor .field-label { margin: 0 0 4px; }
+#inspector[data-dock-bottom] .asset-title-row .icon-button { flex-shrink: 0; }
+#inspector[data-dock-bottom] .inspector-editor :is(.metadata-pair,.inspector-notes,.team-conflict) { grid-column: 1 / -1; }
+
+#inspector[data-dock-bottom] .inspector-notes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  column-gap: 6px;
+}
+
+#inspector[data-dock-bottom] .inspector-notes .field-label { grid-column: 1 / -1; }
+#inspector[data-dock-bottom] #asset-notes { min-height: 38px; height: 44px; }
+#inspector[data-dock-bottom] #save-metadata { margin: 0; }
+
+@container asset-details (min-width: 430px) {
+  #inspector[data-dock-bottom] #inspector-content {
+    grid-template-areas: "preview overview" "editor editor" "send send";
+    grid-template-columns: minmax(138px, .65fr) minmax(0, 1fr);
+  }
+}
+
+@container asset-details (min-width: 740px) {
+  #inspector[data-dock-bottom] #inspector-content {
+    grid-template-areas: "preview overview editor" "preview overview send";
+    grid-template-columns: minmax(155px, .7fr) minmax(200px, 1fr) minmax(235px, 1.1fr);
+  }
+}
+
+@container asset-details (min-width: 1100px) {
+  #inspector[data-dock-bottom] #inspector-content {
+    grid-template-areas: "preview overview editor send";
+    grid-template-columns: minmax(180px, 220px) minmax(220px, 1fr) minmax(245px, 1.15fr) minmax(174px, .7fr);
+  }
+
+  #inspector[data-dock-bottom] .send-panel {
+    border: 0;
+    border-inline-start: 1px solid var(--line);
+    padding: 0 0 0 12px;
+  }
+}
 
 .sidebar[hidden],
 .inspector[hidden],

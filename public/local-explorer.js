@@ -5,7 +5,6 @@ import {showExplorerBatchRename} from './local-explorer-batch-rename.js';
 import {initExplorerCommandSearch} from './local-explorer-command-search.js';
 import {createExplorerDirectorySelections,explorerShotCode,initExplorerProjectFilters} from './local-explorer-project-filters.js';
 import {showExplorerPasteConflicts} from './local-explorer-paste.js';
-import {showExplorerBatchTabs} from './local-explorer-batch-tabs.js';
 import {explorerPathFormats,formatExplorerPaths} from './local-explorer-path-format.js';
 import {explorerShortcutAction,normalizeExplorerShortcuts} from './local-explorer-shortcuts.js';
 import {distinguishTabLabels} from './workspace-tab-labels.js';
@@ -435,10 +434,10 @@ export function initLocalExplorer({
   folderThumbnail,sequenceThumbnail,fileIcon,entryDetails,selectAllEntries,clipboard,pasteConflicts,fileAction,onOpenAssetLibrary,onOpenFiles,treeChildren,
   onBrowseAssets,onAddToAssets,onOpenAssetPane,onOpenAssetDetails,onSelectionChange,onQuickPreview,onDetachTab,onInspectRenderSequence,onCompareExrChannels,
   canCloseLastTab,
-  lookupAssets,onLoadAssets,onToggleFavorite,assetRating,onAddToCollection,onAddToBasket,onSendToC4d,onAddToWhiteboard,
+  lookupAssets,onLoadAssets,onToggleFavorite,assetRating,assetComparison,onAddToCollection,onAddToBasket,onSendToC4d,onAddToWhiteboard,
   canMoveIndexedFiles,onMoveIndexedFiles,onProjectDependencies,onCreateFolderShortcut,onInspectCleanup,onOpenShotBoard,searchAssets,assetSearchKey,
   projectFiltersEnabled = false,
-  checkFolderPaths,detachedWindow = false,deferInitialTab = false,preferences,
+  detachedWindow = false,deferInitialTab = false,preferences,
   copy = text => navigator.clipboard.writeText(text),
 }) {
   const panel = root?.querySelector('#local-explorer');
@@ -451,7 +450,6 @@ export function initLocalExplorer({
       getTabIdentity:() => null,showTabIdentity:() => false,canDuplicateActive:() => false,duplicateActive:() => false,
       findManagedTab:() => null,setTabPinned:() => false,closeOtherTabs:() => false,canCloseOtherTabs:() => false,
       closeManagedTab:() => false,restoreClosedTab:() => false,hasClosedTabs:() => false,
-      openBatchPaths:() => false,
       getDropTarget:() => null,getSidebarPinTarget:() => null,getDragSource:() => null,
       refreshAfterTransfer:() => false,pinFolders:() => 0,pinSidebarFolders:() => 0};
   }
@@ -849,8 +847,8 @@ export function initLocalExplorer({
   }
 
   function updateControls() {
-    const {snapshot,selected,index,history,request,fileAction} = tab;
-    const blocked = request || fileAction;
+    const {snapshot,selected,index,history,request,fileAction:activeFileAction} = tab;
+    const blocked = request || activeFileAction;
     const multiple = tab.selection.size > 1;
     const driveView = isDriveView(snapshot);
     const physical = driveView || catalogOnly() ? '' : snapshot?.directory;
@@ -864,6 +862,11 @@ export function initLocalExplorer({
     setDisabled('drives',blocked || snapshot?.directory === null);
     setDisabled('open',blocked || multiple || !selected || (!selected.isDirectory && !open));
     setDisabled('copy',blocked || !(tab.selection.size || physical));
+    setDisabled('cut-files',blocked || !clipboard || !physical || !selected);
+    setDisabled('copy-files',blocked || !clipboard || !physical || !selected);
+    setDisabled('paste-files',blocked || !clipboard || !physical);
+    setDisabled('rename-files',blocked || !fileAction || !physical || !selected);
+    setDisabled('trash-file',blocked || !fileAction || !physical || !selected || multiple);
     setDisabled('reveal',blocked || multiple || !reveal || !(selected?.path || physical));
     setDisabled('previous-page',blocked || snapshot?.previousOffset == null);
     setDisabled('next-page',blocked || snapshot?.nextOffset == null);
@@ -2026,7 +2029,9 @@ export function initLocalExplorer({
     },120);
     updateControls();
     const selectionRevision = item.selectionRevision;
+    const linkedSearchInput = locate?.linkedFilename ? search.value : null;
     const isCurrent = () => item.request === request && tabs.includes(item) &&
+      (linkedSearchInput === null || search.value === linkedSearchInput) &&
       (!locate || item === tab && isActive() && item.selectionRevision === selectionRevision);
     try {
       let dateGroups;
@@ -2453,7 +2458,15 @@ export function initLocalExplorer({
       (matches.includes(tab) ? tab : matches[0]);
   }
 
-  function revealSource(path,{directory,preferredTab,keepDirectorySearch = false} = {}) {
+  function linkedFilenameQuery(item,linkedFilename) {
+    if (!linkedFilename || item && item.searchScope !== 'folder') return;
+    const current = item?.query || '';
+    const previous = item && item.identity === linkedFilename.fileTab ? linkedFilename.previous || '' : '';
+    if (current === previous && current !== linkedFilename.value &&
+        (item !== tab || !item.snapshot || search.value.trim() === current)) return linkedFilename.value;
+  }
+
+  function revealSource(path,{directory,preferredTab,keepDirectorySearch = false,linkedFilename} = {}) {
     if (!isActive()) return false;
     const key = assetSearchKey || treePathKey;
     const target = key(path);
@@ -2462,6 +2475,9 @@ export function initLocalExplorer({
     void loadPlaces();
     seedStartupTabs();
     const item = sourceTabFor(location,preferredTab,key);
+    if (linkedFilenameQuery(item,linkedFilename) !== undefined) {
+      return revealSources(target === location ? [] : [path],{directory,preferredTab,lead:path,linkedFilename});
+    }
     if (!item) {
       if (!tabs.length || unusedFallback(tab) || tabs.length >= tabLimit) return openPath(path);
       return addTab(path,{afterCurrent:true,focusTab:false});
@@ -2488,7 +2504,7 @@ export function initLocalExplorer({
     return openPath(path,{force:stale});
   }
 
-  async function revealSources(paths,{directory,lead,preferredTab,keepTabs = false,keepSelection = false} = {}) {
+  async function revealSources(paths,{directory,lead,preferredTab,keepTabs = false,keepSelection = false,linkedFilename} = {}) {
     const key = assetSearchKey || treePathKey;
     const location = key(directory);
     if (!isActive() || !location) return false;
@@ -2511,9 +2527,11 @@ export function initLocalExplorer({
     const ordered = [...(primary ? [primary] : []),...originals.values()];
     const selected = ordered.slice(0,sourceSelectionLimit);
     let failed = false;
+    const query = linkedFilenameQuery(item,linkedFilename);
     const preserveSelection = keepSelection && !paths.length;
-    const offset = preserveSelection && key(item?.snapshot?.directory) === location ? item.snapshot.offset : undefined;
-    const navigation = {offset,locate:{paths:selected,lead:selected[0],preserveSelection,onFailure:() => { failed = true; }},
+    const offset = preserveSelection && query === undefined && key(item?.snapshot?.directory) === location ? item.snapshot.offset : undefined;
+    const navigation = {offset,query,locate:{paths:selected,lead:selected[0],preserveSelection,linkedFilename:query !== undefined,
+      onFailure:() => { failed = true; }},
       focusList:!preserveSelection,clearCatalog:item?.searchScope === 'library'};
     let opening;
     let created = !tabs.length;
@@ -2531,7 +2549,8 @@ export function initLocalExplorer({
       return {unavailable:'directory'};
     }
     if (!opened || key(getCurrentDirectory()) !== location) return false;
-    return {count:selected.length ? target.selection.size : 0,requested:selected.length,limited:ordered.length-selected.length};
+    return {count:selected.length ? target.selection.size : 0,requested:selected.length,limited:ordered.length-selected.length,
+      ...(query !== undefined && {appliedFilename:query})};
   }
 
   function restoreDetachedTab(payload) {
@@ -3087,7 +3106,7 @@ export function initLocalExplorer({
     }
   }
 
-  function contextItems(entry,current,ratingTarget) {
+  function contextItems(entry,current,ratingTarget,compareTarget) {
     const driveView = isDriveView(current);
     const directory = !driveView && current.directory;
     const path = entry?.path || directory;
@@ -3109,8 +3128,9 @@ export function initLocalExplorer({
       tools.push(row('copy-path','复制路径','Ctrl+Shift+C'),copyPathFormats(row),row('copy-names','复制所选项目名称'));
       if (directory && fileAction) tools.push(row('batch-rename','批量重命名…','F2'));
       if (directory && onAddToBasket) tools.push(row('add-to-basket','加入临时素材篮'));
-      if (directory && hasSelectedFiles() && (onAddToCollection || onSendToC4d || onAddToWhiteboard || move || ratingItem)) {
+      if (directory && hasSelectedFiles() && (onAddToCollection || onSendToC4d || onAddToWhiteboard || move || ratingItem || compareTarget)) {
         tools.push(separator);
+        if (compareTarget) tools.push(row('compare-assets','并排对比'));
         if (ratingItem) tools.push(ratingItem);
         if (onAddToCollection) tools.push(row('add-to-collection','将所选文件加入合集…'));
         if (onAddToWhiteboard) tools.push(row('add-to-whiteboard','添加到白板…'));
@@ -3207,17 +3227,24 @@ export function initLocalExplorer({
     const current = item.snapshot;
     if (!entry || !tab.selection.has(pathKey(entry.path))) selectEntry(entry);
     const revision = item.selectionRevision;
-    const ratingTarget = entry && !entry.isDirectory && current.directory && assetRating?.lookup(getSelectedEntries());
-    const items = contextItems(entry,current,ratingTarget);
+    const stillSelected = () => item === tab && current === tab.snapshot && isActive() && item.selectionRevision === revision;
+    const entries = entry && !entry.isDirectory && current.directory ? getSelectedEntries() : [];
+    const ratingTarget = entries.length && assetRating?.lookup(entries);
+    const compareTarget = assetComparison?.lookup(entries);
+    const items = contextItems(entry,current,ratingTarget,compareTarget);
     menuOpen = true;
     try {
       const action = await contextMenu({...position,items});
       if (!action || item !== tab || current !== tab.snapshot || !isActive()) return;
       const rating = /^asset-rating-([0-5])$/.exec(action);
       if (rating) {
-        const stillSelected = () => item === tab && current === tab.snapshot && isActive() && item.selectionRevision === revision;
         if (ratingTarget && stillSelected()) void performFileAction(
           () => assetRating.save({...ratingTarget,rating:Number(rating[1]),stillSelected}),current.directory);
+      } else if (action === 'compare-assets') {
+        if (compareTarget && stillSelected() && !tab.request && !tab.fileAction) {
+          if (!scroller.contains(owner.activeElement)) focusContent();
+          assetComparison.show(compareTarget,entries);
+        }
       } else void applyAction(action,entry,current);
     } catch (failure) {
       if (item.snapshot === current) report(item,String(failure?.message || failure),true);
@@ -3403,6 +3430,11 @@ export function initLocalExplorer({
     close: exit,
     open: () => openEntry(tab.selected),
     copy: () => applyAction('copy-path',tab.selected,tab.snapshot),
+    'cut-files': () => applyAction('cut',tab.selected,tab.snapshot),
+    'copy-files': () => applyAction('copy',tab.selected,tab.snapshot),
+    'paste-files': () => applyAction('paste',null,tab.snapshot),
+    'rename-files': () => applyAction(tab.selection.size > 1 ? 'batch-rename' : 'rename',tab.selected,tab.snapshot),
+    'trash-file': () => applyAction('trash',tab.selected,tab.snapshot),
     reveal: () => performFileAction(path => reveal({path}),tab.selected?.path || tab.snapshot.directory),
     'previous-page': () => navigate(tabPath(tab),{index:tab.index,offset:tab.snapshot.previousOffset}),
     'next-page': () => navigate(tabPath(tab),{index:tab.index,offset:tab.snapshot.nextOffset}),
@@ -3427,8 +3459,6 @@ export function initLocalExplorer({
         available:() => !search.disabled,run:() => search.focus()},
       {id:'new-tab',label:'新建文件夹标签页',aliases:['new tab','新标签'],
         available:() => !addTabButton.disabled,run:() => addTab()},
-      {id:'batch-tabs',label:'从文本批量打开文件夹',aliases:['batch tabs','多目录','批量标签'],
-        available:() => Boolean(checkFolderPaths),run:openBatchPaths},
       {id:'duplicate-tab',label:'复制当前标签页',aliases:['duplicate tab','duplicate','复制标签'],
         available:canDuplicateActive,run:duplicateActive},
       {id:'restore-tab',label:'重新打开已关闭的标签页',aliases:['reopen tab','undo close','恢复标签','重开标签'],
@@ -3841,15 +3871,6 @@ export function initLocalExplorer({
     return {opened:opened.length,remaining};
   }
 
-  function openBatchPaths() {
-    if (!checkFolderPaths) return false;
-    return showExplorerBatchTabs({
-      panel,active:isActive,probe:checkFolderPaths,key:treePathKey,
-      tabs:() => ({capacity:tabLimit - tabs.length,paths:new Set(tabs.map(item => treePathKey(tabPath(item))))}),
-      open:paths => openDroppedFolderTabs(paths.map(path => ({path,isDirectory:true}))),
-    });
-  }
-
   function expandDropFolder(hit) {
     const row = hit?.closest('.local-explorer-tree-row');
     if (!row || !sidebarSystem.contains(row)) return false;
@@ -4096,7 +4117,7 @@ export function initLocalExplorer({
   return {refresh,focusAddress,exit,openPath,openShellPath,revealSource,revealSources,restoreDetachedTab,show,addTab,getTabCount,getCurrentDirectory,getDirectorySearch,getFileActionDirectory,getSelectedPath,getSelectedEntry,getSelectedEntries,applyPreferences,
     getTabIdentity,showTabIdentity,hasTabIdentity:(identity,path) => Boolean(tabWithIdentity(identity,path)),
     canDuplicateActive,duplicateActive,refreshAssetDetails,
-    findManagedTab,setTabPinned,canCloseOtherTabs,closeOtherTabs,closeManagedTab,restoreClosedTab,hasClosedTabs,openBatchPaths,
+    findManagedTab,setTabPinned,canCloseOtherTabs,closeOtherTabs,closeManagedTab,restoreClosedTab,hasClosedTabs,
     getDropTarget,getSidebarPinTarget,getFolderTabsDropTarget,classifyDroppedFolders,openDroppedFolderTabs,
     expandDropFolder,clearDropFolders,getVolumeLabel,getDragSource,useAlternateMenu,
     refreshAfterTransfer,pinFolders,pinSidebarFolders,clearRecentFolders};

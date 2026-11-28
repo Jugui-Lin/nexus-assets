@@ -333,6 +333,14 @@
   background: var(--card);
 }
 
+.local-explorer-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-inline: 5px;
+  border-inline: 1px solid var(--line);
+}
+
 #file-workspace .local-explorer-bar {
   gap: 8px;
   min-block-size: 45px;
@@ -697,7 +705,8 @@
 }
 
 #file-workspace[data-explorer-drop-active] .local-explorer-content,
-#file-workspace [data-explorer-drop-active] {
+#file-workspace [data-explorer-drop-active],
+[data-open-temporary-basket][data-explorer-drop-active] {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -1172,11 +1181,13 @@
 .local-explorer-context-menu {
   position: fixed;
   z-index: 4;
+  box-sizing: border-box;
   min-inline-size: min(200px, calc(100vw - 12px));
   max-inline-size: min(308px, calc(100vw - 12px));
   max-block-size: calc(100dvh - 12px);
   padding: 4px;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid #4c5055;
   border-radius: 5px;
   background: #222426;

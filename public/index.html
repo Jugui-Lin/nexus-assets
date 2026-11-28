@@ -29,6 +29,7 @@
 <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
 <symbol id="i-compare" viewBox="0 0 24 24"><rect x="3" y="5" width="7" height="14" rx="1.5"/><rect x="14" y="5" width="7" height="14" rx="1.5"/></symbol>
 <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 4H6a2 2 0 0 0-2 2v10"/></symbol>
+<symbol id="i-clipboard" viewBox="0 0 24 24"><path d="M9 5H6a2 2 0 0 0-2 2v13h16V7a2 2 0 0 0-2-2h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M8 11h8m-8 4h8"/></symbol>
 <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 7h4l1.5-2h5L16 7h4a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="3.2"/></symbol>
 <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M10 4c.8 4 2 5.2 6 6-4 .8-5.2 2-6 6-.8-4-2-5.2-6-6 4-.8 5.2-2 6-6Zm8 10 1 2.5 2.5 1-2.5 1L18 21l-1-2.5-2.5-1 2.5-1L18 14Z"/></symbol>
 <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3m-4 4v2"/></symbol>
@@ -89,7 +90,7 @@
       </div>
       <div id="workspace-new-tab-options" popover aria-label="新建标签页">
         <button type="button" data-new-tab="files" autofocus><svg aria-hidden="true"><use href="#i-folder"/></svg>文件夹标签页</button>
-        <button type="button" data-new-tab="batch-files" hidden aria-haspopup="dialog"><svg aria-hidden="true"><use href="#i-list"/></svg>从文本批量打开文件夹…</button>
+        <button type="button" data-new-tab="whiteboard"><svg aria-hidden="true"><use href="#i-whiteboard"/></svg>白板</button>
         <hr>
         <button type="button" data-new-tab="current"><svg aria-hidden="true"><use href="#i-stack"/></svg>复制当前标签</button>
         <button type="button" data-new-tab="all"><svg aria-hidden="true"><use href="#i-grid"/></svg>全部资产</button>
@@ -161,6 +162,7 @@
               <button id="shot-dashboard" type="button" class="nav-item" aria-haspopup="dialog" aria-controls="shot-dashboard-dialog" hidden><svg aria-hidden="true"><use href="#i-grid"/></svg>镜头交付看板…</button>
               <button id="thumbnail-settings" type="button" class="nav-item hidden" data-asset-workspace-required><svg aria-hidden="true"><use href="#i-picture"/></svg>缩略图设置</button>
               <button id="team-folder-settings" type="button" class="nav-item hidden" aria-haspopup="dialog" aria-controls="team-dialog"><svg aria-hidden="true"><use href="#i-link"/></svg>团队文件夹设置</button>
+              <button id="show-hidden-folders" type="button" class="nav-item hidden" aria-haspopup="dialog" aria-controls="removed-folders-dialog" data-asset-workspace-required><svg aria-hidden="true"><use href="#i-folder"/></svg>已移除的文件夹…</button>
               <button id="team-profile-option" type="button" class="nav-item hidden" aria-haspopup="dialog"><svg aria-hidden="true"><use href="#i-person"/></svg>我的团队资料</button>
               <button id="open-recycle-bin" type="button" class="nav-item hidden" aria-haspopup="dialog" aria-controls="recycle-bin-dialog" data-asset-workspace-required><svg aria-hidden="true"><use href="#i-trash"/></svg>回收站</button>
               <button type="button" class="nav-item" data-open-temporary-basket aria-haspopup="dialog" aria-controls="temporary-asset-basket"><svg aria-hidden="true"><use href="#i-stack"/></svg>临时素材篮</button>
@@ -197,8 +199,7 @@
         <button id="sidebar-folder-toggle" class="sidebar-zone-toggle" type="button" aria-expanded="true" aria-controls="sidebar-folder-content"><svg aria-hidden="true"><use href="#i-chevron"/></svg>文件夹</button>
         <input id="folder-search" type="search" placeholder="筛选文件夹…" aria-label="筛选文件夹">
         <button id="toggle-folder-edit" class="icon-button" type="button" aria-label="编辑文件夹结构" aria-pressed="false" title="开启文件夹编辑"><svg aria-hidden="true"><use href="#i-lock"/></svg></button>
-        <button id="show-hidden-folders" class="icon-button hidden" type="button" title="已移除的文件夹" aria-label="已移除的文件夹"><svg aria-hidden="true"><use href="#i-eye"/></svg></button>
-        <button id="add-library-small" class="icon-button" type="button" title="添加资产目录" aria-label="添加资产目录"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
+        <button id="add-library-small" class="icon-button" type="button" title="添加资产目录" aria-label="添加资产目录" aria-haspopup="dialog" aria-controls="import-dialog"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
       </div>
       <div id="sidebar-folder-content">
         <div id="libraries" class="library-list sidebar-pane-scroll" tabindex="0" role="region" aria-label="资产文件夹"></div>
@@ -506,17 +507,23 @@
     <div id="dcc-drop-dock" class="dcc-drop-dock hidden" aria-label="拖到已连接的 DCC"></div>
   </main>
   <aside class="inspector" id="inspector"><div class="inspector-title">资产详情</div><div id="inspector-empty" class="inspector-empty"><svg><use href="#i-box"/></svg><p>选择一份资产<br><span>查看预览和导入选项</span></p></div><div id="inspector-content" class="hidden">
-    <div class="preview-stage"><canvas id="preview-canvas" aria-label="三维资产预览，拖动旋转，滚轮缩放"></canvas><img id="preview-image" alt="资产预览" class="hidden"><div id="preview-fallback" class="hidden"></div><span id="preview-badge" class="preview-badge">3D 预览</span><div class="preview-actions"><button id="wireframe" class="icon-button" title="切换线框"><svg><use href="#i-box"/></svg></button><button id="fit-preview" class="icon-button" title="重置预览"><svg><use href="#i-arrow"/></svg></button><button id="open-preview" class="icon-button" title="打开快速预览"><svg><use href="#i-expand"/></svg></button></div></div><p class="preview-help" id="preview-help">拖动旋转 · 滚轮缩放</p>
-    <div class="asset-title-row"><div><h2 id="asset-title"></h2><p id="asset-subtitle"></p></div><button id="detail-favorite" class="icon-button" title="收藏资产"><svg><use href="#i-star"/></svg></button></div>
-    <div id="asset-tags" class="asset-tags"></div><div class="inspector-tools"><button id="reveal-file" class="button subtle" type="button"><svg aria-hidden="true"><use href="#i-locate"/></svg>定位原文件</button><button id="show-asset-folder" class="button subtle"><svg aria-hidden="true"><use href="#i-folder"/></svg>转到资产目录</button><button id="collect-asset" class="button subtle"><svg aria-hidden="true"><use href="#i-stack"/></svg>加入合集</button></div><dl id="asset-metadata" class="metadata"></dl>
-    <label class="field-label" for="asset-name">资产名称</label><input id="asset-name" class="text-field" maxlength="200">
-    <label class="field-label" for="asset-tag-input">标签 <span>用逗号分隔</span></label><input id="asset-tag-input" class="text-field" placeholder="家具, 室内, 项目 A">
-    <div class="metadata-pair">
-      <label class="field-label">评分<select class="text-field" id="asset-rating"><option value="0">未评分</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option></select></label>
-      <label class="field-label">工作流状态<select class="text-field" id="asset-workflow"><option value="unset">未设置</option><option value="wip">制作中</option><option value="review">待审核</option><option value="approved">已审核</option><option value="archived">已归档</option></select></label>
+    <div class="inspector-preview">
+      <div class="preview-stage"><canvas id="preview-canvas" aria-label="三维资产预览，拖动旋转，滚轮缩放"></canvas><img id="preview-image" alt="资产预览" class="hidden"><div id="preview-fallback" class="hidden"></div><span id="preview-badge" class="preview-badge">3D 预览</span><div class="preview-actions"><button id="wireframe" class="icon-button" title="切换线框"><svg><use href="#i-box"/></svg></button><button id="fit-preview" class="icon-button" title="重置预览"><svg><use href="#i-arrow"/></svg></button><button id="open-preview" class="icon-button" title="打开快速预览"><svg><use href="#i-expand"/></svg></button></div></div><p class="preview-help" id="preview-help">拖动旋转 · 滚轮缩放</p>
     </div>
-    <label class="field-label" for="asset-notes">资产备注</label><textarea id="asset-notes" class="text-field" placeholder="记录来源、授权和使用说明…" rows="3"></textarea><button id="save-metadata" class="button subtle save-button">保存信息<svg><use href="#i-check"/></svg></button>
-    <div id="team-edit-conflict" class="team-conflict hidden"><p id="team-edit-conflict-message"></p><button id="team-reload-asset" class="button subtle">载入最新资料</button></div>
+    <div class="inspector-overview">
+      <div class="asset-title-row"><div><h2 id="asset-title"></h2><p id="asset-subtitle"></p></div><button id="detail-favorite" class="icon-button" title="收藏资产"><svg><use href="#i-star"/></svg></button></div>
+      <div id="asset-tags" class="asset-tags"></div><div class="inspector-tools"><button id="reveal-file" class="button subtle" type="button"><svg aria-hidden="true"><use href="#i-locate"/></svg>定位原文件</button><button id="show-asset-folder" class="button subtle"><svg aria-hidden="true"><use href="#i-folder"/></svg>转到资产目录</button><button id="collect-asset" class="button subtle"><svg aria-hidden="true"><use href="#i-stack"/></svg>加入合集</button></div><dl id="asset-metadata" class="metadata"></dl>
+    </div>
+    <div class="inspector-editor">
+      <div><label class="field-label" for="asset-name">资产名称</label><input id="asset-name" class="text-field" maxlength="200"></div>
+      <div><label class="field-label" for="asset-tag-input">标签 <span>用逗号分隔</span></label><input id="asset-tag-input" class="text-field" placeholder="家具, 室内, 项目 A"></div>
+      <div class="metadata-pair">
+        <label class="field-label">评分<select class="text-field" id="asset-rating"><option value="0">未评分</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option></select></label>
+        <label class="field-label">工作流状态<select class="text-field" id="asset-workflow"><option value="unset">未设置</option><option value="wip">制作中</option><option value="review">待审核</option><option value="approved">已审核</option><option value="archived">已归档</option></select></label>
+      </div>
+      <div class="inspector-notes"><label class="field-label" for="asset-notes">资产备注</label><textarea id="asset-notes" class="text-field" placeholder="记录来源、授权和使用说明…" rows="3"></textarea><button id="save-metadata" class="button subtle save-button">保存信息<svg><use href="#i-check"/></svg></button></div>
+      <div id="team-edit-conflict" class="team-conflict hidden"><p id="team-edit-conflict-message"></p><button id="team-reload-asset" class="button subtle">载入最新资料</button></div>
+    </div>
     <div class="send-panel"><div class="send-label"><svg><use href="#i-link"/></svg>发送到创作工具</div><select id="target-session" aria-label="目标 DCC 实例"><option value="">暂无在线实例</option></select><p id="send-hint">启动创作软件以连接 Nexus</p><div class="send-actions"><button id="send-asset" class="button primary" disabled><span id="send-asset-label">导入到当前场景</span><svg><use href="#i-arrow"/></svg></button><button id="smart-import-settings" type="button" class="button subtle hidden" aria-label="Cinema 4D 导入选项" title="导入选项"><svg><use href="#i-sliders"/></svg></button></div></div>
   </div></aside>
   </div>
@@ -542,7 +549,14 @@
         <summary aria-label="新建" aria-controls="file-workspace-new-items" aria-disabled="true" tabindex="-1"><svg aria-hidden="true"><use href="#i-plus"/></svg>新建<svg aria-hidden="true"><use href="#i-chevron"/></svg></summary>
         <div id="file-workspace-new-items" class="local-explorer-view-panel" role="group" aria-label="新建项目"></div>
       </details>
-      <button type="button" class="explorer-icon-button" data-explorer-action="copy" title="复制路径" aria-label="复制路径"><svg aria-hidden="true"><use href="#i-copy"/></svg></button>
+      <div class="local-explorer-edit-actions" role="group" aria-label="编辑所选项目">
+        <button type="button" class="explorer-icon-button" data-explorer-action="cut-files" title="剪切（Ctrl+X）" aria-label="剪切" aria-keyshortcuts="Control+X" disabled><svg aria-hidden="true"><use href="#i-scissors"/></svg></button>
+        <button type="button" class="explorer-icon-button" data-explorer-action="copy-files" title="复制（Ctrl+C）" aria-label="复制" aria-keyshortcuts="Control+C" disabled><svg aria-hidden="true"><use href="#i-copy"/></svg></button>
+        <button type="button" class="explorer-icon-button" data-explorer-action="paste-files" title="粘贴到当前文件夹（Ctrl+V）" aria-label="粘贴到当前文件夹" aria-keyshortcuts="Control+V" disabled><svg aria-hidden="true"><use href="#i-clipboard"/></svg></button>
+        <button type="button" class="explorer-icon-button" data-explorer-action="rename-files" title="重命名（F2）" aria-label="重命名" aria-keyshortcuts="F2" disabled><svg aria-hidden="true"><use href="#i-edit"/></svg></button>
+        <button type="button" class="explorer-icon-button" data-explorer-action="trash-file" title="删除（Delete）" aria-label="删除" aria-keyshortcuts="Delete" disabled><svg aria-hidden="true"><use href="#i-trash"/></svg></button>
+      </div>
+      <button type="button" class="explorer-icon-button" data-explorer-action="copy" title="复制路径" aria-label="复制路径"><svg aria-hidden="true"><use href="#i-link"/></svg></button>
       <button type="button" class="explorer-icon-button" data-explorer-action="reveal" title="在资源管理器中显示" aria-label="在资源管理器中显示"><svg aria-hidden="true"><use href="#i-drag-out"/></svg></button>
       <button type="button" class="explorer-icon-button" data-explorer-column-options title="选择详细信息列" aria-label="选择详细信息列" aria-expanded="false" hidden><svg aria-hidden="true"><use href="#i-sliders"/></svg></button>
       <details id="file-workspace-view-menu" class="local-explorer-view-menu">
@@ -714,12 +728,13 @@
 </main>
 <dialog id="temporary-asset-basket" class="modal temporary-asset-basket" aria-labelledby="temporary-asset-basket-title">
   <div class="modal-header"><h2 id="temporary-asset-basket-title">临时素材篮</h2><button type="button" class="icon-button" data-basket-action="close" aria-label="关闭"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
-  <p role="status" data-basket-status></p><ul data-basket-list aria-label="素材引用"></ul>
+  <p role="status" data-basket-status></p><ul data-basket-list aria-label="素材引用" aria-keyshortcuts="Control+A Meta+A"></ul>
   <div class="temporary-basket-targets" data-basket-targets hidden>
     <label>目标 <select aria-label="发送目标"></select></label><button type="button" class="button primary" data-basket-send disabled>发送所选</button>
   </div>
   <div class="modal-footer">
     <button type="button" class="button subtle" data-basket-action="clear">清空此处的引用</button>
+    <button type="button" class="button subtle" data-basket-action="preview-selected" disabled>预览所选</button>
     <button type="button" class="button subtle" data-basket-action="board">添加到白板</button>
     <button type="button" class="button primary" data-basket-action="c4d">发送到 Cinema 4D</button>
   </div>
@@ -1766,7 +1781,7 @@
 </dialog>
 <dialog id="quick-preview-dialog" class="modal quick-preview" aria-labelledby="quick-preview-title">
   <div class="quick-preview-header">
-    <div class="quick-preview-heading"><h2 id="quick-preview-title"></h2><p id="quick-preview-caption"></p></div>
+    <div class="quick-preview-heading"><h2 id="quick-preview-title" tabindex="-1" autofocus></h2><p id="quick-preview-caption"></p></div>
     <div class="quick-preview-header-actions">
       <select id="quick-image-background" aria-label="图像预览背景" title="图像预览背景" hidden>
         <option value="theme">界面背景</option><option value="checker">棋盘格</option><option value="black">纯黑背景</option><option value="gray">中灰背景</option><option value="white">纯白背景</option>
@@ -1785,7 +1800,7 @@
       <img id="quick-preview-image" alt="资产大图" draggable="false">
     </div>
     <div id="quick-video-player" class="quick-video-player hidden">
-      <video id="quick-preview-video" playsinline autoplay preload="auto" tabindex="0" aria-label="视频预览" aria-keyshortcuts="Space K ArrowLeft ArrowRight M F"></video>
+      <video id="quick-preview-video" playsinline autoplay preload="auto" aria-label="视频预览"></video>
       <div id="video-framing-overlay" hidden><div class="video-framing-shade" aria-hidden="true"></div></div>
       <div id="video-framing-tools" role="group" aria-label="画幅检查" hidden>
         <label><input type="checkbox" value="16:9" checked>16:9</label>
@@ -1800,7 +1815,7 @@
           <input id="quick-video-seek" type="range" min="0" max="0" step="any" value="0" aria-label="播放进度" disabled>
         </div>
         <div class="quick-video-actions">
-          <button id="quick-video-play" class="icon-button quick-video-play" type="button" aria-label="播放" title="播放（空格）" disabled><svg aria-hidden="true"><use href="#i-media-play"/></svg></button>
+          <button id="quick-video-play" class="icon-button quick-video-play" type="button" aria-label="播放" title="播放（空格）" aria-keyshortcuts="Space K ArrowLeft ArrowRight M F" disabled><svg aria-hidden="true"><use href="#i-media-play"/></svg></button>
           <span class="quick-video-time"><span id="quick-video-elapsed">0:00</span><span class="quick-video-time-divider"> / </span><span id="quick-video-duration">--:--</span></span>
           <div class="quick-video-options">
             <button id="quick-video-loop" class="button subtle" type="button" aria-expanded="false" aria-controls="quick-video-loop-panel" disabled>区间循环</button>

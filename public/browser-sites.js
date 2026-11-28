@@ -227,6 +227,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
   const navigation = get('site-navigation');
   const filter = get('browser-site-filter');
   const list = get('browser-sites');
+  const scroller = list.closest('.browser-scroll');
   const empty = get('browser-empty');
   const entry = get('browser-site-quick-url');
   const entryStatus = get('browser-site-quick-status');
@@ -306,6 +307,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
       }[phase] || '';
       teamStatus.hidden = !message;
       teamStatus.dataset.phase = phase || '';
+      for (const heading of list.querySelectorAll('[data-site-category-heading]')) updateCategoryHandle(heading);
       if (teamStatus.textContent !== message) teamStatus.textContent = message;
       teamStatus.title = error ? String(error?.message || error).slice(0,200) : '';
     },
@@ -314,7 +316,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
     initialScope:scope, read:readMetadata, normalize:normalizedMetadata, visible,
     onChange() {
       if (dialog.open) renderEditorMetadata();
-      if (!drag.busy()) paint();
+      if (!drag.busy() && !categoryDrag) paint();
     },
   });
 
@@ -483,21 +485,21 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
       grid.dataset.siteCategory = title;
       grid.toggleAttribute('data-site-bookmarks', starred);
       grid.append(...shown.map(({item, configured}) => renderCard(item, configured, oldCards.get(item.id))));
-      const heading = element('h2');
-      if (starred) heading.textContent = title;
+      const heading = element('h2', '', title);
+      if (starred) section.append(heading);
       else {
+        const header = element('header', 'browser-site-category-heading');
+        header.dataset.siteCategoryHeading = title;
         const edit = actionButton('edit', '重命名分类 ' + title, () => showCategoryEditor(title));
         edit.classList.add('browser-site-category-edit');
-        edit.draggable = true;
         edit.dataset.siteCategoryEdit = title;
         edit.setAttribute('aria-haspopup', 'dialog');
-        edit.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
-        edit.title = '点击重命名，拖动调整分类顺序';
         section.dataset.navigationCategory = title;
-        edit.prepend(element('span', '', title));
-        heading.append(edit);
+        header.append(heading, edit);
+        updateCategoryHandle(header);
+        section.append(header);
       }
-      section.append(heading, grid);
+      section.append(grid);
       sections.push(section);
     }
     const siteByUrl = new Map(sites.map(site => [site.url, site]));
@@ -562,68 +564,139 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
   categoryDialog.addEventListener('close', () => { if (!categoryDialog.open) categoryDraft = null; });
 
   function render() {
+    cancelCategoryDrag();
     drag.cancel();
     paint();
     requestMetadata();
   }
 
-  function moveCategory(title, target, after) {
-    if (title === target || !categories.includes(title) || !categories.includes(target)) return false;
+  function canReorderCategories() {
+    return !filter.value.trim() && (!teamId || !teamSync || teamStatus.dataset.phase === 'ready');
+  }
+
+  function updateCategoryHandle(header) {
+    const enabled = canReorderCategories();
+    header.toggleAttribute('data-category-movable', enabled);
+    const edit = header.querySelector('[data-site-category-edit]');
+    if (enabled) edit.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+    else edit.removeAttribute('aria-keyshortcuts');
+  }
+
+  function reorderedCategories(title, target, after) {
+    if (title === target || !categories.includes(title) || !categories.includes(target)) return null;
     const order = categories.filter(category => category !== title);
     order.splice(order.indexOf(target) + Number(after), 0, title);
-    if (order.every((category,index) => category === categories[index])) return false;
-    if (!save(sites,entryStatus,order)) return false;
+    return order.every((category,index) => category === categories[index]) ? null : order;
+  }
+
+  function moveCategory(title, target, after) {
+    if (dialog.open || categoryDialog.open) return false;
+    const order = canReorderCategories() && reorderedCategories(title,target,after);
+    if (!order || !save(sites,entryStatus,order)) return false;
     render();
     categoryButton(title)?.focus({preventScroll:true});
     return true;
   }
 
-  function clearCategoryDrop() {
-    categoryDropTarget?.removeAttribute('data-category-drop');
-    categoryDropTarget = null;
+  function showCategoryDrop(target) {
+    if (categoryDropTarget?.section === target?.section && categoryDropTarget?.after === target?.after) return;
+    categoryDropTarget?.section.removeAttribute('data-category-drop');
+    categoryDropTarget = target;
+    if (target) target.section.dataset.categoryDrop = target.after ? 'after' : 'before';
   }
 
-  list.addEventListener('dragstart', event => {
-    const title = event.target.closest('[data-site-category-edit]')?.dataset.siteCategoryEdit;
-    if (!title || !event.dataTransfer || drag.busy() || (teamId && teamSync && !teamSync.canWrite())) {
-      if (title) event.preventDefault();
+  function cancelCategoryDrag() {
+    const current = categoryDrag;
+    if (!current) return;
+    categoryDrag = null;
+    cancelAnimationFrame(current.frame);
+    current.heading.removeAttribute('data-category-dragging');
+    showCategoryDrop(null);
+    if (list.hasPointerCapture(current.pointer)) list.releasePointerCapture(current.pointer);
+  }
+
+  function updateCategoryDrag(autoscroll = true) {
+    const current = categoryDrag;
+    if (!current?.started) return;
+    current.frame = 0;
+    const {x,y,title} = current;
+    const bounds = list.getBoundingClientRect();
+    const viewport = scroller?.getBoundingClientRect();
+    if (x < bounds.left || x > bounds.right || (viewport && (y < viewport.top || y > viewport.bottom))) {
+      showCategoryDrop(null);
       return;
     }
-    categoryDrag = title;
-    event.dataTransfer.setData('text/plain',title);
-    event.dataTransfer.effectAllowed = 'move';
+    let target = null;
+    for (const section of list.querySelectorAll('[data-navigation-category]')) {
+      const {top,bottom,height} = section.getBoundingClientRect();
+      if (y < top - 12 || y > bottom + 12) continue;
+      const after = y > top + height / 2;
+      if (reorderedCategories(title,section.dataset.navigationCategory,after)) target = {section,after};
+      break;
+    }
+    showCategoryDrop(target);
+    if (viewport && autoscroll) {
+      const before = scroller.scrollTop;
+      scroller.scrollTop += y < viewport.top + 36 ? -14 : y > viewport.bottom - 36 ? 14 : 0;
+      if (scroller.scrollTop !== before) current.frame = requestAnimationFrame(() => updateCategoryDrag());
+    }
+  }
+
+  function finishCategoryDrag(commit = false) {
+    const current = categoryDrag;
+    const target = categoryDropTarget;
+    cancelCategoryDrag();
+    if (current?.started && (!commit || !target ||
+        !moveCategory(current.title,target.section.dataset.navigationCategory,target.after))) paint();
+  }
+
+  list.addEventListener('pointerdown', event => {
+    const heading = event.target.closest('[data-site-category-heading][data-category-movable]');
+    if (!heading || event.target.closest('button') || event.button !== 0 || !event.isPrimary ||
+        categoryDrag || drag.busy() || dialog.open || categoryDialog.open) return;
+    const {pointerId,clientX,clientY} = event;
+    categoryDrag = {heading,title:heading.dataset.siteCategoryHeading,pointer:pointerId,startX:clientX,startY:clientY,frame:0};
   });
-  list.addEventListener('dragover', event => {
-    if (!categoryDrag) return;
-    const target = event.target.closest('[data-navigation-category]');
-    clearCategoryDrop();
-    if (!target || target.dataset.navigationCategory === categoryDrag) return;
-    categoryDropTarget = target;
-    target.dataset.categoryDrop = categories.indexOf(categoryDrag) < categories.indexOf(target.dataset.navigationCategory)
-      ? 'after' : 'before';
+  window.addEventListener('pointermove', event => {
+    const current = categoryDrag;
+    if (!current || current.pointer !== event.pointerId) return;
+    if (event.pointerType === 'mouse' && !(event.buttons & 1)) return finishCategoryDrag();
+    if (!current.started) {
+      if (Math.hypot(event.clientX - current.startX,event.clientY - current.startY) < 6) return;
+      current.started = true;
+      current.heading.setAttribute('data-category-dragging','');
+      list.setPointerCapture(current.pointer);
+    }
+    current.x = event.clientX;
+    current.y = event.clientY;
     event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-  });
-  list.addEventListener('dragleave', event => {
-    if (!categoryDropTarget?.contains(event.relatedTarget)) clearCategoryDrop();
-  });
-  list.addEventListener('drop', event => {
-    if (!categoryDrag || !categoryDropTarget) return;
+    if (!current.frame) current.frame = requestAnimationFrame(() => updateCategoryDrag());
+  },{capture:true,passive:false});
+  window.addEventListener('pointerup', event => {
+    if (categoryDrag?.pointer !== event.pointerId) return;
+    if (categoryDrag.started) {
+      categoryDrag.x = event.clientX;
+      categoryDrag.y = event.clientY;
+      cancelAnimationFrame(categoryDrag.frame);
+      updateCategoryDrag(false);
+    }
+    finishCategoryDrag(true);
+  },{capture:true});
+  for (const type of ['pointercancel','lostpointercapture']) window.addEventListener(type,event => {
+    if (categoryDrag?.pointer === event.pointerId) finishCategoryDrag();
+  },{capture:true});
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !categoryDrag?.started) return;
     event.preventDefault();
-    const title = categoryDrag;
-    const {navigationCategory,categoryDrop} = categoryDropTarget.dataset;
-    categoryDrag = null;
-    clearCategoryDrop();
-    moveCategory(title,navigationCategory,categoryDrop === 'after');
-  });
-  window.addEventListener('dragend', () => {
-    const canceled = Boolean(categoryDrag);
-    categoryDrag = null;
-    clearCategoryDrop();
-    if (canceled) paint();
+    event.stopPropagation();
+    finishCategoryDrag();
+  },{capture:true});
+  window.addEventListener('blur', () => finishCategoryDrag());
+  list.addEventListener('dragstart', event => {
+    if (event.target.closest('[data-site-category-heading]')) event.preventDefault();
   });
   list.addEventListener('keydown', event => {
-    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+    if (!canReorderCategories() || categoryDrag || drag.busy() || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
         !['ArrowUp','ArrowDown'].includes(event.key)) return;
     const heading = event.target.closest('[data-site-category-edit]');
     if (!heading) return;
@@ -775,7 +848,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
       const opened = showing && !wasVisible;
       wasVisible = showing;
       if (next === scope && workspace === nextWorkspace && teamId === nextTeamId) {
-        if (!showing && drag.busy()) render();
+        if (!showing && (drag.busy() || categoryDrag)) render();
         else requestMetadata();
         if (opened) teamSync?.refresh();
         return;
@@ -789,8 +862,7 @@ export function initBrowserSites({navigate, onSubscribe, readMetadata, readTeam,
       if (categoryDialog.open) categoryDialog.close();
       editing = null;
       categoryDraft = null;
-      categoryDrag = null;
-      clearCategoryDrop();
+      cancelCategoryDrag();
       filter.value = entry.value = '';
       showEntryStatus();
       ({sites,categories,newSiteCategory} = teamSync?.setScope(scope,teamId) || readNavigation(scope) || defaultNavigation());

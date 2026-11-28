@@ -7,6 +7,7 @@ const aliases = {
   'file-workspace-quick-preview': 'Space 空格 快看',
   'settings': '插件 桥接 Blender Cinema 4D C4D Maya Houdini Max',
   'cloud-mounts': 'SMB WebDAV rclone 挂载 网络位置',
+  'show-hidden-folders': '恢复 找回 隐藏 恢复文件夹',
 };
 
 function fieldTitle(field) {

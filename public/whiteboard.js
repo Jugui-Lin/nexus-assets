@@ -291,7 +291,7 @@ function loadOutbox(key, teamId) {
 }
 
 export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage = async () => null, openLink,
-  locateAsset, openVideoSource, projectName, reviewAssignees, copyReviewText, searchReplacementImages,loadPresenceAvatar,
+  locateAsset, openVideoSource, reviewAssignees, searchReplacementImages,loadPresenceAvatar,
   revealPastedFile, importPastedFiles, handleDroppedFiles, loadFilePreview, colorFilter}) {
   const stackSettings = initWhiteboardStackSettings(notify);
   let normalizeSource = 'first';
@@ -564,7 +564,6 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       whiteboardHover.stop();
       navigation.close();
       videoReviews.close();
-      videoReviews.closeDispatch();
       regions.close();
       for (const video of stage.querySelectorAll('video')) video.pause();
       dismissNodePicker(true);
@@ -594,12 +593,10 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
     colorFilter.addEventListener('change',() => changeColorFilter(colorFilter.value));
   }
   const current = id => items().get(id);
-  const videoReviews = initWhiteboardVideoReview({world,current,items,notify,
+  const videoReviews = initWhiteboardVideoReview({world,current,
     visible:() => visible && !review.presenting(),
     mayEdit:() => Boolean(scope?.loaded && (!scope.teamId || canUseAssetReferences() && !scope.error)),
-    projectName:projectName || (() => '白板'),
-    scope:() => visible && !review.presenting() ? scope?.key : null,
-    assignees:() => reviewAssignees?.(scope?.workspaceKey) || [],copyText:copyReviewText,
+    assignees:() => reviewAssignees?.(scope?.workspaceKey) || [],
     commit:(id,text) => commit({id,patch:{text}}),
   });
   const canTransformImages = () => Boolean(scope && (!scope.teamId || scope.imageTransforms));
@@ -3406,8 +3403,6 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       sync();
     },
     addIndexedReferences:(target,assets,stillRequested) => insertMedia(addIndexedReferences,target,assets,stillRequested),
-    exportRepairList:videoReviews.exportReport,
-    dispatchReviewNotes:videoReviews.openDispatch,
     showRegions:regions.open,
     async focusShotRegion(id,shot,stillRequested) {
       const target = scope;
@@ -3549,7 +3544,6 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
         replaceImage?.close();
         regions.close();
         videoReviews.close();
-        videoReviews.closeDispatch();
         stackSettings.close();
         cancelNormalizeRequest();
         setNormalizeOpen(false);
@@ -3600,7 +3594,6 @@ export function initWhiteboard({panel, api, notify = () => {}, resolveAssetImage
       replaceImage?.close();
       regions.close();
       videoReviews.close();
-      videoReviews.closeDispatch();
       stackSettings.close();
       cancelNormalizeRequest();
       setNormalizeOpen(false);

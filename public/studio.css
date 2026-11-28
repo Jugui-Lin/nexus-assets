@@ -247,7 +247,6 @@ input[type="checkbox"] { accent-color: #a4adff; }
 .quick-preview-stage:fullscreen { height: 100%; border: 0; }
 .quick-video-player { position: absolute; inset: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; background: var(--bg); }
 .quick-video-player video { width: 100%; height: 100%; min-height: 0; object-fit: contain; cursor: pointer; }
-.quick-video-player video:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .quick-video-player:has(#video-framing-tools:not([hidden])) { grid-template-rows:minmax(0,1fr) auto auto; }
 #video-framing-overlay { position:absolute; overflow:hidden; pointer-events:none; z-index:1; }
 .video-framing-box,.video-framing-shade { position:absolute; }
